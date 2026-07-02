@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>klein — BT viewer</title>
+    <!-- D3 v7 is vendored locally so the dashboard works on air-gapped robot networks -->
+    <script src="/d3.v7.min.js"></script>
+    <style>
+        :root {
+            --bg-color: #111115;
+            --panel-bg: #1a1a22;
+            --border-color: #2d3748;
+            --text-main: #f1f5f9;
+            --text-muted: #94a3b8;
+
+            /* Behavior Tree Status Colors */
+            --color-IDLE: #64748b;
+            --color-RUNNING: #d97706;
+            --color-SUCCESS: #16a34a;
+            --color-FAILURE: #dc2626;
+            --color-SKIPPED: #2563eb;
+            --color-TRANSITION: #475569;
+        }
+
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background-color: var(--bg-color);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            color: var(--text-main);
+            overflow: hidden;
+        }
+
+        #ui-layer {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 10;
+            background: rgba(26, 26, 34, 0.85);
+            backdrop-filter: blur(8px);
+            padding: 15px 20px;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            pointer-events: auto;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5);
+        }
+
+        h1 { margin: 0; font-size: 1.4rem; font-weight: 600; letter-spacing: -0.025em; }
+
+        .status-tracker {
+            display: flex;
+            align-items: center;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            margin-top: 6px;
+        }
+
+        .dot {
+            width: 8px;
+            height: 8px;
+            background-color: #ef4444;
+            border-radius: 50%;
+            margin-right: 8px;
+            display: inline-block;
+        }
+        .dot.online { background-color: #22c55e; box-shadow: 0 0 8px #22c55e; }
+
+        /* SVG Graph Component Styling */
+        svg {
+            width: 100%;
+            height: 100%;
+            cursor: grab;
+        }
+        svg:active { cursor: grabbing; }
+
+        .node { cursor: pointer; }
+
+        .node-rect {
+            fill: #23232f;
+            stroke-width: 2px;
+            transition: stroke 0.1s ease, fill 0.2s ease;
+        }
+
+        /* RUNNING nodes pulse (task spec: "Yellow/Pulse") */
+        @keyframes klein-pulse {
+            0%, 100% { opacity: 1; }
+            50%      { opacity: 0.4; }
+        }
+        .node-rect.running,
+        .status-pill.running { animation: klein-pulse 1.1s ease-in-out infinite; }
+
+        /* Node Text Elements */
+        .node-name { font-size: 13px; font-weight: 500; fill: #ffffff; }
+        .node-type { font-size: 10px; font-weight: bold; fill: #38bdf8; text-transform: uppercase; letter-spacing: 0.05em; }
+        .node-uid { font-size: 9px; font-family: monospace; fill: var(--text-muted); }
+        .node-status-text { font-size: 10px; font-weight: bold; fill: #ffffff; }
+
+        /* Links/Edges connecting nodes */
+        .link {
+            fill: none;
+            stroke: #334155;
+            stroke-width: 2px;
+            transition: stroke 0.2s ease;
+        }
+
+        /* Helper Instruction Watermark */
+        #watermark {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            pointer-events: none;
+            background: rgba(0,0,0,0.3);
+            padding: 5px 10px;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <h1>klein BT viewer</h1>
+        <div class="status-tracker">
+            <span id="conn-dot" class="dot"></span>
+            <span id="conn-text">Awaiting pipeline connection...</span>
+        </div>
+    </div>
+
+    <div id="watermark">🖱️ Scroll to Zoom | Drag canvas to Pan | Click nodes to Expand/Collapse</div>
+
+    <svg id="canvas"></svg>
+
+    <script>
+        let ws;
+        let rawTreeData = null;
+        let rootNodeSnapshot = null;
+
+        const nodeWidth = 220;
+        const nodeHeight = 50;
+
+        // Setup scalable D3 viewport selections
+        const svg = d3.select("#canvas");
+        const gContainer = svg.append("g").attr("class", "draw-group");
+
+        // Attach infinite Pan & Zoom behaviors to the canvas
+        const zoomBehavior = d3.zoom()
+            .scaleExtent([0.1, 3])
+            .on("zoom", (event) => {
+                gContainer.attr("transform", event.transform);
+            });
+        svg.call(zoomBehavior);
+
+        // Define layout spacing engine configuration
+        const treeLayout = d3.tree()
+            .nodeSize([70, 300]); // [Vertical spacing between siblings, Horizontal depth spacing]
+
+        function updateTreeLayout(sourceNode) {
+            const treeData = treeLayout(rootNodeSnapshot);
+            const nodesList = treeData.descendants();
+            const linksList = treeData.links();
+
+            // Normalize horizontal depth spacing
+            nodesList.forEach(d => d.y = d.depth * 280);
+
+            // 1. RENDER EDGES / LINKS (cubic Bézier curves), keyed on stable node id
+            const linkSelection = gContainer.selectAll("path.link")
+                .data(linksList, d => d.target.data.id);
+
+            const linkEnter = linkSelection.enter().append("path")
+                .attr("class", "link")
+                .attr("d", () => {
+                    const o = { x: sourceNode.x0 || 0, y: sourceNode.y0 || 0 };
+                    return diagonalCurve({ source: o, target: o });
+                });
+
+            linkEnter.merge(linkSelection).transition().duration(250)
+                .attr("d", diagonalCurve);
+
+            linkSelection.exit().transition().duration(250)
+                .attr("d", () => {
+                    const o = { x: sourceNode.x, y: sourceNode.y };
+                    return diagonalCurve({ source: o, target: o });
+                })
+                .remove();
+
+            // 2. RENDER NODE GROUPS, keyed on stable node id (uid may be null)
+            const nodeSelection = gContainer.selectAll("g.node")
+                .data(nodesList, d => d.data.id);
+
+            const nodeEnter = nodeSelection.enter().append("g")
+                .attr("class", "node")
+                .attr("transform", `translate(${sourceNode.y0 || 0}, ${sourceNode.x0 || 0})`)
+                .on("click", (event, d) => {
+                    if (event.defaultPrevented) return;
+                    if (d.children) {
+                        d._children = d.children;
+                        d.children = null;
+                    } else {
+                        d.children = d._children;
+                        d._children = null;
+                    }
+                    updateTreeLayout(d);
+                });
+
+            // Node card background
+            nodeEnter.append("rect")
+                .attr("class", "node-rect")
+                .attr("width", nodeWidth)
+                .attr("height", nodeHeight)
+                .attr("rx", 6)
+                .attr("ry", 6)
+                .attr("y", -nodeHeight / 2)
+                .style("stroke", "var(--color-IDLE)");
+
+            // Type tag
+            nodeEnter.append("text")
+                .attr("class", "node-type")
+                .attr("x", 12)
+                .attr("y", -10)
+                .text(d => d.data.type);
+
+            // Display name (truncated)
+            nodeEnter.append("text")
+                .attr("class", "node-name")
+                .attr("x", 12)
+                .attr("y", 8)
+                .text(d => d.data.name.length > 20 ? d.data.name.substring(0, 18) + "..." : d.data.name);
+
+            // UID label (blank when this node carries no UID)
+            nodeEnter.append("text")
+                .attr("class", "node-uid")
+                .attr("x", nodeWidth - 55)
+                .attr("y", -10)
+                .text(d => d.data.uid == null ? "" : `UID ${String(d.data.uid).padStart(3, '0')}`);
+
+            // Status pill background
+            nodeEnter.append("rect")
+                .attr("class", "status-pill")
+                .attr("x", nodeWidth - 75)
+                .attr("y", 2)
+                .attr("width", 65)
+                .attr("height", 16)
+                .attr("rx", 3)
+                .style("fill", "var(--color-IDLE)");
+
+            // Status text
+            nodeEnter.append("text")
+                .attr("class", "node-status-text")
+                .attr("x", nodeWidth - 42)
+                .attr("y", 13)
+                .attr("text-anchor", "middle")
+                .text("IDLE");
+
+            // Merge + animate to final positions
+            nodeEnter.merge(nodeSelection).transition().duration(250)
+                .attr("transform", d => `translate(${d.y}, ${d.x})`);
+
+            nodeSelection.exit().transition().duration(250)
+                .attr("transform", `translate(${sourceNode.y}, ${sourceNode.x})`)
+                .remove();
+
+            // Cache positions for the next transition's origin
+            nodesList.forEach(d => {
+                d.x0 = d.x;
+                d.y0 = d.y;
+            });
+        }
+
+        // Cubic Bézier connector between horizontally-laid-out nodes
+        function diagonalCurve({ source, sourceX = source.x, sourceY = source.y, target, targetX = target.x, targetY = target.y }) {
+            const sY = sourceY + nodeWidth;
+            const tY = targetY;
+            return `M ${sY} ${sourceX}
+                    C ${(sY + tY) / 2} ${sourceX},
+                      ${(sY + tY) / 2} ${targetX},
+                      ${tY} ${targetX}`;
+        }
+
+        // ------------------------------------------------------------------ //
+        // Live status coloring — updates strokes/pills in place, no re-render
+        // ------------------------------------------------------------------ //
+        function applyStatus(telemetryMap) {
+            gContainer.selectAll("g.node").each(function(d) {
+                if (d.data.uid == null) return;             // node has no UID to match
+                const status = telemetryMap[d.data.uid];
+                if (!status) return;
+
+                const isRunning = status === "RUNNING";
+                const isTransition = status.startsWith("IDLE_");
+                // e.g. "IDLE_SUCCESS" -> base pill color SUCCESS-ish? Task maps
+                // transition markers to a muted "was X" state.
+                const baseColor = `var(--color-${status.split('_')[0]})`;
+                const strokeColor = isTransition ? "var(--color-TRANSITION)" : baseColor;
+                const label = isTransition ? "was " + status.split('_')[1] : status;
+
+                const el = d3.select(this);
+                el.select(".node-rect")
+                    .style("stroke", strokeColor)
+                    .classed("running", isRunning);
+                el.select(".status-pill")
+                    .style("fill", baseColor)
+                    .classed("running", isRunning);
+                el.select(".node-status-text").text(label);
+            });
+        }
+
+        // ------------------------------------------------------------------ //
+        // Gateway WebSocket connection (port injected by the klein backend)
+        // ------------------------------------------------------------------ //
+        function connectGatewayPipeline() {
+            // Same origin as this page — klein serves HTTP + WebSocket on one port.
+            const proto = location.protocol === "https:" ? "wss" : "ws";
+            ws = new WebSocket(`${proto}://${location.host}/ws`);
+
+            const dot = d3.select("#conn-dot");
+            const txt = d3.select("#conn-text");
+
+            ws.onopen = () => {
+                dot.attr("class", "dot online");
+                txt.text("Connected to klein Gateway // Streaming 10Hz");
+            };
+
+            ws.onclose = () => {
+                dot.attr("class", "dot");
+                txt.text("Pipeline Offline. Retrying network route...");
+                setTimeout(connectGatewayPipeline, 2000);
+            };
+
+            ws.onerror = () => ws.close();
+
+            ws.onmessage = (event) => {
+                const message = JSON.parse(event.data);
+
+                if (message.type === "layout") {
+                    rawTreeData = message.data;
+                    if (!rawTreeData) return;
+
+                    rootNodeSnapshot = d3.hierarchy(rawTreeData);
+                    rootNodeSnapshot.x0 = window.innerHeight / 2;
+                    rootNodeSnapshot.y0 = 0;
+
+                    updateTreeLayout(rootNodeSnapshot);
+
+                    svg.transition().duration(500).call(
+                        zoomBehavior.transform,
+                        d3.zoomIdentity.translate(80, window.innerHeight / 2).scale(0.8)
+                    );
+                }
+
+                else if (message.type === "status" && rootNodeSnapshot) {
+                    applyStatus(message.data);
+                }
+            };
+        }
+
+        window.addEventListener("DOMContentLoaded", connectGatewayPipeline);
+    </script>
+</body>
+</html>

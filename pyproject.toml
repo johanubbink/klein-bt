@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "klein"
+version = "0.1.0"
+description = "Lightweight CLI telemetry dashboard for BehaviorTree.CPP v4 over ZeroMQ."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Johan Ubbink" }]
+dependencies = [
+    "pyzmq>=25",
+    "websockets>=14",
+]
+
+[project.scripts]
+klein = "klein.gateway:main_cli"
+
+[tool.setuptools]
+# Only ship the klein package; the sibling prototype scripts stay out of the wheel.
+packages = ["klein"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+# Bundle the dashboard and the vendored D3 so they ship on pip install.
+klein = ["index.html", "d3.v7.min.js"]

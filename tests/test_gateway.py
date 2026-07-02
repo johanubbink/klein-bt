@@ -229,6 +229,39 @@ class StaticAssetsTest(unittest.TestCase):
                 fresh.ctx.destroy(linger=0)
 
 
+class RobotStateTest(unittest.TestCase):
+    def setUp(self):
+        self.gw = KleinGateway("127.0.0.1", 1667, 8080)
+
+    def tearDown(self):
+        self.gw.ctx.destroy(linger=0)
+
+    def test_initial_state_is_disconnected(self):
+        msg = json.loads(self.gw._robot_state_json)
+        self.assertEqual(msg["type"], "robot")
+        self.assertFalse(msg["connected"])
+        self.assertFalse(self.gw._robot_connected)
+
+    def test_change_updates_cached_message(self):
+        self.gw._set_robot_state(True, "Connected to robot at tcp://x")
+        self.assertTrue(self.gw._robot_connected)
+        msg = json.loads(self.gw._robot_state_json)
+        self.assertTrue(msg["connected"])
+        self.assertEqual(msg["detail"], "Connected to robot at tcp://x")
+
+    def test_no_op_when_unchanged(self):
+        self.gw._set_robot_state(True, "same")
+        cached = self.gw._robot_state_json
+        self.gw._set_robot_state(True, "same")       # identical -> not rebuilt/rebroadcast
+        self.assertIs(self.gw._robot_state_json, cached)
+
+    def test_transition_back_to_disconnected(self):
+        self.gw._set_robot_state(True, "up")
+        self.gw._set_robot_state(False, "down — retrying…")
+        self.assertFalse(self.gw._robot_connected)
+        self.assertEqual(json.loads(self.gw._robot_state_json)["detail"], "down — retrying…")
+
+
 class HttpResponseTest(unittest.TestCase):
     def test_headers_and_body(self):
         r = KleinGateway._http_response(200, b"hello", "text/plain; charset=utf-8")

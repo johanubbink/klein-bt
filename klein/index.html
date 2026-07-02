@@ -67,6 +67,29 @@
             display: inline-block;
         }
         .dot.online { background-color: #22c55e; box-shadow: 0 0 8px #22c55e; }
+        .dot.warn { background-color: var(--color-RUNNING); box-shadow: 0 0 8px var(--color-RUNNING); }
+
+        /* Hard-to-miss banner shown when klein cannot reach the robot (or the
+           gateway itself drops). Hidden until something is actually wrong. */
+        #robot-banner {
+            display: none;
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 20;
+            max-width: 80%;
+            padding: 12px 22px;
+            border-radius: 8px;
+            text-align: center;
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: #ffffff;
+            background: var(--color-RUNNING);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.6);
+        }
+        #robot-banner.visible { display: block; }
 
         /* SVG Graph Component Styling */
         svg {
@@ -126,9 +149,11 @@
         <h1>klein BT viewer</h1>
         <div class="status-tracker">
             <span id="conn-dot" class="dot"></span>
-            <span id="conn-text">Awaiting pipeline connection...</span>
+            <span id="conn-text">Connecting to klein gateway…</span>
         </div>
     </div>
+
+    <div id="robot-banner"></div>
 
     <div id="watermark">🖱️ Scroll to Zoom | Drag canvas to Pan | Click nodes to Expand/Collapse</div>
 
@@ -136,6 +161,13 @@
 
     <script>
         let rootNodeSnapshot = null;
+
+        // The dashboard depends on two links: browser <-> klein (this WebSocket)
+        // and klein <-> robot (reported by klein). We track both so the UI can
+        // say precisely which one is down.
+        let gatewayConnected = false;
+        let robotConnected = false;
+        let robotDetail = "Connecting to klein gateway…";
 
         const nodeWidth = 220;
         const nodeHeight = 50;
@@ -310,6 +342,30 @@
             });
         }
 
+        // Reflect both links: green when the robot is streaming, amber (plus a
+        // banner) when klein is up but the robot is unreachable, red when klein
+        // itself can't be reached.
+        function updateConnectionUI() {
+            const dot = d3.select("#conn-dot");
+            const txt = d3.select("#conn-text");
+            const banner = d3.select("#robot-banner");
+
+            if (!gatewayConnected) {
+                dot.attr("class", "dot");
+                txt.text("klein gateway offline — reconnecting…");
+                banner.text("⚠  Lost connection to the klein gateway — reconnecting…")
+                      .attr("class", "visible");
+            } else if (!robotConnected) {
+                dot.attr("class", "dot warn");
+                txt.text(robotDetail);
+                banner.text("⚠  " + robotDetail).attr("class", "visible");
+            } else {
+                dot.attr("class", "dot online");
+                txt.text(robotDetail);
+                banner.attr("class", "");   // robot is streaming: hide the banner
+            }
+        }
+
         // ------------------------------------------------------------------ //
         // Gateway WebSocket connection
         // ------------------------------------------------------------------ //
@@ -318,17 +374,15 @@
             const proto = location.protocol === "https:" ? "wss" : "ws";
             const ws = new WebSocket(`${proto}://${location.host}/ws`);
 
-            const dot = d3.select("#conn-dot");
-            const txt = d3.select("#conn-text");
-
             ws.onopen = () => {
-                dot.attr("class", "dot online");
-                txt.text("Connected to klein Gateway // Streaming 10Hz");
+                gatewayConnected = true;
+                updateConnectionUI();       // klein sends the robot's state right after
             };
 
             ws.onclose = () => {
-                dot.attr("class", "dot");
-                txt.text("Pipeline Offline. Retrying network route...");
+                gatewayConnected = false;
+                robotConnected = false;     // with klein gone we no longer know the robot
+                updateConnectionUI();
                 setTimeout(connectGatewayPipeline, 2000);
             };
 
@@ -355,6 +409,12 @@
 
                 else if (message.type === "status" && rootNodeSnapshot) {
                     applyStatus(message.data);
+                }
+
+                else if (message.type === "robot") {
+                    robotConnected = message.connected;
+                    robotDetail = message.detail;
+                    updateConnectionUI();
                 }
             };
         }

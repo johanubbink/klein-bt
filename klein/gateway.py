@@ -93,7 +93,14 @@ class KleinGateway:
         self.clients = set()
 
         self._node_seq = 0                  # stable per-node id (uid may be null)
-        self._robot_ok = True               # for transition logging
+
+        # Robot reachability, mirrored to dashboards so a blank canvas is never
+        # ambiguous. Starts "not connected" until the first successful handshake.
+        self._robot_connected = False
+        self._robot_detail = f"Connecting to robot at {self.robot_endpoint}…"
+        self._robot_state_json = json.dumps(
+            {"type": "robot", "connected": False, "detail": self._robot_detail}
+        )
 
         # request path -> (body_bytes, content_type); populated once in run().
         self._static = {}
@@ -223,6 +230,23 @@ class KleinGateway:
         # every connecting (or reconnecting) client is sent this same frame.
         self._layout_json = json.dumps({"type": "layout", "data": self.tree_structure})
 
+    def _set_robot_state(self, connected, detail):
+        """Record robot reachability and push it to dashboards on change.
+
+        The latest state is cached so a dashboard that connects later is told
+        immediately whether the robot is reachable (see ``ws_handler``). Only
+        real changes are broadcast, so this is safe to call on the 10 Hz path.
+        """
+        if connected == self._robot_connected and detail == self._robot_detail:
+            return
+        self._robot_connected = connected
+        self._robot_detail = detail
+        self._robot_state_json = json.dumps(
+            {"type": "robot", "connected": connected, "detail": detail}
+        )
+        if self.clients:
+            websockets.broadcast(self.clients, self._robot_state_json)
+
     async def fetch_layout(self):
         """Handshake with the robot to load the tree, retrying until it works.
 
@@ -244,6 +268,7 @@ class KleinGateway:
                     f"[klein] tree layout loaded from {self.robot_endpoint} "
                     f"({self._node_seq} nodes unrolled)."
                 )
+                self._set_robot_state(True, f"Connected to robot at {self.robot_endpoint}")
                 if self.clients:  # push to dashboards that connected while we waited
                     websockets.broadcast(self.clients, self._layout_json)
                 return
@@ -253,6 +278,9 @@ class KleinGateway:
                     f"[klein] waiting for robot at {self.robot_endpoint} "
                     f"({exc}); retrying in {wait:.0f}s...",
                     file=sys.stderr,
+                )
+                self._set_robot_state(
+                    False, f"Waiting for robot at {self.robot_endpoint}…"
                 )
                 await asyncio.sleep(wait)
 
@@ -287,18 +315,22 @@ class KleinGateway:
                 if reply and len(reply) >= 2 and reply[0] != b"error":
                     updates = self.parse_status(reply[1])
                     if updates:
-                        if not self._robot_ok:
+                        if not self._robot_connected:
                             print("[klein] robot telemetry resumed.")
-                        self._robot_ok = True
+                        self._set_robot_state(
+                            True, f"Connected to robot at {self.robot_endpoint}"
+                        )
                         websockets.broadcast(
                             self.clients,
                             json.dumps({"type": "status", "data": updates}),
                         )
             except RobotTimeout:
-                if self._robot_ok:
+                if self._robot_connected:
                     print("[klein] robot status poll timed out; retrying...",
                           file=sys.stderr)
-                self._robot_ok = False
+                self._set_robot_state(
+                    False, f"Lost connection to robot at {self.robot_endpoint} — retrying…"
+                )
             except Exception as exc:  # never let the poller die
                 print(f"[klein] poller error: {exc}", file=sys.stderr)
             await asyncio.sleep(POLL_INTERVAL)
@@ -337,6 +369,7 @@ class KleinGateway:
             if self._layout_json is not None:
                 await websocket.send(self._layout_json)
             # else: fetch_layout() will broadcast the layout to us once it loads.
+            await websocket.send(self._robot_state_json)  # tell it the robot's reachability now
             async for _message in websocket:
                 pass  # clients are receive-only
         except websockets.ConnectionClosed:

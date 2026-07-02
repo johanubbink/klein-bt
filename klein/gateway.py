@@ -38,34 +38,15 @@ import websockets
 from websockets.datastructures import Headers
 from websockets.http11 import Response
 
-# --------------------------------------------------------------------------- #
-# Groot2 wire protocol (verified against BehaviorTree.CPP groot2_protocol.h)
-# --------------------------------------------------------------------------- #
-PROTOCOL_ID = 2                 # groot2_protocol.h :: kProtocolID
-REQ_FULLTREE = ord("T")         # RequestType::FULLTREE — returns the tree XML
-REQ_STATUS = ord("S")           # RequestType::STATUS   — returns the status buffer
-
-# Request header, little-endian: protocol_id (u8) | request_type (u8) | unique_id (u32)
-HEADER_FORMAT = "<BBI"
-
-# Status buffer: consecutive 3-byte records, node_uid (u16) | status_int (u8)
-STATUS_RECORD_FORMAT = "<HB"
-STATUS_RECORD_SIZE = 3
-
-# NodeStatus ints (basic_types.h). The publisher encodes "just became IDLE,
-# previously X" as (10 + X), so any value in 10..14 means the node is now IDLE.
-STATUS_MAP = {
-    0: "IDLE",
-    1: "RUNNING",
-    2: "SUCCESS",
-    3: "FAILURE",
-    4: "SKIPPED",
-    10: "IDLE_IDLE",
-    11: "IDLE_RUNNING",
-    12: "IDLE_SUCCESS",
-    13: "IDLE_FAILURE",
-    14: "IDLE_SKIPPED",
-}
+from .groot2_protocol import (
+    HEADER_FORMAT,
+    PROTOCOL_ID,
+    REQ_FULLTREE,
+    REQ_STATUS,
+    STATUS_RECORD_FORMAT,
+    STATUS_RECORD_SIZE,
+    decode_status,
+)
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 
@@ -73,6 +54,13 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 POLL_INTERVAL = 0.1             # 10 Hz status poll
 REQUEST_TIMEOUT = 2.0           # seconds to wait for a robot reply
 LAYOUT_RETRY_MAX = 5.0          # cap on handshake retry backoff
+
+# Static files served over HTTP, keyed by request path ("/" -> "/index.html").
+_STATIC_ROUTES = {
+    "/index.html": ("index.html", "text/html; charset=utf-8"),
+    "/d3.v7.min.js": ("d3.v7.min.js", "text/javascript; charset=utf-8"),
+}
+_INDEX_FALLBACK = b"<!doctype html><h1>klein: index.html missing from package</h1>"
 
 
 class RobotTimeout(Exception):
@@ -101,14 +89,14 @@ class KleinGateway:
 
         self.all_behavior_trees = {}        # tree_id -> root <element> of that block
         self.tree_structure = None          # unrolled nested dict sent to clients
+        self._layout_json = None            # cached layout frame, rebuilt each handshake
         self.clients = set()
 
         self._node_seq = 0                  # stable per-node id (uid may be null)
         self._robot_ok = True               # for transition logging
 
-        # Static assets served over HTTP on the same port.
-        self._index_html = None
-        self._d3_js = None
+        # request path -> (body_bytes, content_type); populated once in run().
+        self._static = {}
 
     # ------------------------------------------------------------------ #
     # ZeroMQ request/reply
@@ -119,11 +107,9 @@ class KleinGateway:
         throw it away and start clean."""
         if self.socket is not None:
             self.socket.close(linger=0)
-        sock = self.ctx.socket(zmq.REQ)
-        sock.setsockopt(zmq.LINGER, 0)
-        sock.connect(self.robot_endpoint)
-        self.socket = sock
-        return sock
+        self.socket = self.ctx.socket(zmq.REQ)
+        self.socket.setsockopt(zmq.LINGER, 0)
+        self.socket.connect(self.robot_endpoint)
 
     async def _request(self, request_type):
         """Send one request and return the multipart reply frames.
@@ -233,9 +219,9 @@ class KleinGateway:
         self._node_seq = 0
         self.tree_structure = self.unroll_node(self.all_behavior_trees[main_tree_id])
         self.tree_structure["root_tree_id"] = main_tree_id
-
-    def _layout_message(self):
-        return json.dumps({"type": "layout", "data": self.tree_structure})
+        # Serialize once: the layout is immutable until the next handshake, so
+        # every connecting (or reconnecting) client is sent this same frame.
+        self._layout_json = json.dumps({"type": "layout", "data": self.tree_structure})
 
     async def fetch_layout(self):
         """Handshake with the robot to load the tree, retrying until it works.
@@ -259,7 +245,7 @@ class KleinGateway:
                     f"({self._node_seq} nodes unrolled)."
                 )
                 if self.clients:  # push to dashboards that connected while we waited
-                    websockets.broadcast(self.clients, self._layout_message())
+                    websockets.broadcast(self.clients, self._layout_json)
                 return
             except (RobotTimeout, ValueError, ET.ParseError) as exc:
                 wait = min(float(attempt), LAYOUT_RETRY_MAX)
@@ -275,40 +261,46 @@ class KleinGateway:
     # ------------------------------------------------------------------ #
     @staticmethod
     def parse_status(buffer):
-        """Unpack a status buffer into a {node_uid: status_str} dict."""
-        updates = {}
+        """Unpack a status buffer into ``{node_uid: {"status", "from"}}``.
+
+        ``from`` is the previous status name for an idle-transition record, else
+        ``None`` (see ``groot2_protocol.decode_status``). A trailing partial
+        record is ignored.
+        """
         usable = len(buffer) - (len(buffer) % STATUS_RECORD_SIZE)
-        for offset in range(0, usable, STATUS_RECORD_SIZE):
-            node_uid, status_int = struct.unpack_from(STATUS_RECORD_FORMAT, buffer, offset)
-            updates[node_uid] = STATUS_MAP.get(status_int, "UNKNOWN")
+        records = struct.iter_unpack(STATUS_RECORD_FORMAT, memoryview(buffer)[:usable])
+        updates = {}
+        for node_uid, status_int in records:
+            status, transitioned_from = decode_status(status_int)
+            updates[node_uid] = {"status": status, "from": transitioned_from}
         return updates
 
     async def status_poller(self):
         """Poll the robot at 10 Hz (only while clients are watching) and
         broadcast parsed status frames."""
         while True:
-            if self.clients:
-                try:
-                    reply = await self._request(REQ_STATUS)
-                    if reply and len(reply) >= 2 and reply[0] != b"error":
-                        updates = self.parse_status(reply[1])
-                        if updates:
-                            if not self._robot_ok:
-                                print("[klein] robot telemetry resumed.")
-                            self._robot_ok = True
-                            websockets.broadcast(
-                                self.clients,
-                                json.dumps({"type": "status", "data": updates}),
-                            )
-                except RobotTimeout:
-                    if self._robot_ok:
-                        print(
-                            "[klein] robot status poll timed out; retrying...",
-                            file=sys.stderr,
+            if not self.clients:
+                await asyncio.sleep(POLL_INTERVAL)
+                continue
+            try:
+                reply = await self._request(REQ_STATUS)
+                if reply and len(reply) >= 2 and reply[0] != b"error":
+                    updates = self.parse_status(reply[1])
+                    if updates:
+                        if not self._robot_ok:
+                            print("[klein] robot telemetry resumed.")
+                        self._robot_ok = True
+                        websockets.broadcast(
+                            self.clients,
+                            json.dumps({"type": "status", "data": updates}),
                         )
-                    self._robot_ok = False
-                except Exception as exc:  # never let the poller die
-                    print(f"[klein] poller error: {exc}", file=sys.stderr)
+            except RobotTimeout:
+                if self._robot_ok:
+                    print("[klein] robot status poll timed out; retrying...",
+                          file=sys.stderr)
+                self._robot_ok = False
+            except Exception as exc:  # never let the poller die
+                print(f"[klein] poller error: {exc}", file=sys.stderr)
             await asyncio.sleep(POLL_INTERVAL)
 
     # ------------------------------------------------------------------ #
@@ -323,19 +315,18 @@ class KleinGateway:
         return Response(status, HTTPStatus(status).phrase, headers, body)
 
     def _process_request(self, connection, request):
-        """Serve static assets over plain HTTP; let ``/ws`` upgrade to a
+        """Serve static files over plain HTTP; let ``/ws`` upgrade to a
         WebSocket. Runs for every incoming connection before the handshake."""
         path = request.path.split("?", 1)[0]
         if path == "/ws":
             return None  # not an HTTP response -> proceed with the WS upgrade
-        if path in ("/", "/index.html"):
-            return self._http_response(200, self._index_html, "text/html; charset=utf-8")
-        if path == "/d3.v7.min.js":
-            if self._d3_js is None:
-                return self._http_response(404, b"d3.v7.min.js not bundled",
-                                           "text/plain; charset=utf-8")
-            return self._http_response(200, self._d3_js, "text/javascript; charset=utf-8")
-        return self._http_response(404, b"not found", "text/plain; charset=utf-8")
+        if path == "/":
+            path = "/index.html"
+        asset = self._static.get(path)
+        if asset is None:
+            return self._http_response(404, b"not found", "text/plain; charset=utf-8")
+        body, content_type = asset
+        return self._http_response(200, body, content_type)
 
     async def ws_handler(self, websocket):
         """Push the layout on connect (if loaded), then keep the connection open
@@ -343,8 +334,8 @@ class KleinGateway:
         self.clients.add(websocket)
         print(f"[klein] dashboard connected ({len(self.clients)} active).")
         try:
-            if self.tree_structure is not None:
-                await websocket.send(self._layout_message())
+            if self._layout_json is not None:
+                await websocket.send(self._layout_json)
             # else: fetch_layout() will broadcast the layout to us once it loads.
             async for _message in websocket:
                 pass  # clients are receive-only
@@ -354,6 +345,23 @@ class KleinGateway:
             self.clients.discard(websocket)
             print(f"[klein] dashboard disconnected ({len(self.clients)} active).")
 
+    def _load_static(self):
+        """Load the packaged static files into memory once, keyed by URL path.
+
+        A missing ``index.html`` falls back to a stub page; a missing d3 bundle
+        just means that route 404s (and the dashboard can't render).
+        """
+        for path, (filename, content_type) in _STATIC_ROUTES.items():
+            body = _load_asset(filename)
+            if body is not None:
+                self._static[path] = (body, content_type)
+        self._static.setdefault(
+            "/index.html", (_INDEX_FALLBACK, "text/html; charset=utf-8")
+        )
+        if "/d3.v7.min.js" not in self._static:
+            print("[klein] warning: d3.v7.min.js not bundled; dashboard will not render.",
+                  file=sys.stderr)
+
     async def run(self, open_browser=False):
         """Serve HTTP+WebSocket on one port; load the layout and poll forever."""
         # Stray non-WebSocket TCP connections to the port (health checks, port
@@ -361,13 +369,7 @@ class KleinGateway:
         # client connects/disconnects ourselves, so silence the library log.
         logging.getLogger("websockets.server").setLevel(logging.CRITICAL)
 
-        self._index_html = _load_asset("index.html") or (
-            b"<!doctype html><h1>klein: index.html missing from package</h1>"
-        )
-        self._d3_js = _load_asset("d3.v7.min.js")
-        if self._d3_js is None:
-            print("[klein] warning: d3.v7.min.js not bundled; dashboard will not render.",
-                  file=sys.stderr)
+        self._load_static()
 
         # The server starts accepting connections here, so the dashboard page
         # loads (and shows "connecting…") even while we wait for the robot.

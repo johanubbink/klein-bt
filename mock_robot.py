@@ -14,14 +14,19 @@ Then, in another shell:
     klein --robot-port <same-port>
 """
 import argparse
-import random
 import struct
 
 import zmq
 
-PROTOCOL_ID = 2
-REQ_FULLTREE = ord("T")
-REQ_STATUS = ord("S")
+from klein.groot2_protocol import (
+    HEADER_FORMAT,
+    IDLE_TRANSITION,
+    PROTOCOL_ID,
+    REQ_FULLTREE,
+    REQ_STATUS,
+    STATUS_RECORD_FORMAT,
+    NodeStatus,
+)
 
 # A tree with two nested subtrees; every node carries an integer _uid, exactly
 # as BehaviorTree.CPP emits when add_metadata=true.
@@ -64,9 +69,12 @@ PARENTS = {
     5: [1, 3], 31: [1, 8, 30], 32: [1, 8, 30], 12: [1],
 }
 
-# NodeStatus ints
-IDLE, RUNNING, SUCCESS, FAILURE = 0, 1, 2, 3
-IDLE_FROM_SUCCESS, IDLE_FROM_FAILURE = 12, 13
+# Status values used by the animation, derived from the shared protocol enum.
+IDLE = NodeStatus.IDLE
+RUNNING = NodeStatus.RUNNING
+FAILURE = NodeStatus.FAILURE
+IDLE_FROM_SUCCESS = IDLE_TRANSITION + NodeStatus.SUCCESS   # 12
+IDLE_FROM_FAILURE = IDLE_TRANSITION + NodeStatus.FAILURE   # 13
 
 
 def build_status_buffer(tick):
@@ -93,7 +101,7 @@ def build_status_buffer(tick):
 
     buf = bytearray()
     for uid in ALL_UIDS:
-        buf += struct.pack("<HB", uid, status[uid])
+        buf += struct.pack(STATUS_RECORD_FORMAT, uid, status[uid])
     return bytes(buf)
 
 
@@ -101,11 +109,11 @@ def reply_header(request_first_frame):
     """Build the 22-byte Groot2 reply header (echo request + 16-byte tree UUID)."""
     # request frame is protocol(u8) type(u8) unique_id(u32); echo it back.
     if len(request_first_frame) >= 6:
-        _proto, req_type, unique_id = struct.unpack("<BBI", request_first_frame[:6])
+        _proto, req_type, unique_id = struct.unpack(HEADER_FORMAT, request_first_frame[:6])
     else:
         req_type, unique_id = 0, 0
     tree_uuid = bytes(range(16))  # any stable 16-byte id
-    return struct.pack("<BBI", PROTOCOL_ID, req_type, unique_id) + tree_uuid
+    return struct.pack(HEADER_FORMAT, PROTOCOL_ID, req_type, unique_id) + tree_uuid
 
 
 def main():

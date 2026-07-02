@@ -58,6 +58,12 @@ python mock_robot.py --port 1777      # in one shell
 klein --robot-port 1777               # in another
 ```
 
+Run the unit tests (no extra dependencies — stdlib `unittest`):
+
+```bash
+python -m unittest discover -s tests -t .
+```
+
 ## License
 
 klein is released under the MIT License — see [LICENSE](LICENSE).

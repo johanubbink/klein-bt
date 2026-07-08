@@ -24,5 +24,10 @@ packages = ["klein"]
 include-package-data = true
 
 [tool.setuptools.package-data]
-# Bundle the dashboard and the vendored D3 so they ship on pip install.
-klein = ["index.html", "d3.v7.min.js"]
+# Bundle the dashboard web assets (and the vendored D3) so they ship on pip install.
+klein = [
+    "static/index.html",
+    "static/styles.css",
+    "static/app.js",
+    "static/d3.v7.min.js",
+]

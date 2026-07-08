@@ -7,8 +7,8 @@ then streams 10 Hz status telemetry to browser dashboards over WebSockets.
 
 Everything the browser needs is served from a **single port** (``--port``):
 
-* plain HTTP for the dashboard (``/`` and ``/index.html``) and the bundled D3.js
-  (``/d3.v7.min.js``), and
+* plain HTTP for the dashboard (``/`` and ``/index.html``), its ``/styles.css``
+  and ``/app.js``, and the bundled D3.js (``/d3.v7.min.js``), and
 * a WebSocket endpoint (``/ws``) that pushes the unrolled tree layout on connect
   and then broadcasts live status frames.
 
@@ -49,6 +49,7 @@ from .groot2_protocol import (
 )
 
 PACKAGE_DIR = Path(__file__).resolve().parent
+STATIC_DIR = PACKAGE_DIR / "static"    # dashboard web assets live here, not beside the .py
 
 # Timeouts / cadence
 POLL_INTERVAL = 0.1             # 10 Hz status poll
@@ -58,6 +59,8 @@ LAYOUT_RETRY_MAX = 5.0          # cap on handshake retry backoff
 # Static files served over HTTP, keyed by request path ("/" -> "/index.html").
 _STATIC_ROUTES = {
     "/index.html": ("index.html", "text/html; charset=utf-8"),
+    "/styles.css": ("styles.css", "text/css; charset=utf-8"),
+    "/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/d3.v7.min.js": ("d3.v7.min.js", "text/javascript; charset=utf-8"),
 }
 _INDEX_FALLBACK = b"<!doctype html><h1>klein: index.html missing from package</h1>"
@@ -70,7 +73,7 @@ class RobotTimeout(Exception):
 def _load_asset(name):
     """Read a packaged static asset as bytes, or None if it is missing."""
     try:
-        return (PACKAGE_DIR / name).read_bytes()
+        return (STATIC_DIR / name).read_bytes()
     except OSError:
         return None
 
@@ -347,8 +350,9 @@ class KleinGateway:
         return Response(status, HTTPStatus(status).phrase, headers, body)
 
     def _process_request(self, connection, request):
-        """Serve static files over plain HTTP; let ``/ws`` upgrade to a
-        WebSocket. Runs for every incoming connection before the handshake."""
+        """Serve the dashboard's static files (HTML, CSS, JS, D3) over plain
+        HTTP; let ``/ws`` upgrade to a WebSocket. Runs for every incoming
+        connection before the handshake."""
         path = request.path.split("?", 1)[0]
         if path == "/ws":
             return None  # not an HTTP response -> proceed with the WS upgrade
@@ -381,8 +385,9 @@ class KleinGateway:
     def _load_static(self):
         """Load the packaged static files into memory once, keyed by URL path.
 
-        A missing ``index.html`` falls back to a stub page; a missing d3 bundle
-        just means that route 404s (and the dashboard can't render).
+        A missing ``index.html`` falls back to a stub page; a missing
+        render-critical asset (D3 or the dashboard script) just means that route
+        404s (and the dashboard can't render).
         """
         for path, (filename, content_type) in _STATIC_ROUTES.items():
             body = _load_asset(filename)
@@ -391,9 +396,11 @@ class KleinGateway:
         self._static.setdefault(
             "/index.html", (_INDEX_FALLBACK, "text/html; charset=utf-8")
         )
-        if "/d3.v7.min.js" not in self._static:
-            print("[klein] warning: d3.v7.min.js not bundled; dashboard will not render.",
-                  file=sys.stderr)
+        # The dashboard needs both D3 and its own script to render at all.
+        for asset in ("d3.v7.min.js", "app.js"):
+            if f"/{asset}" not in self._static:
+                print(f"[klein] warning: {asset} not bundled; dashboard will not render.",
+                      file=sys.stderr)
 
     async def run(self, open_browser=False):
         """Serve HTTP+WebSocket on one port; load the layout and poll forever."""

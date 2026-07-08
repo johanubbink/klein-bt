@@ -184,10 +184,16 @@ class StaticAssetsTest(unittest.TestCase):
 
     def test_real_assets_loaded(self):
         self.assertIn("/index.html", self.gw._static)
+        self.assertIn("/styles.css", self.gw._static)
+        self.assertIn("/app.js", self.gw._static)
         self.assertIn("/d3.v7.min.js", self.gw._static)
         html_body, html_ct = self.gw._static["/index.html"]
         self.assertIn(html_ct, "text/html; charset=utf-8")
         self.assertIn(b"klein", html_body)
+        _css_body, css_ct = self.gw._static["/styles.css"]
+        self.assertEqual(css_ct, "text/css; charset=utf-8")
+        _js_body, js_ct = self.gw._static["/app.js"]
+        self.assertEqual(js_ct, "text/javascript; charset=utf-8")
         d3_body, d3_ct = self.gw._static["/d3.v7.min.js"]
         self.assertEqual(d3_ct, "text/javascript; charset=utf-8")
         self.assertGreater(len(d3_body), 200000)
@@ -204,6 +210,11 @@ class StaticAssetsTest(unittest.TestCase):
     def test_query_string_is_stripped(self):
         self.assertEqual(self.request("/index.html?v=2").status_code, 200)
 
+    def test_css_served_with_css_type(self):
+        r = self.request("/styles.css")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.headers["Content-Type"], "text/css; charset=utf-8")
+
     def test_d3_served_with_js_type(self):
         r = self.request("/d3.v7.min.js")
         self.assertEqual(r.status_code, 200)
@@ -215,7 +226,7 @@ class StaticAssetsTest(unittest.TestCase):
         self.assertEqual(r.body, b"not found")
 
     def test_missing_files_fall_back(self):
-        # Simulate a package where neither static file is bundled.
+        # Simulate a package where none of the static assets are bundled.
         with mock.patch.object(gateway, "_load_asset", return_value=None):
             fresh = KleinGateway("127.0.0.1", 1667, 8080)
             err = io.StringIO()
@@ -223,8 +234,12 @@ class StaticAssetsTest(unittest.TestCase):
                 fresh._load_static()
             try:
                 self.assertEqual(fresh._static["/index.html"][0], gateway._INDEX_FALLBACK)
+                self.assertNotIn("/styles.css", fresh._static)
+                self.assertNotIn("/app.js", fresh._static)
                 self.assertNotIn("/d3.v7.min.js", fresh._static)
+                # Both render-critical assets are reported missing.
                 self.assertIn("d3.v7.min.js not bundled", err.getvalue())
+                self.assertIn("app.js not bundled", err.getvalue())
             finally:
                 fresh.ctx.destroy(linger=0)
 

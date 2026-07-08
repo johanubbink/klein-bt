@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>klein — BT viewer</title>
+    <!-- D3 v7 is vendored locally so the dashboard works on air-gapped robot networks -->
+    <script src="/d3.v7.min.js"></script>
+    <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+    <div id="ui-layer">
+        <h1>klein BT viewer</h1>
+        <div class="status-tracker">
+            <span id="conn-dot" class="dot"></span>
+            <span id="conn-text">Connecting to klein gateway…</span>
+        </div>
+    </div>
+
+    <div id="robot-banner"></div>
+
+    <div id="watermark">🖱️ Scroll to Zoom | Drag canvas to Pan | Click nodes to Expand/Collapse</div>
+
+    <svg id="canvas"></svg>
+
+    <script src="/app.js"></script>
+</body>
+</html>

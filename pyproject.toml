@@ -41,8 +41,8 @@ Issues = "https://github.com/johanubbink/klein-bt/issues"
 Changelog = "https://github.com/johanubbink/klein-bt/blob/main/CHANGELOG.md"
 
 [project.scripts]
-klein = "klein.gateway:main_cli"
-klein-mock = "klein.mock_robot:main"
+klein-bt = "klein.gateway:main_cli"
+klein-bt-mock = "klein.mock_robot:main"
 
 [project.optional-dependencies]
 dev = ["build", "twine"]

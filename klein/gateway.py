@@ -454,7 +454,7 @@ def _port_available(port):
 
 def main_cli():
     parser = argparse.ArgumentParser(
-        prog="klein",
+        prog="klein-bt",
         description="Live BehaviorTree.CPP v4 telemetry dashboard over ZeroMQ.",
     )
     parser.add_argument("--robot-host", default="127.0.0.1",

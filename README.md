@@ -11,21 +11,22 @@ interactive **D3.js** dashboard in your browser.
 ## Install
 
 klein is a command-line tool, so [pipx](https://pipx.pypa.io) is the tidiest way
-to install it into its own isolated environment:
+to install it into its own isolated environment. It isn't on PyPI yet, so
+install it straight from GitHub:
 
 ```bash
-pipx install klein-bt
+pipx install git+https://github.com/johanubbink/klein-bt.git
 ```
 
-The distribution is named `klein-bt` (the name `klein` was already taken on
-PyPI), but the command it installs is simply `klein`.
+This installs two commands: `klein-bt` (the dashboard) and `klein-bt-mock`
+(a fake robot for testing).
 
 ## Usage
 
 ```bash
-klein                       # connect to a robot on 127.0.0.1:1667, open the dashboard
-klein --robot-host 10.0.0.5 --robot-port 1667
-klein --port 8080 --no-browser
+klein-bt                    # connect to a robot on 127.0.0.1:1667, open the dashboard
+klein-bt --robot-host 10.0.0.5 --robot-port 1667
+klein-bt --port 8080 --no-browser
 ```
 
 | Flag            | Default     | Meaning                                        |
@@ -51,12 +52,12 @@ air-gapped robot networks with no internet access.
 
 ## Testing without a robot
 
-`klein-mock` is a small fake publisher that speaks just enough of the wire
+`klein-bt-mock` is a small fake publisher that speaks just enough of the wire
 protocol to drive the dashboard with no real robot (it ships with the package):
 
 ```bash
-klein-mock --port 1777                # in one shell
-klein --robot-port 1777               # in another
+klein-bt-mock --port 1777             # in one shell
+klein-bt --robot-port 1777            # in another
 ```
 
 Run the unit tests (no extra dependencies — stdlib `unittest`):

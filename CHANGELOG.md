@@ -11,12 +11,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Initial release.
 
 ### Added
-- `klein` CLI: connects to a BehaviorTree.CPP v4 robot node over the Groot2
+- `klein-bt` CLI: connects to a BehaviorTree.CPP v4 robot node over the Groot2
   ZeroMQ publisher protocol, unrolls nested subtrees into a single tree, and
   streams 10 Hz status telemetry to an interactive D3.js browser dashboard.
 - Single-port HTTP + WebSocket server: serves the dashboard and pushes telemetry
   from one `--port`, with the vendored D3.js so it works on air-gapped networks.
-- `klein-mock`: a fake Groot2 publisher that drives the dashboard with no real
+- `klein-bt-mock`: a fake Groot2 publisher that drives the dashboard with no real
   robot, for demos and testing.
 
 [Unreleased]: https://github.com/johanubbink/klein-bt/compare/v0.1.0...HEAD

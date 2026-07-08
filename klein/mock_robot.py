@@ -7,12 +7,12 @@ RUNNING (pulsing amber), SUCCESS (green), FAILURE (red), and IDLE transitions
 live.
 
 Usage:
-    klein-mock                          # bind tcp://*:1667 (Groot2 default)
-    klein-mock --port 1777              # use another port (e.g. real robot on 1667)
+    klein-bt-mock                       # bind tcp://*:1667 (Groot2 default)
+    klein-bt-mock --port 1777           # use another port (e.g. real robot on 1667)
     python -m klein.mock_robot          # equivalent, without the console script
 
 Then, in another shell:
-    klein --robot-port <same-port>
+    klein-bt --robot-port <same-port>
 """
 import argparse
 import struct
@@ -129,7 +129,7 @@ def main():
     sock.bind(endpoint)
     print(f"[mock_robot] Groot2 publisher listening on {endpoint}")
     print(f"[mock_robot] tree: MainTree ({len(ALL_UIDS)} nodes, 2 subtrees)")
-    print(f"[mock_robot] run:  klein --robot-port {args.port}")
+    print(f"[mock_robot] run:  klein-bt --robot-port {args.port}")
 
     tick = 0
     try:

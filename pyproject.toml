@@ -36,7 +36,6 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://github.com/johanubbink/klein-bt"
-Repository = "https://github.com/johanubbink/klein-bt"
 Issues = "https://github.com/johanubbink/klein-bt/issues"
 Changelog = "https://github.com/johanubbink/klein-bt/blob/main/CHANGELOG.md"
 

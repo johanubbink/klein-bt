@@ -7,8 +7,9 @@ RUNNING (pulsing amber), SUCCESS (green), FAILURE (red), and IDLE transitions
 live.
 
 Usage:
-    python mock_robot.py                # bind tcp://*:1667 (Groot2 default)
-    python mock_robot.py --port 1777    # use another port (e.g. real robot on 1667)
+    klein-mock                          # bind tcp://*:1667 (Groot2 default)
+    klein-mock --port 1777              # use another port (e.g. real robot on 1667)
+    python -m klein.mock_robot          # equivalent, without the console script
 
 Then, in another shell:
     klein --robot-port <same-port>
@@ -18,7 +19,7 @@ import struct
 
 import zmq
 
-from klein.groot2_protocol import (
+from .groot2_protocol import (
     HEADER_FORMAT,
     IDLE_TRANSITION,
     PROTOCOL_ID,

@@ -3,25 +3,16 @@ status parsing, subtree unrolling, layout caching, and static-asset serving."""
 import contextlib
 import io
 import json
-import os
 import socket
 import struct
-import sys
 import types
 import unittest
 import xml.etree.ElementTree as ET
 from unittest import mock
 
-# Ensure the repo root is importable so `import mock_robot` (a repo-root sibling
-# used here as a tree fixture) resolves regardless of how the tests are run.
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if REPO_ROOT not in sys.path:
-    sys.path.insert(0, REPO_ROOT)
-
-from klein import gateway
+from klein import gateway, mock_robot
 from klein.gateway import KleinGateway, _port_available
 from klein.groot2_protocol import STATUS_RECORD_FORMAT
-import mock_robot
 
 
 def _rec(uid, status_int):

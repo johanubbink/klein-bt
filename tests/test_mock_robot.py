@@ -1,16 +1,10 @@
-"""Unit tests for mock_robot — the fake Groot2 publisher used to drive klein in
-tests. Verifies the status animation and reply framing, and round-trips its
-output through the real gateway parser."""
-import os
+"""Unit tests for klein.mock_robot — the fake Groot2 publisher used to drive
+klein in tests. Verifies the status animation and reply framing, and round-trips
+its output through the real gateway parser."""
 import struct
-import sys
 import unittest
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if REPO_ROOT not in sys.path:
-    sys.path.insert(0, REPO_ROOT)
-
-import mock_robot
+from klein import mock_robot
 from klein.gateway import KleinGateway
 from klein.groot2_protocol import HEADER_FORMAT, PROTOCOL_ID, REQ_STATUS, STATUS_RECORD_SIZE
 

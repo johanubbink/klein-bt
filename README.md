@@ -8,6 +8,8 @@ publisher wire protocol that ships with BehaviorTree.CPP — recursively unrolls
 nested subtrees into a single tree, and streams 10 Hz status telemetry to an
 interactive **D3.js** dashboard in your browser.
 
+![klein streaming a live CrossDoor behavior tree to the dashboard](assets/klein-demo.gif)
+
 ## Install
 
 klein is a command-line tool, so [pipx](https://pipx.pypa.io) is the tidiest way

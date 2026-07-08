@@ -13,25 +13,43 @@ class StatusBufferTest(unittest.TestCase):
     def parse(self, tick):
         return KleinGateway.parse_status(mock_robot.build_status_buffer(tick))
 
+    def statuses_over_cycle(self, uid):
+        """Every status ``uid`` takes across one full mission cycle."""
+        return {self.parse(t)[uid]["status"] for t in range(mock_robot.CYCLE_TICKS)}
+
     def test_buffer_covers_every_uid(self):
         buf = mock_robot.build_status_buffer(0)
         self.assertEqual(len(buf), len(mock_robot.ALL_UIDS) * STATUS_RECORD_SIZE)
         self.assertEqual(set(self.parse(0)), set(mock_robot.ALL_UIDS))
 
-    def test_cursor_leaf_and_ancestors_run(self):
-        parsed = self.parse(0)                       # EXEC_ORDER[0] == 2, ancestors == [1]
-        self.assertEqual(parsed[2]["status"], "RUNNING")
-        self.assertEqual(parsed[1]["status"], "RUNNING")
-        self.assertEqual(parsed[12]["status"], "IDLE")   # not yet reached
+    def test_mission_starts_with_script_running(self):
+        parsed = self.parse(0)                       # first frame: Script + its Sequence parent
+        self.assertEqual(parsed[2]["status"], "RUNNING")     # Script
+        self.assertEqual(parsed[1]["status"], "RUNNING")     # mission Sequence
+        self.assertEqual(parsed[13]["status"], "IDLE")       # PassThroughDoor not yet reached
 
-    def test_failing_leaf_reports_failure(self):
-        fail_tick = mock_robot.EXEC_ORDER.index(5)   # the "Retry" node fails on its lap
-        self.assertEqual(self.parse(fail_tick)[5]["status"], "FAILURE")
+    def test_every_status_int_decodes(self):
+        # No frame should ever emit an UNKNOWN status across the whole cycle.
+        for t in range(mock_robot.CYCLE_TICKS):
+            for entry in self.parse(t).values():
+                self.assertNotEqual(entry["status"], "UNKNOWN")
 
-    def test_finished_leaves_show_transition(self):
-        parsed = self.parse(5)                       # cursor past nodes 2 and 5
-        self.assertEqual(parsed[2], {"status": "IDLE", "from": "SUCCESS"})
-        self.assertEqual(parsed[5], {"status": "IDLE", "from": "FAILURE"})
+    def test_opendoor_fails_then_picklock_runs_and_succeeds(self):
+        self.assertIn("FAILURE", self.statuses_over_cycle(9))    # OpenDoor: locked -> FAILURE
+        pick = self.statuses_over_cycle(11)                      # PickLock retries...
+        self.assertIn("RUNNING", pick)
+        self.assertIn("FAILURE", pick)                           # ...failing early attempts...
+        self.assertIn("SUCCESS", pick)                           # ...then cracking it
+
+    def test_smashdoor_branch_never_taken(self):
+        self.assertEqual(self.statuses_over_cycle(12), {"IDLE"})  # PickLock always wins first
+
+    def test_reset_frame_flags_last_result(self):
+        # The reset frame is the 6-tick window just before the final idle pause.
+        reset_tick = mock_robot.CYCLE_TICKS - 12 - 1
+        parsed = self.parse(reset_tick)
+        self.assertEqual(parsed[1], {"status": "IDLE", "from": "SUCCESS"})   # mission succeeded
+        self.assertEqual(parsed[9], {"status": "IDLE", "from": "FAILURE"})   # OpenDoor had failed
 
 
 class ReplyHeaderTest(unittest.TestCase):

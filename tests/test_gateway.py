@@ -100,11 +100,11 @@ class LayoutTest(unittest.TestCase):
 
     def test_subtree_stitched_in_place(self):
         self.gw._parse_layout(mock_robot.TREE_XML)
-        subtree_ref = _find(self.gw.tree_structure, 4)   # <SubTree ID="PickSub" _uid="4"/>
+        subtree_ref = _find(self.gw.tree_structure, 7)   # <SubTree ID="DoorClosed" _uid="7"/>
         self.assertTrue(subtree_ref["is_subtree_root"])
-        self.assertEqual(subtree_ref["subtree_id"], "PickSub")
-        # its single child is the PickSub definition root (Sequence _uid="20")
-        self.assertEqual(subtree_ref["children"][0]["uid"], 20)
+        self.assertEqual(subtree_ref["subtree_id"], "DoorClosed")
+        # its single child is the DoorClosed definition root (Fallback "tryOpen" _uid="8")
+        self.assertEqual(subtree_ref["children"][0]["uid"], 8)
 
     def test_stable_ids_are_unique(self):
         self.gw._parse_layout(mock_robot.TREE_XML)

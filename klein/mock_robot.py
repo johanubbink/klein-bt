@@ -1,10 +1,11 @@
 """mock_robot.py — a fake BehaviorTree.CPP Groot2 publisher for testing klein.
 
 Implements just enough of the Groot2 wire protocol (FULLTREE + STATUS over a
-ZeroMQ REP socket) to drive the klein dashboard with no real robot. It serves a
-small tree with nested subtrees and animates a "running cursor" so you can watch
-RUNNING (pulsing amber), SUCCESS (green), FAILURE (red), and IDLE transitions
-live.
+ZeroMQ REP socket) to drive the klein dashboard with no real robot. It replays
+the *CrossDoor* mission from BehaviorTree.CPP's ``examples/t11_groot_howto.cpp``
+— the canonical Groot2 tutorial — so the dashboard shows the same tree a real
+robot running that example would publish. Watch RUNNING (pulsing amber),
+SUCCESS (green), FAILURE (red), and IDLE-transition ("was …") states live.
 
 Usage:
     klein-bt-mock                       # bind tcp://*:1667 (Groot2 default)
@@ -29,80 +30,123 @@ from .groot2_protocol import (
     NodeStatus,
 )
 
-# A tree with two nested subtrees; every node carries an integer _uid, exactly
-# as BehaviorTree.CPP emits when add_metadata=true.
+# The CrossDoor tree from examples/t11_groot_howto.cpp, with the integer _uid
+# attributes BehaviorTree.CPP stamps on every node in a FULLTREE reply. UIDs are
+# assigned in creation order (depth-first), exactly as BT.CPP does, so they line
+# up with the status records below. The DoorClosed subtree is stitched in place
+# by klein, unrolling to 13 nodes total — matching the real example.
 TREE_XML = """<root BTCPP_format="4" main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
-    <Sequence name="mission" _uid="1">
-      <Action ID="Initialize" name="Initialize" _uid="2"/>
-      <Fallback name="pick_or_retry" _uid="3">
-        <SubTree ID="PickSub" name="pick" _uid="4"/>
-        <Action ID="Retry" name="Retry" _uid="5"/>
+    <Sequence name="Sequence" _uid="1">
+      <Script name="Script" code="door_open:=false" _uid="2"/>
+      <UpdatePosition name="UpdatePosition" _uid="3"/>
+      <Fallback name="Fallback" _uid="4">
+        <Inverter name="Inverter" _uid="5">
+          <IsDoorClosed name="IsDoorClosed" _uid="6"/>
+        </Inverter>
+        <SubTree ID="DoorClosed" _uid="7"/>
       </Fallback>
-      <SubTree ID="DropSub" name="drop" _uid="8"/>
-      <Action ID="Finish" name="Finish" _uid="12"/>
+      <PassThroughDoor name="PassThroughDoor" _uid="13"/>
     </Sequence>
   </BehaviorTree>
-  <BehaviorTree ID="PickSub">
-    <Sequence name="pick_seq" _uid="20">
-      <Action ID="Approach" name="Approach" _uid="21"/>
-      <Action ID="Grasp" name="Grasp" _uid="22"/>
-      <Condition ID="HasObject" name="HasObject" _uid="23"/>
-    </Sequence>
-  </BehaviorTree>
-  <BehaviorTree ID="DropSub">
-    <Sequence name="drop_seq" _uid="30">
-      <Action ID="MoveToBin" name="MoveToBin" _uid="31"/>
-      <Action ID="Release" name="Release" _uid="32"/>
-    </Sequence>
+  <BehaviorTree ID="DoorClosed">
+    <Fallback name="tryOpen" _uid="8">
+      <OpenDoor name="OpenDoor" _uid="9"/>
+      <RetryUntilSuccessful name="RetryUntilSuccessful" num_attempts="5" _uid="10">
+        <PickLock name="PickLock" _uid="11"/>
+      </RetryUntilSuccessful>
+      <SmashDoor name="SmashDoor" _uid="12"/>
+    </Fallback>
   </BehaviorTree>
 </root>"""
 
-# Every UID that appears in the tree (the publisher reports status for all).
-ALL_UIDS = [1, 2, 3, 4, 5, 8, 12, 20, 21, 22, 23, 30, 31, 32]
-
-# Ordered "execution" of leaf/near-leaf nodes the cursor walks through.
-EXEC_ORDER = [2, 21, 22, 23, 5, 31, 32, 12]
-
-# Parents that are "running" while one of their descendants runs.
-PARENTS = {
-    2: [1], 21: [1, 3, 4, 20], 22: [1, 3, 4, 20], 23: [1, 3, 4, 20],
-    5: [1, 3], 31: [1, 8, 30], 32: [1, 8, 30], 12: [1],
-}
+# Every UID in the tree, in order (the publisher reports status for all of them).
+# SmashDoor (12) is the never-taken branch: PickLock always cracks it first.
+ALL_UIDS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
 
 # Status values used by the animation, derived from the shared protocol enum.
 IDLE = NodeStatus.IDLE
 RUNNING = NodeStatus.RUNNING
+SUCCESS = NodeStatus.SUCCESS
 FAILURE = NodeStatus.FAILURE
-IDLE_FROM_SUCCESS = IDLE_TRANSITION + NodeStatus.SUCCESS   # 12
-IDLE_FROM_FAILURE = IDLE_TRANSITION + NodeStatus.FAILURE   # 13
+WAS_SUCCESS = IDLE_TRANSITION + NodeStatus.SUCCESS   # 12: "now IDLE, previously SUCCESS"
+WAS_FAILURE = IDLE_TRANSITION + NodeStatus.FAILURE   # 13: "now IDLE, previously FAILURE"
+
+
+def _build_timeline():
+    """Build the mission as a list of ``(duration_ticks, {uid: status})`` frames.
+
+    Nodes absent from a frame are IDLE. This mirrors the deterministic CrossDoor
+    run: the door starts closed and locked, so OpenDoor fails, PickLock retries
+    (failing four times, cracking it on the fifth), and the robot then passes
+    through. Completed nodes keep their SUCCESS/FAILURE color — a non-reactive
+    Sequence/Fallback holds a finished child's result — so a colored trail grows
+    as the mission advances; a final reset flips everything to "was …" and idle.
+    """
+    frames = []
+    done = {}   # uid -> solid terminal status, accumulated as nodes complete
+
+    def frame(dur, running):
+        status = dict(done)
+        for uid in running:
+            status[uid] = RUNNING
+        frames.append((dur, status))
+
+    frame(3, [1, 2])                    # Script sets a blackboard flag
+    done[2] = SUCCESS
+    frame(3, [1, 3])                    # UpdatePosition
+    done[3] = SUCCESS
+    frame(3, [1, 4, 5, 6])             # IsDoorClosed under Inverter/Fallback: door IS closed
+    done[6] = SUCCESS                   # IsDoorClosed -> SUCCESS (closed)
+    done[5] = FAILURE                   # ...which the Inverter negates: the door is not open
+
+    frame(5, [1, 4, 7, 8, 9])          # into the DoorClosed subtree: OpenDoor tries first
+    done[9] = FAILURE                   # OpenDoor -> FAILURE (the door is locked)
+
+    for attempt in range(1, 6):        # RetryUntilSuccessful drives PickLock, 5 attempts
+        frame(4, [1, 4, 7, 8, 10, 11]) # PickLock working (pulsing amber)
+        if attempt < 5:
+            frames.append((1, {**done, 10: RUNNING, 11: FAILURE,  # this attempt failed (red flash)
+                                1: RUNNING, 4: RUNNING, 7: RUNNING, 8: RUNNING}))
+    done[11] = SUCCESS                  # PickLock cracked it on the fifth try
+    done[10] = SUCCESS                  # RetryUntilSuccessful -> SUCCESS
+    done[8] = SUCCESS                   # Fallback "tryOpen" -> SUCCESS (door_open:=true)
+    done[7] = SUCCESS                   # DoorClosed subtree -> SUCCESS
+    done[4] = SUCCESS                   # the outer Fallback -> SUCCESS
+
+    frame(5, [1, 13])                   # PassThroughDoor: the door is open now
+    done[13] = SUCCESS
+    done[1] = SUCCESS                   # the mission Sequence -> SUCCESS
+
+    frames.append((15, dict(done)))     # hold the completed mission so it can be read
+    # Reset: the whole tree drops back to IDLE, each node flagged with its last result.
+    frames.append((6, {uid: (WAS_SUCCESS if st == SUCCESS else WAS_FAILURE)
+                        for uid, st in done.items()}))
+    frames.append((12, {}))             # idle pause before the next lap
+    return frames
+
+
+TIMELINE = _build_timeline()
+CYCLE_TICKS = sum(dur for dur, _ in TIMELINE)
 
 
 def build_status_buffer(tick):
     """Return the 3-byte-per-node status buffer for the current tick.
 
-    A cursor walks EXEC_ORDER; the cursor node is RUNNING (with its ancestors),
-    already-visited nodes show their finished (IDLE_FROM_*) state, and not-yet-
-    reached nodes are IDLE. One node fails occasionally to exercise red/FAILURE.
+    Walks the looping mission TIMELINE; nodes not named in the current frame are
+    reported IDLE.
     """
-    cursor = tick % len(EXEC_ORDER)
-    running_leaf = EXEC_ORDER[cursor]
-    fail_this_lap = (running_leaf == 5)  # "Retry" node fails now and then
-
-    status = {uid: IDLE for uid in ALL_UIDS}
-
-    # Finished leaves (before the cursor) -> IDLE_FROM_SUCCESS/FAILURE
-    for leaf in EXEC_ORDER[:cursor]:
-        status[leaf] = IDLE_FROM_FAILURE if leaf == 5 else IDLE_FROM_SUCCESS
-
-    # Current leaf + its ancestors -> RUNNING (or FAILURE for the failing leaf)
-    status[running_leaf] = FAILURE if fail_this_lap else RUNNING
-    for parent in PARENTS.get(running_leaf, []):
-        status[parent] = RUNNING
+    t = tick % CYCLE_TICKS
+    status = TIMELINE[-1][1]
+    for dur, frame_status in TIMELINE:
+        if t < dur:
+            status = frame_status
+            break
+        t -= dur
 
     buf = bytearray()
     for uid in ALL_UIDS:
-        buf += struct.pack(STATUS_RECORD_FORMAT, uid, status[uid])
+        buf += struct.pack(STATUS_RECORD_FORMAT, uid, status.get(uid, IDLE))
     return bytes(buf)
 
 
@@ -128,7 +172,7 @@ def main():
     endpoint = f"tcp://{args.host}:{args.port}"
     sock.bind(endpoint)
     print(f"[mock_robot] Groot2 publisher listening on {endpoint}")
-    print(f"[mock_robot] tree: MainTree ({len(ALL_UIDS)} nodes, 2 subtrees)")
+    print(f"[mock_robot] tree: CrossDoor ({len(ALL_UIDS)} nodes, 1 subtree)")
     print(f"[mock_robot] run:  klein-bt --robot-port {args.port}")
 
     tick = 0

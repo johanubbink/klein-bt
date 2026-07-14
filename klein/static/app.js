@@ -10,6 +10,10 @@ let robotDetail = "Connecting to klein gateway…";
 const nodeWidth = 220;
 const nodeHeight = 50;
 
+// "vertical" is the standard BT convention: root at the top, children below,
+// siblings ticked left-to-right. "horizontal" grows the tree rightward.
+let orientation = "vertical";
+
 // Setup scalable D3 viewport selections
 const svg = d3.select("#canvas");
 const gContainer = svg.append("g").attr("class", "draw-group");
@@ -22,17 +26,27 @@ const zoomBehavior = d3.zoom()
     });
 svg.call(zoomBehavior);
 
-// Define layout spacing engine configuration
-const treeLayout = d3.tree()
-    .nodeSize([70, 300]); // [Vertical spacing between siblings, Horizontal depth spacing]
+// Layout spacing per orientation. d3.tree() lays siblings along x and depth
+// along y; nodeSize is [sibling spacing, depth spacing] in those layout coords.
+const layoutConfig = {
+    vertical:   { nodeSize: [240, 130], depthStep: 130 },
+    horizontal: { nodeSize: [70, 300],  depthStep: 280 },
+};
+const treeLayout = d3.tree();
+
+// Layout coords keep x = sibling axis, y = depth axis regardless of
+// orientation; the swap to screen coords happens only here at render time.
+const nodeTransform = (x, y) =>
+    orientation === "vertical" ? `translate(${x}, ${y})` : `translate(${y}, ${x})`;
 
 function updateTreeLayout(sourceNode) {
-    const treeData = treeLayout(rootNodeSnapshot);
+    const config = layoutConfig[orientation];
+    const treeData = treeLayout.nodeSize(config.nodeSize)(rootNodeSnapshot);
     const nodesList = treeData.descendants();
     const linksList = treeData.links();
 
-    // Normalize horizontal depth spacing
-    nodesList.forEach(d => d.y = d.depth * 280);
+    // Normalize depth spacing
+    nodesList.forEach(d => d.y = d.depth * config.depthStep);
 
     // 1. RENDER EDGES / LINKS (cubic Bézier curves), keyed on stable node id
     const linkSelection = gContainer.selectAll("path.link")
@@ -62,7 +76,7 @@ function updateTreeLayout(sourceNode) {
     const nodeEnter = nodeSelection.enter().append("g")
         .attr("class", "node")
         .each(d => { d._statusKey = null; })   // (re)appeared: force next status frame to repaint it
-        .attr("transform", `translate(${sourceNode.y0 || 0}, ${sourceNode.x0 || 0})`)
+        .attr("transform", nodeTransform(sourceNode.x0 || 0, sourceNode.y0 || 0))
         .on("click", (event, d) => {
             if (event.defaultPrevented) return;
             if (d.children) {
@@ -75,41 +89,43 @@ function updateTreeLayout(sourceNode) {
             updateTreeLayout(d);
         });
 
-    // Node card background
+    // Node card background, centered on the node's layout point so the card
+    // needs no per-orientation adjustments
     nodeEnter.append("rect")
         .attr("class", "node-rect")
         .attr("width", nodeWidth)
         .attr("height", nodeHeight)
         .attr("rx", 6)
         .attr("ry", 6)
+        .attr("x", -nodeWidth / 2)
         .attr("y", -nodeHeight / 2)
         .style("stroke", "var(--color-IDLE)");
 
     // Type tag
     nodeEnter.append("text")
         .attr("class", "node-type")
-        .attr("x", 12)
+        .attr("x", -nodeWidth / 2 + 12)
         .attr("y", -10)
         .text(d => d.data.type);
 
     // Display name (truncated)
     nodeEnter.append("text")
         .attr("class", "node-name")
-        .attr("x", 12)
+        .attr("x", -nodeWidth / 2 + 12)
         .attr("y", 8)
         .text(d => d.data.name.length > 20 ? d.data.name.substring(0, 18) + "..." : d.data.name);
 
     // UID label (blank when this node carries no UID)
     nodeEnter.append("text")
         .attr("class", "node-uid")
-        .attr("x", nodeWidth - 55)
+        .attr("x", nodeWidth / 2 - 55)
         .attr("y", -10)
         .text(d => d.data.uid == null ? "" : `UID ${String(d.data.uid).padStart(3, '0')}`);
 
     // Status pill background
     nodeEnter.append("rect")
         .attr("class", "status-pill")
-        .attr("x", nodeWidth - 75)
+        .attr("x", nodeWidth / 2 - 75)
         .attr("y", 2)
         .attr("width", 65)
         .attr("height", 16)
@@ -119,17 +135,17 @@ function updateTreeLayout(sourceNode) {
     // Status text
     nodeEnter.append("text")
         .attr("class", "node-status-text")
-        .attr("x", nodeWidth - 42)
+        .attr("x", nodeWidth / 2 - 42)
         .attr("y", 13)
         .attr("text-anchor", "middle")
         .text("IDLE");
 
     // Merge + animate to final positions
     nodeEnter.merge(nodeSelection).transition().duration(250)
-        .attr("transform", d => `translate(${d.y}, ${d.x})`);
+        .attr("transform", d => nodeTransform(d.x, d.y));
 
     nodeSelection.exit().transition().duration(250)
-        .attr("transform", `translate(${sourceNode.y}, ${sourceNode.x})`)
+        .attr("transform", nodeTransform(sourceNode.x, sourceNode.y))
         .remove();
 
     // Cache positions for the next transition's origin
@@ -139,10 +155,20 @@ function updateTreeLayout(sourceNode) {
     });
 }
 
-// Cubic Bézier connector between horizontally-laid-out nodes
+// Cubic Bézier connector drawn card-edge to card-edge: parent bottom-center
+// to child top-center when vertical, parent right to child left when
+// horizontal. Coords are layout coords (x = sibling axis, y = depth axis).
 function diagonalCurve({ source, target }) {
-    const sY = source.y + nodeWidth;
-    const tY = target.y;
+    if (orientation === "vertical") {
+        const sY = source.y + nodeHeight / 2;
+        const tY = target.y - nodeHeight / 2;
+        return `M ${source.x} ${sY}
+                C ${source.x} ${(sY + tY) / 2},
+                  ${target.x} ${(sY + tY) / 2},
+                  ${target.x} ${tY}`;
+    }
+    const sY = source.y + nodeWidth / 2;
+    const tY = target.y - nodeWidth / 2;
     return `M ${sY} ${source.x}
             C ${(sY + tY) / 2} ${source.x},
               ${(sY + tY) / 2} ${target.x},
@@ -179,6 +205,29 @@ function applyStatus(telemetryMap) {
         el.select(".node-status-text").text(label);
     });
 }
+
+// Pan the camera so the root sits at the conventional entry point:
+// top-center for vertical trees, left-center for horizontal ones.
+function resetCamera() {
+    // Cards are center-anchored, so offset by half a card to keep the root
+    // fully on-screen.
+    const scale = 0.8;
+    const target = orientation === "vertical"
+        ? d3.zoomIdentity.translate(window.innerWidth / 2, 80).scale(scale)
+        : d3.zoomIdentity.translate(80 + (nodeWidth / 2) * scale, window.innerHeight / 2).scale(scale);
+    svg.transition().duration(500).call(zoomBehavior.transform, target);
+}
+
+// Orientation toggle — reflow the same hierarchy and re-aim the camera; the
+// 250ms node/link transitions animate the change.
+d3.select("#orientation-toggle").on("click", () => {
+    orientation = orientation === "vertical" ? "horizontal" : "vertical";
+    d3.select("#orientation-toggle").text(`Layout: ${orientation}`);
+    if (rootNodeSnapshot) {
+        updateTreeLayout(rootNodeSnapshot);
+        resetCamera();
+    }
+});
 
 // Reflect both links: green when the robot is streaming, amber (plus a
 // banner) when klein is up but the robot is unreachable, red when klein
@@ -234,15 +283,11 @@ function connectGatewayPipeline() {
             if (!treeData) return;
 
             rootNodeSnapshot = d3.hierarchy(treeData);
-            rootNodeSnapshot.x0 = window.innerHeight / 2;
+            rootNodeSnapshot.x0 = 0;
             rootNodeSnapshot.y0 = 0;
 
             updateTreeLayout(rootNodeSnapshot);
-
-            svg.transition().duration(500).call(
-                zoomBehavior.transform,
-                d3.zoomIdentity.translate(80, window.innerHeight / 2).scale(0.8)
-            );
+            resetCamera();
         }
 
         else if (message.type === "status" && rootNodeSnapshot) {

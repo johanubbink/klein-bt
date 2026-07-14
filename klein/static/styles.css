@@ -60,6 +60,19 @@ h1 { margin: 0; font-size: 1.4rem; font-weight: 600; letter-spacing: -0.025em; }
 .dot.online { background-color: #22c55e; box-shadow: 0 0 8px #22c55e; }
 .dot.warn { background-color: var(--color-RUNNING); box-shadow: 0 0 8px var(--color-RUNNING); }
 
+#orientation-toggle {
+    margin-top: 10px;
+    padding: 4px 10px;
+    font-size: 0.8rem;
+    font-family: inherit;
+    color: var(--text-muted);
+    background: #23232f;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    cursor: pointer;
+}
+#orientation-toggle:hover { color: var(--text-main); border-color: #475569; }
+
 /* Hard-to-miss banner shown when klein cannot reach the robot (or the
    gateway itself drops). Hidden until something is actually wrong. */
 #robot-banner {

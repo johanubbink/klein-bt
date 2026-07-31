@@ -73,6 +73,152 @@ h1 { margin: 0; font-size: 1.4rem; font-weight: 600; letter-spacing: -0.025em; }
 }
 #orientation-toggle:hover { color: var(--text-main); border-color: #475569; }
 
+/* Blackboards panel — one collapsible group per subtree, inside the control
+   card. Group names borrow the tree's node-type cyan and the flash borrows the
+   RUNNING amber, so the panel reads as part of the tree, not a separate widget. */
+#bb-section { margin-top: 10px; }
+
+#bb-toggle {
+    display: inline-flex;      /* hug the label, like #orientation-toggle */
+    align-items: center;
+    padding: 4px 10px;
+    font-size: 0.8rem;
+    font-family: inherit;
+    color: var(--text-muted);
+    background: #23232f;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    cursor: pointer;
+}
+#bb-toggle:hover { color: var(--text-main); border-color: #475569; }
+#bb-count { color: #64748b; margin-left: 4px; }
+
+/* Shared disclosure arrow: points right when closed, down when open. */
+.bb-chevron {
+    width: 0;
+    height: 0;
+    margin-right: 7px;
+    border-left: 4px solid currentColor;
+    border-top: 3.5px solid transparent;
+    border-bottom: 3.5px solid transparent;
+    transition: transform 0.15s ease;
+}
+.open > .bb-chevron { transform: rotate(90deg) translateX(1px); }
+
+#bb-panel {
+    margin-top: 8px;
+    min-width: 280px;
+    max-width: 340px;
+    max-height: 40vh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-color) transparent;
+}
+
+#bb-empty {
+    margin: 4px 0 0;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    font-style: italic;
+}
+
+.bb-group + .bb-group { margin-top: 2px; }
+
+.bb-group-header {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    padding: 3px 4px;
+    font-family: inherit;
+    text-align: left;
+    color: var(--text-muted);
+    background: none;
+    border: 0;
+    border-radius: 4px;
+    cursor: pointer;
+}
+.bb-group-header:hover { background: rgba(255, 255, 255, 0.04); }
+
+/* Same treatment as .node-type in the tree: this group *is* that SubTree. */
+.bb-group-name {
+    flex: 1;
+    font-size: 10px;
+    font-weight: bold;
+    color: #38bdf8;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.bb-group-count { font-size: 9px; font-family: monospace; color: #64748b; margin-left: 8px; }
+
+.bb-group-body { padding: 1px 0 4px 15px; }
+
+.bb-group-empty {
+    margin: 1px 0 2px 4px;
+    font-size: 0.7rem;
+    color: #64748b;
+    font-style: italic;
+}
+
+.bb-row {
+    display: flex;
+    gap: 10px;
+    width: 100%;
+    padding: 2px 4px;
+    font-family: monospace;
+    font-size: 0.72rem;
+    line-height: 1.45;
+    text-align: left;
+    color: var(--text-main);
+    background: none;
+    border: 0;
+    border-radius: 3px;
+    cursor: pointer;
+}
+.bb-row:hover { background: rgba(255, 255, 255, 0.05); }
+
+/* A shared minimum lines the values up into a scannable column, while an
+   unusually long key is still allowed to push its own value right. The cap is
+   generous because real keys get long and similar (`distance_to_end_of_path`
+   vs `..._route` must not truncate to the same thing); hover shows the rest. */
+.bb-key {
+    flex-shrink: 0;
+    min-width: 6.5rem;
+    max-width: 62%;
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.bb-value {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.bb-value.bb-unset { color: #64748b; font-style: italic; }
+
+/* Clicked open: let a long vector or struct wrap instead of being cut off. */
+.bb-row.expanded .bb-value { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* A value that just changed flashes once, in the same amber the tree uses for
+   RUNNING — the reader's eye is already trained on it. */
+@keyframes bb-flash {
+    from { background-color: rgba(217, 119, 6, 0.5); }
+    to   { background-color: transparent; }
+}
+.bb-row.bb-changed { animation: bb-flash 0.8s ease-out; }
+
+@media (prefers-reduced-motion: reduce) {
+    .bb-row.bb-changed { animation: none; }
+    .bb-chevron { transition: none; }
+}
+
 /* Hard-to-miss banner shown when klein cannot reach the robot (or the
    gateway itself drops). Hidden until something is actually wrong. */
 #robot-banner {

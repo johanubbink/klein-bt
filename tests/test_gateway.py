@@ -1,5 +1,6 @@
 """Unit tests for klein.gateway — the pure, socket-free logic: UID extraction,
-status parsing, subtree unrolling, layout caching, and static-asset serving."""
+status parsing, subtree unrolling, layout caching, blackboard decoding, and
+static-asset serving."""
 import contextlib
 import io
 import json
@@ -9,6 +10,8 @@ import types
 import unittest
 import xml.etree.ElementTree as ET
 from unittest import mock
+
+import msgpack
 
 from klein import gateway, mock_robot
 from klein.gateway import KleinGateway, _port_available
@@ -266,6 +269,149 @@ class RobotStateTest(unittest.TestCase):
         self.gw._set_robot_state(False, "down — retrying…")
         self.assertFalse(self.gw._robot_connected)
         self.assertEqual(json.loads(self.gw._robot_state_json)["detail"], "down — retrying…")
+
+
+class BlackboardTest(unittest.TestCase):
+    """Blackboard name discovery and msgpack decoding."""
+
+    def setUp(self):
+        self.gw = KleinGateway("127.0.0.1", 1667, 8080)
+
+    def tearDown(self):
+        self.gw.ctx.destroy(linger=0)
+
+    def names(self, xml):
+        return KleinGateway.extract_blackboard_names(ET.fromstring(xml))
+
+    def test_prefers_fullpath_and_dedupes_subtree_reference(self):
+        # The mock's XML carries "DoorClosed::7" on both the <BehaviorTree>
+        # block and the <SubTree> element referencing it.
+        self.assertEqual(self.names(mock_robot.TREE_XML), ["MainTree", "DoorClosed::7"])
+
+    def test_falls_back_to_tree_id_without_fullpath(self):
+        xml = """<root BTCPP_format="4">
+          <BehaviorTree ID="MainTree"><Sequence _uid="1"/></BehaviorTree>
+          <BehaviorTree ID="Helper"><Sequence _uid="2"/></BehaviorTree>
+        </root>"""
+        self.assertEqual(self.names(xml), ["MainTree", "Helper"])
+
+    def test_root_tree_has_an_empty_fullpath(self):
+        # What a real robot sends: the root subtree's path is "", and its
+        # blackboard is registered under the tree ID instead.
+        xml = """<root BTCPP_format="4">
+          <BehaviorTree ID="MainTree" _fullpath=""><Sequence _uid="1"/></BehaviorTree>
+        </root>"""
+        self.assertEqual(self.names(xml), ["MainTree"])
+
+    def test_tree_nodes_model_is_not_mistaken_for_an_instance(self):
+        # A FULLTREE reply also declares the available node types; the <SubTree>
+        # in that section is a model, not a subtree instance with a blackboard.
+        xml = """<root BTCPP_format="4">
+          <BehaviorTree ID="MainTree" _fullpath=""><Sequence _uid="1"/></BehaviorTree>
+          <TreeNodesModel>
+            <SubTree ID="SubTree"/>
+            <Action ID="OpenDoor"/>
+          </TreeNodesModel>
+        </root>"""
+        self.assertEqual(self.names(xml), ["MainTree"])
+
+    def test_nested_subtree_paths_are_collected(self):
+        xml = """<root BTCPP_format="4">
+          <BehaviorTree ID="MainTree" _fullpath="MainTree">
+            <Sequence _uid="1">
+              <SubTree ID="Nav" _uid="2" _fullpath="Nav::2"/>
+              <SubTree ID="Nav" _uid="3" _fullpath="second_nav"/>
+            </Sequence>
+          </BehaviorTree>
+          <BehaviorTree ID="Nav" _fullpath="Nav::2"><Sequence _uid="4"/></BehaviorTree>
+        </root>"""
+        # Two instances of the same subtree have distinct blackboards.
+        self.assertEqual(self.names(xml), ["MainTree", "Nav::2", "second_nav"])
+
+    def test_parse_layout_builds_the_request_payload(self):
+        self.gw._parse_layout(mock_robot.TREE_XML)
+        self.assertEqual(self.gw._blackboard_names, ["MainTree", "DoorClosed::7"])
+        self.assertEqual(self.gw._blackboard_request, b"MainTree;DoorClosed::7")
+
+    def test_parse_layout_invalidates_cached_values(self):
+        self.gw._blackboard_json = '{"type": "blackboard", "data": {"stale": {}}}'
+        self.gw._parse_layout(mock_robot.TREE_XML)
+        self.assertIsNone(self.gw._blackboard_json)
+
+    def test_nil_payload_means_no_boards(self):
+        # The publisher replies msgpack nil when no requested name matched.
+        self.assertEqual(KleinGateway.parse_blackboard(msgpack.packb(None)), {})
+
+    def test_private_keys_are_filtered(self):
+        raw = msgpack.packb({"MainTree": {"speed": 1, "_autoremap": True, "_uid": 4}})
+        self.assertEqual(KleinGateway.parse_blackboard(raw), {"MainTree": {"speed": 1}})
+
+    def test_value_types_survive_decoding(self):
+        raw = msgpack.packb({"MainTree": {
+            "flag": 1,                                   # BT.CPP stores bools as ints
+            "name": "gripper",
+            "speed": 0.25,
+            "vec": [1.1, 2.2],
+            "pos": {"__type": "Position2D", "x": 1.0},
+            "unset": None,                               # declared but never written
+        }})
+        board = KleinGateway.parse_blackboard(raw)["MainTree"]
+        self.assertEqual(board["flag"], 1)
+        self.assertEqual(board["name"], "gripper")
+        self.assertEqual(board["vec"], [1.1, 2.2])
+        self.assertEqual(board["pos"]["__type"], "Position2D")
+        self.assertIsNone(board["unset"])
+
+    def test_boards_are_ordered_by_the_requested_tree_order(self):
+        # The robot walks an unordered map, so it may answer in any order; the
+        # dashboard should still list the root tree first.
+        raw = msgpack.packb({"DoorClosed::7": {"a": 1}, "MainTree": {"b": 2}})
+        order = ["MainTree", "DoorClosed::7"]
+        self.assertEqual(list(KleinGateway.parse_blackboard(raw, order)), order)
+
+    def test_unrequested_boards_are_kept_after_the_known_ones(self):
+        raw = msgpack.packb({"Surprise": {"a": 1}, "MainTree": {"b": 2}})
+        parsed = KleinGateway.parse_blackboard(raw, ["MainTree", "Absent"])
+        self.assertEqual(list(parsed), ["MainTree", "Surprise"])
+
+    def test_nil_board_is_reported_empty_not_dropped(self):
+        # Real behaviour: a subtree whose only port is remapped to its parent
+        # holds nothing locally, and the publisher sends nil for that board.
+        # The dashboard must still list the subtree.
+        raw = msgpack.packb({"MainTree": {"a": 1}, "DoorClosed::7": None})
+        parsed = KleinGateway.parse_blackboard(raw, ["MainTree", "DoorClosed::7"])
+        self.assertEqual(parsed, {"MainTree": {"a": 1}, "DoorClosed::7": {}})
+
+    def test_unexpected_board_shape_degrades_to_empty(self):
+        raw = msgpack.packb({"Good": {"a": 1}, "Bad": "not a board"})
+        self.assertEqual(KleinGateway.parse_blackboard(raw),
+                         {"Good": {"a": 1}, "Bad": {}})
+
+    def test_output_is_always_browser_parseable_json(self):
+        # NaN/Infinity would serialize to bare NaN/Infinity, which JSON.parse
+        # rejects — killing the dashboard's whole message stream. Bytes and
+        # non-string keys are not JSON-serializable at all.
+        raw = msgpack.packb({"MainTree": {
+            "nan": float("nan"),
+            "inf": float("inf"),
+            "blob": b"\xff\xfe",
+            "nested": [float("-inf"), {"deep": float("nan")}],
+        }}, use_bin_type=True)
+        board = KleinGateway.parse_blackboard(raw)
+        encoded = json.dumps({"type": "blackboard", "data": board})
+        for token in ("NaN", "Infinity"):
+            self.assertNotIn(token, encoded.replace('"', ""))   # not as bare literals
+        decoded = json.loads(encoded)["data"]["MainTree"]
+        self.assertEqual(decoded["nan"], "nan")
+        self.assertEqual(decoded["inf"], "inf")
+        self.assertEqual(decoded["nested"][1]["deep"], "nan")
+        self.assertIsInstance(decoded["blob"], str)
+
+    def test_integer_keys_are_stringified(self):
+        raw = msgpack.packb({"MainTree": {1: "one"}})
+        board = KleinGateway.parse_blackboard(raw)
+        self.assertEqual(board["MainTree"], {"1": "one"})
+        json.dumps(board)      # must not raise
 
 
 class HttpResponseTest(unittest.TestCase):

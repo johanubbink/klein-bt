@@ -3,14 +3,15 @@
 klein connects to a running BehaviorTree.CPP robot node exposing the Groot2
 publisher protocol (a ``ZMQ_REP`` socket, default port 1667), performs the
 FULLTREE handshake, recursively unrolls nested subtrees into a single tree, and
-then streams 10 Hz status telemetry to browser dashboards over WebSockets.
+then streams 10 Hz status telemetry — plus 2 Hz blackboard values, one board per
+subtree — to browser dashboards over WebSockets.
 
 Everything the browser needs is served from a **single port** (``--port``):
 
 * plain HTTP for the dashboard (``/`` and ``/index.html``), its ``/styles.css``
   and ``/app.js``, and the bundled D3.js (``/d3.v7.min.js``), and
 * a WebSocket endpoint (``/ws``) that pushes the unrolled tree layout on connect
-  and then broadcasts live status frames.
+  and then broadcasts live status and blackboard frames.
 
 Serving both from one origin means the dashboard just opens
 ``ws://<same-host:port>/ws`` — no port to configure, inject, or firewall twice.
@@ -23,6 +24,7 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import random
 import socket
 import struct
@@ -32,6 +34,7 @@ import xml.etree.ElementTree as ET
 from http import HTTPStatus
 from pathlib import Path
 
+import msgpack
 import zmq
 import zmq.asyncio
 import websockets
@@ -41,6 +44,7 @@ from websockets.http11 import Response
 from .groot2_protocol import (
     HEADER_FORMAT,
     PROTOCOL_ID,
+    REQ_BLACKBOARD,
     REQ_FULLTREE,
     REQ_STATUS,
     STATUS_RECORD_FORMAT,
@@ -53,6 +57,7 @@ STATIC_DIR = PACKAGE_DIR / "static"    # dashboard web assets live here, not bes
 
 # Timeouts / cadence
 POLL_INTERVAL = 0.1             # 10 Hz status poll
+BLACKBOARD_POLL_INTERVAL = 0.5  # 2 Hz blackboard poll — values change slower than status
 REQUEST_TIMEOUT = 2.0           # seconds to wait for a robot reply
 LAYOUT_RETRY_MAX = 5.0          # cap on handshake retry backoff
 
@@ -95,6 +100,11 @@ class KleinGateway:
         self._layout_json = None            # cached layout frame, rebuilt each handshake
         self.clients = set()
 
+        # Blackboards: one per subtree instance, named by the paths in the layout.
+        self._blackboard_names = []          # subtree instance paths, in tree order
+        self._blackboard_request = None      # pre-encoded b"name1;name2" request payload
+        self._blackboard_json = None         # cached last frame, for late-joining clients
+
         self._node_seq = 0                  # stable per-node id (uid may be null)
 
         # Robot reachability, mirrored to dashboards so a blank canvas is never
@@ -121,11 +131,13 @@ class KleinGateway:
         self.socket.setsockopt(zmq.LINGER, 0)
         self.socket.connect(self.robot_endpoint)
 
-    async def _request(self, request_type):
+    async def _request(self, request_type, payload=None):
         """Send one request and return the multipart reply frames.
 
-        Replies are 2-frame multipart messages: frame 0 is a 22-byte reply
-        header, frame 1 is the payload (tree XML or status buffer). On any
+        Some requests carry an argument frame after the header (BLACKBOARD wants
+        the list of boards to dump); pass it as ``payload``. Replies are 2-frame
+        multipart messages: frame 0 is a 22-byte reply header, frame 1 is the
+        payload (tree XML, status buffer, or msgpack blackboards). On any
         timeout/fault the socket is recreated and ``RobotTimeout`` is raised.
         """
         async with self._req_lock:
@@ -133,8 +145,9 @@ class KleinGateway:
                 self._new_socket()
             unique_id = random.randint(1, 0xFFFFFFFF)
             header = struct.pack(HEADER_FORMAT, PROTOCOL_ID, request_type, unique_id)
+            frames = [header] if payload is None else [header, payload]
             try:
-                await self.socket.send_multipart([header])
+                await self.socket.send_multipart(frames)
                 return await asyncio.wait_for(
                     self.socket.recv_multipart(), timeout=REQUEST_TIMEOUT
                 )
@@ -202,6 +215,36 @@ class KleinGateway:
             "children": [self.unroll_node(child, expanding) for child in element],
         }
 
+    @staticmethod
+    def extract_blackboard_names(root):
+        """Return the blackboard names to ask the robot for, in tree order.
+
+        Every subtree instance owns a blackboard, and the publisher registers it
+        under the subtree's *instance path* — which BehaviorTree.CPP stamps as
+        ``_fullpath`` on each ``<BehaviorTree>`` block and on the ``<SubTree>``
+        element referencing it. The root subtree's path is empty (it registers
+        under its tree ID instead), and older robots omit ``_fullpath``
+        altogether, hence the ``ID`` fallback. Names may repeat across a block
+        and its reference, so duplicates are dropped.
+
+        Only nodes *inside* ``<BehaviorTree>`` blocks are considered: a FULLTREE
+        reply also carries a ``<TreeNodesModel>`` section that declares the node
+        types, and its ``<SubTree>`` entry is a model, not an instance.
+        """
+        blocks = root.findall(".//BehaviorTree")
+        elements = list(blocks)
+        for block in blocks:
+            elements.extend(block.iter("SubTree"))
+
+        names = []
+        seen = set()
+        for element in elements:
+            name = element.get("_fullpath") or element.get("ID")
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+        return names
+
     def _parse_layout(self, xml_str):
         """Parse FULLTREE XML and build the unrolled tree structure."""
         root = ET.fromstring(xml_str)
@@ -232,6 +275,10 @@ class KleinGateway:
         # Serialize once: the layout is immutable until the next handshake, so
         # every connecting (or reconnecting) client is sent this same frame.
         self._layout_json = json.dumps({"type": "layout", "data": self.tree_structure})
+
+        self._blackboard_names = self.extract_blackboard_names(root)
+        self._blackboard_request = ";".join(self._blackboard_names).encode("utf-8")
+        self._blackboard_json = None    # values from the previous tree are stale
 
     def _set_robot_state(self, connected, detail):
         """Record robot reachability and push it to dashboards on change.
@@ -306,6 +353,88 @@ class KleinGateway:
             updates[node_uid] = {"status": status, "from": transitioned_from}
         return updates
 
+    @staticmethod
+    def _json_safe(value):
+        """Coerce a decoded msgpack value into something ``json.dumps`` accepts.
+
+        Robots can hand us values Python will serialize into JSON the browser
+        then refuses: a non-finite float becomes bare ``NaN``/``Infinity``, which
+        ``JSON.parse`` rejects — killing not just this frame but the dashboard's
+        whole message stream. Raw bytes are equally unserializable.
+        """
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+        if isinstance(value, float) and not math.isfinite(value):
+            return str(value)
+        if isinstance(value, dict):
+            return {str(k): KleinGateway._json_safe(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [KleinGateway._json_safe(v) for v in value]
+        return value
+
+    @staticmethod
+    def parse_blackboard(buffer, order=None):
+        """Decode a msgpack blackboard dump into ``{board_name: {key: value}}``.
+
+        The publisher replies with msgpack nil when no requested name matched a
+        live subtree, which decodes to ``None`` — reported here as no boards at
+        all. Keys starting with ``_`` are BehaviorTree.CPP's private bookkeeping
+        entries (``_autoremap`` and friends); they are dropped here rather than
+        in the browser so the 2 Hz frame stays small and the dashboard needs no
+        knowledge of the protocol's conventions.
+
+        The robot walks an unordered map, so its reply order is arbitrary.
+        ``order`` (the names we asked for, in tree order) restores a stable,
+        meaningful order — root tree first — that the dashboard renders as-is.
+
+        A subtree whose every port is remapped to its parent holds nothing of
+        its own, and the publisher sends nil for it rather than an empty map.
+        Such a board is reported as empty, not dropped: the dashboard should say
+        the subtree has no entries rather than omit the subtree.
+        """
+        boards = msgpack.unpackb(buffer, raw=False, strict_map_key=False)
+        if not isinstance(boards, dict):
+            return {}
+        boards = {str(name): entries for name, entries in boards.items()}
+        names = [name for name in (order or ()) if name in boards]
+        names += [name for name in boards if name not in names]   # anything extra
+        parsed = {}
+        for name in names:
+            entries = boards[name]
+            parsed[name] = {} if not isinstance(entries, dict) else {
+                str(key): KleinGateway._json_safe(value)
+                for key, value in entries.items()
+                if not str(key).startswith("_")
+            }
+        return parsed
+
+    async def blackboard_poller(self):
+        """Poll every subtree's blackboard at 2 Hz (only while clients are
+        watching) and broadcast the values.
+
+        Robot reachability is deliberately *not* reported here: ``status_poller``
+        already owns that at 10 Hz, and a second reporter on a different cadence
+        would make the connection indicator flap.
+        """
+        while True:
+            if not self.clients or not self._blackboard_request:
+                await asyncio.sleep(BLACKBOARD_POLL_INTERVAL)
+                continue
+            try:
+                reply = await self._request(REQ_BLACKBOARD, self._blackboard_request)
+                if reply and len(reply) >= 2 and reply[0] != b"error":
+                    boards = self.parse_blackboard(reply[1], self._blackboard_names)
+                    # Broadcast even when empty, so the dashboard can say so.
+                    self._blackboard_json = json.dumps(
+                        {"type": "blackboard", "data": boards}
+                    )
+                    websockets.broadcast(self.clients, self._blackboard_json)
+            except RobotTimeout:
+                pass  # status_poller reports the outage; values just stop updating
+            except Exception as exc:  # never let the poller die
+                print(f"[klein] blackboard poller error: {exc}", file=sys.stderr)
+            await asyncio.sleep(BLACKBOARD_POLL_INTERVAL)
+
     async def status_poller(self):
         """Poll the robot at 10 Hz (only while clients are watching) and
         broadcast parsed status frames."""
@@ -373,6 +502,9 @@ class KleinGateway:
             if self._layout_json is not None:
                 await websocket.send(self._layout_json)
             # else: fetch_layout() will broadcast the layout to us once it loads.
+            if self._blackboard_json is not None:
+                # Don't make a new dashboard wait half a second for its first values.
+                await websocket.send(self._blackboard_json)
             await websocket.send(self._robot_state_json)  # tell it the robot's reachability now
             async for _message in websocket:
                 pass  # clients are receive-only
@@ -424,7 +556,8 @@ class KleinGateway:
                 url = f"http://localhost:{self.port}"
                 asyncio.get_running_loop().run_in_executor(None, _open_browser, url)
             await self.fetch_layout()      # retries until the robot answers
-            await self.status_poller()     # runs forever
+            # Both pollers run forever, sharing the REQ socket via _req_lock.
+            await asyncio.gather(self.status_poller(), self.blackboard_poller())
 
 
 # --------------------------------------------------------------------------- #

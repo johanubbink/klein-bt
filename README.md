@@ -5,8 +5,8 @@ telemetry to an interactive browser dashboard.
 
 klein connects to a running robot node over ZeroMQ — speaking the Groot2
 publisher wire protocol that ships with BehaviorTree.CPP — recursively unrolls
-nested subtrees into a single tree, and streams 10 Hz status telemetry to an
-interactive **D3.js** dashboard in your browser.
+nested subtrees into a single tree, and streams 10 Hz status telemetry plus live
+blackboard values to an interactive **D3.js** dashboard in your browser.
 
 ![klein streaming a live CrossDoor behavior tree to the dashboard](assets/klein-demo.gif)
 
@@ -44,11 +44,31 @@ live per-node status coloring (green SUCCESS, pulsing amber RUNNING, red
 FAILURE, slate IDLE). D3.js is vendored locally, so the dashboard works on
 air-gapped robot networks with no internet access.
 
+### Blackboards
+
+The **Blackboards** section of the control card lists every subtree's blackboard,
+refreshed at 2 Hz while the tree runs. Groups are collapsed by default — expand
+the ones you care about. A row flashes amber when its value changes, and clicking
+a row unwraps a value too long for the panel.
+
+Values arrive as BehaviorTree.CPP serializes them, so bools read as `0`/`1`, and
+structs show as JSON tagged with the registered type name. An entry reads
+`(not shown)` when the robot sent no value for it — either nothing was ever
+written, or its type has no JSON converter (a ROS node handle, a TF buffer, a
+timeout); the protocol can't distinguish the two, and registering a converter
+with `BT::RegisterJsonDefinition<T>()` makes such a value visible. Very large
+values (a multi-hundred-pose path can serialize to tens of kilobytes) are
+truncated for display with their full size noted.
+
+A subtree whose ports are all remapped to its parent has no entries of its own
+and says so — its values live on the parent's board.
+
 ## Architecture
 
 ```
    robot (BT.CPP)          klein gateway              browser (D3.js)
-   ZMQ_REP :1667  <──REQ──  poll @10Hz    ──WS /ws push──>  one port :8080
+   ZMQ_REP :1667  <──REQ──  status @10Hz  ──WS /ws push──>  one port :8080
+                            blackboard @2Hz
                             serve dashboard ──HTTP GET──>   (HTTP + WebSocket)
 ```
 

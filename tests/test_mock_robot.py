@@ -1,8 +1,9 @@
 """Unit tests for klein.mock_robot — the fake Groot2 publisher used to drive
-klein in tests. Verifies the status animation and reply framing, and round-trips
-its output through the real gateway parser."""
+klein in tests. Verifies the status animation, blackboard content and reply
+framing, and round-trips its output through the real gateway parser."""
 import struct
 import unittest
+import xml.etree.ElementTree as ET
 
 from klein import mock_robot
 from klein.gateway import KleinGateway
@@ -50,6 +51,76 @@ class StatusBufferTest(unittest.TestCase):
         parsed = self.parse(reset_tick)
         self.assertEqual(parsed[1], {"status": "IDLE", "from": "SUCCESS"})   # mission succeeded
         self.assertEqual(parsed[9], {"status": "IDLE", "from": "FAILURE"})   # OpenDoor had failed
+
+
+class BlackboardTest(unittest.TestCase):
+    """The mock's blackboards: type coverage, evolution, and reply encoding."""
+
+    def board(self, tick, name="MainTree"):
+        return mock_robot.build_blackboard(tick)[name]
+
+    def values_over_cycle(self, key, name="MainTree"):
+        return {self.board(t, name)[key] for t in range(mock_robot.CYCLE_TICKS)}
+
+    def test_serves_the_names_the_layout_advertises(self):
+        self.assertEqual(
+            list(mock_robot.build_blackboard(0)),
+            mock_robot.BLACKBOARD_NAMES,
+        )
+        # ...and those are exactly the names klein derives from the same XML.
+        self.assertEqual(
+            KleinGateway.extract_blackboard_names(ET.fromstring(mock_robot.TREE_XML)),
+            mock_robot.BLACKBOARD_NAMES,
+        )
+
+    def test_covers_the_value_shapes_a_robot_can_send(self):
+        board = self.board(0)
+        self.assertIsInstance(board["door_open"], int)           # bools arrive as ints
+        self.assertIsInstance(board["mission_phase"], str)
+        self.assertIsInstance(board["robot_position"], list)     # vector
+        self.assertEqual(board["target_pose"]["__type"], "Pose2D")   # registered struct
+        self.assertIsNone(board["last_error"])                   # declared but unset
+
+    def test_values_evolve_across_the_mission(self):
+        self.assertEqual(self.values_over_cycle("door_open"), {0, 1})
+        self.assertEqual(
+            self.values_over_cycle("pick_attempts", "DoorClosed::7"),
+            {0, 1, 2, 3, 4, 5},
+        )
+        self.assertEqual(self.values_over_cycle("lock_status", "DoorClosed::7"),
+                         {"locked", "picked"})
+        self.assertNotEqual(self.board(0)["tick"], self.board(1)["tick"])
+
+    def test_blackboard_tracks_the_status_animation(self):
+        # door_open flips exactly when the tryOpen Fallback (uid 8) reports
+        # SUCCESS — the blackboard and the node colors read the same frame.
+        for tick in range(mock_robot.CYCLE_TICKS):
+            status = KleinGateway.parse_status(mock_robot.build_status_buffer(tick))
+            if status[8]["status"] == "SUCCESS":
+                self.assertEqual(self.board(tick)["door_open"], 1, f"tick {tick}")
+
+    def test_reply_round_trips_through_the_gateway_parser(self):
+        request = [b"header", b"MainTree;DoorClosed::7"]
+        boards = KleinGateway.parse_blackboard(mock_robot.build_blackboard_reply(request, 0))
+        self.assertEqual(sorted(boards), ["DoorClosed::7", "MainTree"])
+        # The gateway strips the mock's private key before the browser sees it.
+        self.assertIn("_debug_internal", mock_robot.build_blackboard(0)["MainTree"])
+        self.assertNotIn("_debug_internal", boards["MainTree"])
+
+    def test_unknown_names_are_dropped_silently(self):
+        boards = KleinGateway.parse_blackboard(
+            mock_robot.build_blackboard_reply([b"header", b"MainTree;Nope"], 0)
+        )
+        self.assertEqual(list(boards), ["MainTree"])
+
+    def test_no_match_yields_msgpack_nil(self):
+        raw = mock_robot.build_blackboard_reply([b"header", b"Nope;AlsoNope"], 0)
+        self.assertEqual(raw, b"\xc0")                       # msgpack nil
+        self.assertEqual(KleinGateway.parse_blackboard(raw), {})
+
+    def test_missing_argument_frame_is_tolerated(self):
+        raw = mock_robot.build_blackboard_reply([b"header"], 0)
+        self.assertEqual(KleinGateway.parse_blackboard(raw), {})
 
 
 class ReplyHeaderTest(unittest.TestCase):

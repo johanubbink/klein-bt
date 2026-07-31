@@ -206,6 +206,202 @@ function applyStatus(telemetryMap) {
     });
 }
 
+// ------------------------------------------------------------------ //
+// Blackboards — one collapsible group per subtree, values live at 2 Hz
+// ------------------------------------------------------------------ //
+// Everything here starts collapsed: on a real tree the boards are far taller
+// than the controls above them, and the panel floats over the canvas. The
+// open/closed state and the last-seen values live outside the DOM so they
+// survive every update frame.
+const bbGroupOpen = {};     // board name -> is its body expanded?
+const bbLastValues = {};    // "board key" -> last value, serialized, for the flash
+const bbGroupEls = {};      // board name -> { group, body, count, rows: {key: row} }
+
+const bbToggle = document.getElementById("bb-toggle");
+const bbPanel = document.getElementById("bb-panel");
+const bbGroups = document.getElementById("bb-groups");
+const bbCount = document.getElementById("bb-count");
+const bbEmpty = document.getElementById("bb-empty");
+
+bbToggle.addEventListener("click", () => {
+    const open = bbPanel.hidden;
+    bbPanel.hidden = !open;
+    bbToggle.classList.toggle("open", open);
+    bbToggle.setAttribute("aria-expanded", String(open));
+});
+
+// BehaviorTree.CPP sends ints for bools (0/1), arrays for vectors, and objects
+// tagged with "__type" for structs it has a JSON converter for.
+//
+// Null covers two cases the protocol can't tell apart: an entry declared but
+// never written, and one holding a type with no JSON converter (a ROS node
+// handle, a TF buffer, a chrono duration). On a real robot the second case is
+// the common one, so the label says the value isn't shown rather than claiming
+// it isn't set, and the tooltip explains how to make it visible.
+const BB_NO_VALUE = "(not shown)";
+const BB_NO_VALUE_HINT =
+    "Either no value has been written, or its type has no JSON converter " +
+    "(register one with BT::RegisterJsonDefinition<T>() to see it here).";
+
+// Real blackboards carry values no side panel can show: a 150-pose nav path
+// serializes to ~68 kB, which expands to a row tens of thousands of pixels tall
+// and puts as much text in the DOM on every frame. Cap what we render and say
+// how much was left out, so a huge value stays a readable sample of itself.
+const BB_MAX_CHARS = 2000;
+
+function formatBBValue(value) {
+    if (value === null || value === undefined) return BB_NO_VALUE;
+    const text = typeof value === "string" ? value : JSON.stringify(value);
+    if (text.length <= BB_MAX_CHARS) return text;
+    return `${text.slice(0, BB_MAX_CHARS)}… (${text.length.toLocaleString()} chars total)`;
+}
+
+function createBBGroup(name) {
+    const group = document.createElement("div");
+    group.className = "bb-group";
+
+    const header = document.createElement("button");
+    header.type = "button";
+    header.className = "bb-group-header";
+    header.setAttribute("aria-expanded", String(Boolean(bbGroupOpen[name])));
+
+    const chevron = document.createElement("span");
+    chevron.className = "bb-chevron";
+    chevron.setAttribute("aria-hidden", "true");
+    const label = document.createElement("span");
+    label.className = "bb-group-name";
+    label.textContent = name;
+    const count = document.createElement("span");
+    count.className = "bb-group-count";
+    header.append(chevron, label, count);
+
+    const body = document.createElement("div");
+    body.className = "bb-group-body";
+    body.hidden = !bbGroupOpen[name];
+
+    // Shown when the board holds nothing: a subtree whose ports are all
+    // remapped to its parent has no entries of its own, and saying so beats
+    // leaving a header with nothing under it.
+    const empty = document.createElement("p");
+    empty.className = "bb-group-empty";
+    empty.textContent = "no local entries";
+    body.appendChild(empty);
+
+    header.addEventListener("click", () => {
+        const open = !bbGroupOpen[name];
+        bbGroupOpen[name] = open;
+        body.hidden = !open;
+        header.classList.toggle("open", open);
+        header.setAttribute("aria-expanded", String(open));
+    });
+    header.classList.toggle("open", Boolean(bbGroupOpen[name]));
+
+    group.append(header, body);
+    bbGroups.appendChild(group);
+    return { group, body, count, empty, rows: {} };
+}
+
+// Rows are buttons because they are disclosures too: clicking one unwraps a
+// value too long for the panel's width.
+function createBBRow(group, key) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "bb-row";
+
+    const keyEl = document.createElement("span");
+    keyEl.className = "bb-key";
+    keyEl.textContent = key;
+    keyEl.title = key;      // long, similar keys truncate alike; hover disambiguates
+    const valueEl = document.createElement("span");
+    valueEl.className = "bb-value";
+
+    row.append(keyEl, valueEl);
+    row.addEventListener("click", () => row.classList.toggle("expanded"));
+    group.body.appendChild(row);
+    return { row, value: valueEl, text: null };
+}
+
+// Reorder children only when the order is actually wrong: re-appending a row
+// restarts its flash animation.
+function syncBBOrder(container, ordered) {
+    const correct = ordered.length === container.children.length
+        && ordered.every((el, i) => container.children[i] === el);
+    if (!correct) ordered.forEach(el => container.appendChild(el));
+}
+
+function renderBlackboards(boards) {
+    // Board order comes from the gateway and follows the tree — root first,
+    // then subtrees as they appear — so the panel reads like the canvas.
+    const names = Object.keys(boards);
+
+    for (const name of names) {
+        const group = bbGroupEls[name] || (bbGroupEls[name] = createBBGroup(name));
+        const entries = boards[name];
+        // The robot's map order is arbitrary (it walks an unordered_map), so
+        // sort to keep rows from reshuffling under the reader between frames.
+        const keys = Object.keys(entries).sort();
+        group.count.textContent = keys.length;
+        group.empty.hidden = keys.length > 0;
+
+        for (const key of keys) {
+            const row = group.rows[key] || (group.rows[key] = createBBRow(group, key));
+            const value = entries[key];
+            const text = formatBBValue(value);
+            if (row.text !== text) {
+                const missing = value === null || value === undefined;
+                row.value.textContent = text;
+                row.value.title = missing ? BB_NO_VALUE_HINT : text;   // full value on hover
+                row.value.classList.toggle("bb-unset", missing);
+                row.text = text;
+            }
+
+            // Flash on a real change only — not the first time a key is seen.
+            const stateKey = name + " " + key;
+            const serialized = JSON.stringify(value === undefined ? null : value);
+            if (stateKey in bbLastValues && bbLastValues[stateKey] !== serialized) {
+                row.row.classList.remove("bb-changed");
+                void row.row.offsetWidth;        // restart a flash already in flight
+                row.row.classList.add("bb-changed");
+            }
+            bbLastValues[stateKey] = serialized;
+        }
+
+        for (const key of Object.keys(group.rows)) {     // keys the robot dropped
+            if (!(key in entries)) {
+                group.rows[key].row.remove();
+                delete group.rows[key];
+                delete bbLastValues[name + " " + key];
+            }
+        }
+        syncBBOrder(group.body, [group.empty, ...keys.map(key => group.rows[key].row)]);
+    }
+
+    for (const name of Object.keys(bbGroupEls)) {        // boards the robot dropped
+        if (!(name in boards)) {
+            bbGroupEls[name].group.remove();
+            delete bbGroupEls[name];
+        }
+    }
+    syncBBOrder(bbGroups, names.map(name => bbGroupEls[name].group));
+
+    bbCount.textContent = names.length ? ` (${names.length})` : "";
+    // Per-group notes cover empty boards; this line is for having none at all.
+    bbEmpty.hidden = names.length > 0;
+    bbEmpty.textContent = "This robot reports no blackboards.";
+}
+
+// A new tree means new boards: drop the old ones rather than leave values that
+// will never update again.
+function resetBlackboards() {
+    bbGroups.textContent = "";
+    for (const key of Object.keys(bbGroupEls)) delete bbGroupEls[key];
+    for (const key of Object.keys(bbLastValues)) delete bbLastValues[key];
+    for (const key of Object.keys(bbGroupOpen)) delete bbGroupOpen[key];
+    bbCount.textContent = "";
+    bbEmpty.hidden = false;
+    bbEmpty.textContent = "Waiting for values…";
+}
+
 // Pan the camera so the root sits at the conventional entry point:
 // top-center for vertical trees, left-center for horizontal ones.
 function resetCamera() {
@@ -286,12 +482,17 @@ function connectGatewayPipeline() {
             rootNodeSnapshot.x0 = 0;
             rootNodeSnapshot.y0 = 0;
 
+            resetBlackboards();
             updateTreeLayout(rootNodeSnapshot);
             resetCamera();
         }
 
         else if (message.type === "status" && rootNodeSnapshot) {
             applyStatus(message.data);
+        }
+
+        else if (message.type === "blackboard") {
+            renderBlackboards(message.data || {});
         }
 
         else if (message.type === "robot") {

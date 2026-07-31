@@ -15,6 +15,7 @@ from enum import IntEnum
 PROTOCOL_ID = 2                 # groot2_protocol.h :: kProtocolID
 REQ_FULLTREE = ord("T")         # RequestType::FULLTREE — returns the tree XML
 REQ_STATUS = ord("S")           # RequestType::STATUS   — returns the status buffer
+REQ_BLACKBOARD = ord("B")       # RequestType::BLACKBOARD — returns msgpack {bb: {key: value}}
 
 # Request header, little-endian: protocol_id (u8) | request_type (u8) | unique_id (u32)
 HEADER_FORMAT = "<BBI"

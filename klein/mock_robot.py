@@ -1,11 +1,13 @@
 """mock_robot.py — a fake BehaviorTree.CPP Groot2 publisher for testing klein.
 
-Implements just enough of the Groot2 wire protocol (FULLTREE + STATUS over a
-ZeroMQ REP socket) to drive the klein dashboard with no real robot. It replays
-the *CrossDoor* mission from BehaviorTree.CPP's ``examples/t11_groot_howto.cpp``
-— the canonical Groot2 tutorial — so the dashboard shows the same tree a real
-robot running that example would publish. Watch RUNNING (pulsing amber),
-SUCCESS (green), FAILURE (red), and IDLE-transition ("was …") states live.
+Implements just enough of the Groot2 wire protocol (FULLTREE + STATUS +
+BLACKBOARD over a ZeroMQ REP socket) to drive the klein dashboard with no real
+robot. It replays the *CrossDoor* mission from BehaviorTree.CPP's
+``examples/t11_groot_howto.cpp`` — the canonical Groot2 tutorial — so the
+dashboard shows the same tree a real robot running that example would publish.
+Watch RUNNING (pulsing amber), SUCCESS (green), FAILURE (red), and
+IDLE-transition ("was …") states live, plus blackboard values that evolve with
+the mission.
 
 Usage:
     klein-bt-mock                       # bind tcp://*:1667 (Groot2 default)
@@ -18,12 +20,14 @@ Then, in another shell:
 import argparse
 import struct
 
+import msgpack
 import zmq
 
 from .groot2_protocol import (
     HEADER_FORMAT,
     IDLE_TRANSITION,
     PROTOCOL_ID,
+    REQ_BLACKBOARD,
     REQ_FULLTREE,
     REQ_STATUS,
     STATUS_RECORD_FORMAT,
@@ -35,8 +39,13 @@ from .groot2_protocol import (
 # assigned in creation order (depth-first), exactly as BT.CPP does, so they line
 # up with the status records below. The DoorClosed subtree is stitched in place
 # by klein, unrolling to 13 nodes total — matching the real example.
+#
+# ``_fullpath`` is the subtree *instance path*, which doubles as the blackboard
+# name in a BLACKBOARD request. Real robots stamp it on every <BehaviorTree>
+# block and on the <SubTree> element that references it (hence the duplicate
+# "DoorClosed::7" below, which klein dedupes).
 TREE_XML = """<root BTCPP_format="4" main_tree_to_execute="MainTree">
-  <BehaviorTree ID="MainTree">
+  <BehaviorTree ID="MainTree" _fullpath="MainTree">
     <Sequence name="Sequence" _uid="1">
       <Script name="Script" code="door_open:=false" _uid="2"/>
       <UpdatePosition name="UpdatePosition" _uid="3"/>
@@ -44,12 +53,12 @@ TREE_XML = """<root BTCPP_format="4" main_tree_to_execute="MainTree">
         <Inverter name="Inverter" _uid="5">
           <IsDoorClosed name="IsDoorClosed" _uid="6"/>
         </Inverter>
-        <SubTree ID="DoorClosed" _uid="7"/>
+        <SubTree ID="DoorClosed" _uid="7" _fullpath="DoorClosed::7"/>
       </Fallback>
       <PassThroughDoor name="PassThroughDoor" _uid="13"/>
     </Sequence>
   </BehaviorTree>
-  <BehaviorTree ID="DoorClosed">
+  <BehaviorTree ID="DoorClosed" _fullpath="DoorClosed::7">
     <Fallback name="tryOpen" _uid="8">
       <OpenDoor name="OpenDoor" _uid="9"/>
       <RetryUntilSuccessful name="RetryUntilSuccessful" num_attempts="5" _uid="10">
@@ -59,6 +68,10 @@ TREE_XML = """<root BTCPP_format="4" main_tree_to_execute="MainTree">
     </Fallback>
   </BehaviorTree>
 </root>"""
+
+# Blackboard names the mock serves, in FULLTREE order (what klein derives from
+# the _fullpath attributes above).
+BLACKBOARD_NAMES = ["MainTree", "DoorClosed::7"]
 
 # Every UID in the tree, in order (the publisher reports status for all of them).
 # SmashDoor (12) is the never-taken branch: PickLock always cracks it first.
@@ -74,7 +87,7 @@ WAS_FAILURE = IDLE_TRANSITION + NodeStatus.FAILURE   # 13: "now IDLE, previously
 
 
 def _build_timeline():
-    """Build the mission as a list of ``(duration_ticks, {uid: status})`` frames.
+    """Build the mission as ``(duration_ticks, {uid: status}, {bb_key: value})``.
 
     Nodes absent from a frame are IDLE. This mirrors the deterministic CrossDoor
     run: the door starts closed and locked, so OpenDoor fails, PickLock retries
@@ -82,72 +95,139 @@ def _build_timeline():
     through. Completed nodes keep their SUCCESS/FAILURE color — a non-reactive
     Sequence/Fallback holds a finished child's result — so a colored trail grows
     as the mission advances; a final reset flips everything to "was …" and idle.
+
+    Each frame also carries the mission's blackboard values at that moment, so
+    the values the dashboard shows stay in lockstep with the node colors rather
+    than being reconstructed from hard-coded tick ranges.
     """
     frames = []
     done = {}   # uid -> solid terminal status, accumulated as nodes complete
+    bb = {"mission_phase": "init", "door_open": 0,
+          "pick_attempts": 0, "lock_status": "locked"}
 
-    def frame(dur, running):
+    def frame(dur, running, failed=()):
         status = dict(done)
         for uid in running:
             status[uid] = RUNNING
-        frames.append((dur, status))
+        for uid in failed:
+            status[uid] = FAILURE
+        frames.append((dur, status, dict(bb)))
 
     frame(3, [1, 2])                    # Script sets a blackboard flag
     done[2] = SUCCESS
     frame(3, [1, 3])                    # UpdatePosition
     done[3] = SUCCESS
+    bb["mission_phase"] = "check_door"
     frame(3, [1, 4, 5, 6])             # IsDoorClosed under Inverter/Fallback: door IS closed
     done[6] = SUCCESS                   # IsDoorClosed -> SUCCESS (closed)
     done[5] = FAILURE                   # ...which the Inverter negates: the door is not open
 
+    bb["mission_phase"] = "unlocking"
     frame(5, [1, 4, 7, 8, 9])          # into the DoorClosed subtree: OpenDoor tries first
     done[9] = FAILURE                   # OpenDoor -> FAILURE (the door is locked)
 
     for attempt in range(1, 6):        # RetryUntilSuccessful drives PickLock, 5 attempts
+        bb["pick_attempts"] = attempt
         frame(4, [1, 4, 7, 8, 10, 11]) # PickLock working (pulsing amber)
         if attempt < 5:
-            frames.append((1, {**done, 10: RUNNING, 11: FAILURE,  # this attempt failed (red flash)
-                                1: RUNNING, 4: RUNNING, 7: RUNNING, 8: RUNNING}))
+            frame(1, [1, 4, 7, 8, 10], failed=[11])   # this attempt failed (red flash)
     done[11] = SUCCESS                  # PickLock cracked it on the fifth try
     done[10] = SUCCESS                  # RetryUntilSuccessful -> SUCCESS
     done[8] = SUCCESS                   # Fallback "tryOpen" -> SUCCESS (door_open:=true)
     done[7] = SUCCESS                   # DoorClosed subtree -> SUCCESS
     done[4] = SUCCESS                   # the outer Fallback -> SUCCESS
 
+    bb["lock_status"] = "picked"         # the lock gave way...
+    bb["door_open"] = 1                  # ...so the Script's flag is now true
+    bb["mission_phase"] = "passing_through"
     frame(5, [1, 13])                   # PassThroughDoor: the door is open now
     done[13] = SUCCESS
     done[1] = SUCCESS                   # the mission Sequence -> SUCCESS
 
-    frames.append((15, dict(done)))     # hold the completed mission so it can be read
+    bb["mission_phase"] = "done"
+    frames.append((15, dict(done), dict(bb)))   # hold the completed mission to be read
     # Reset: the whole tree drops back to IDLE, each node flagged with its last result.
     frames.append((6, {uid: (WAS_SUCCESS if st == SUCCESS else WAS_FAILURE)
-                        for uid, st in done.items()}))
-    frames.append((12, {}))             # idle pause before the next lap
+                        for uid, st in done.items()}, dict(bb)))
+    # Idle pause before the next lap: the tree is torn down, so the blackboard
+    # reverts to its initial state (the next lap's Script re-runs door_open:=false).
+    frames.append((12, {}, {"mission_phase": "idle", "door_open": 0,
+                            "pick_attempts": 0, "lock_status": "locked"}))
     return frames
 
 
 TIMELINE = _build_timeline()
-CYCLE_TICKS = sum(dur for dur, _ in TIMELINE)
+CYCLE_TICKS = sum(dur for dur, _, _ in TIMELINE)
+
+
+def _frame_at(tick):
+    """Return the ``({uid: status}, {bb_key: value})`` frame for a given tick.
+
+    Walks the looping mission TIMELINE. Shared by the status and blackboard
+    builders so the two can never disagree about where the mission is.
+    """
+    t = tick % CYCLE_TICKS
+    for dur, status, bb in TIMELINE:
+        if t < dur:
+            return status, bb
+        t -= dur
+    return TIMELINE[-1][1], TIMELINE[-1][2]     # unreachable: the durations sum to CYCLE_TICKS
 
 
 def build_status_buffer(tick):
     """Return the 3-byte-per-node status buffer for the current tick.
 
-    Walks the looping mission TIMELINE; nodes not named in the current frame are
-    reported IDLE.
+    Nodes not named in the current frame are reported IDLE.
     """
-    t = tick % CYCLE_TICKS
-    status = TIMELINE[-1][1]
-    for dur, frame_status in TIMELINE:
-        if t < dur:
-            status = frame_status
-            break
-        t -= dur
-
+    status, _bb = _frame_at(tick)
     buf = bytearray()
     for uid in ALL_UIDS:
         buf += struct.pack(STATUS_RECORD_FORMAT, uid, status.get(uid, IDLE))
     return bytes(buf)
+
+
+def build_blackboard(tick):
+    """Return ``{blackboard_name: {key: value}}`` for the current tick.
+
+    Covers the value shapes a real robot can send, so the dashboard's rendering
+    is exercised end to end: ints (BT.CPP stores bools as 0/1), strings, floats,
+    a vector, a JSON-registered struct (tagged with ``__type``), and an entry
+    that is declared but never written (``None``). ``_debug_internal`` is a
+    private key: the gateway must filter it out before it reaches the browser.
+    """
+    _status, bb = _frame_at(tick)
+    t = tick % CYCLE_TICKS
+    return {
+        "MainTree": {
+            "door_open": bb["door_open"],
+            "mission_phase": bb["mission_phase"],
+            "tick": t,
+            # Advances every tick, so at least one row always flashes on update.
+            "robot_position": [round(t * 0.05, 2), 0.5, 1.57],
+            # Static: proves unchanged rows stay quiet while their neighbours flash.
+            "target_pose": {"__type": "Pose2D", "x": 3.0, "y": 0.5, "theta": 1.57},
+            "last_error": None,             # declared but unset -> renders "(unset)"
+            "_debug_internal": "must never reach the dashboard",
+        },
+        "DoorClosed::7": {
+            "pick_attempts": bb["pick_attempts"],
+            "lock_status": bb["lock_status"],
+        },
+    }
+
+
+def build_blackboard_reply(request_frames, tick):
+    """Encode the msgpack payload for a BLACKBOARD request.
+
+    The request's second frame is a ``;``-separated list of blackboard names.
+    Like the real publisher, unknown names are silently dropped, and a request
+    that matches nothing yields msgpack nil rather than an empty map.
+    """
+    raw_names = request_frames[1].decode("utf-8", errors="replace") if len(request_frames) >= 2 else ""
+    names = [name for name in raw_names.split(";") if name]
+    boards = build_blackboard(tick)
+    payload = {name: boards[name] for name in names if name in boards}
+    return msgpack.packb(payload or None, use_bin_type=True)
 
 
 def reply_header(request_first_frame):
@@ -187,6 +267,8 @@ def main():
             elif req_type == REQ_STATUS:
                 sock.send_multipart([reply_header(header), build_status_buffer(tick)])
                 tick += 1
+            elif req_type == REQ_BLACKBOARD:
+                sock.send_multipart([reply_header(header), build_blackboard_reply(frames, tick)])
             else:
                 sock.send_multipart([b"error", b"unsupported request"])
     except KeyboardInterrupt:

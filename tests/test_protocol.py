@@ -7,6 +7,7 @@ from klein.groot2_protocol import (
     HEADER_FORMAT,
     IDLE_TRANSITION,
     PROTOCOL_ID,
+    REQ_BLACKBOARD,
     REQ_FULLTREE,
     REQ_STATUS,
     STATUS_RECORD_FORMAT,
@@ -21,6 +22,7 @@ class ConstantsTest(unittest.TestCase):
         self.assertEqual(PROTOCOL_ID, 2)
         self.assertEqual(REQ_FULLTREE, ord("T"))
         self.assertEqual(REQ_STATUS, ord("S"))
+        self.assertEqual(REQ_BLACKBOARD, ord("B"))
 
     def test_struct_formats(self):
         self.assertEqual(struct.calcsize(HEADER_FORMAT), 6)         # u8 u8 u32

@@ -15,6 +15,7 @@ dynamic = ["version"]
 dependencies = [
     "pyzmq>=25",
     "websockets>=14",
+    "msgpack>=1.0",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",

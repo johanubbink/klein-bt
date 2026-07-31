@@ -8,8 +8,8 @@ subtree — to browser dashboards over WebSockets.
 
 Everything the browser needs is served from a **single port** (``--port``):
 
-* plain HTTP for the dashboard (``/`` and ``/index.html``), its ``/styles.css``
-  and ``/app.js``, and the bundled D3.js (``/d3.v7.min.js``), and
+* plain HTTP for the dashboard (``/`` and ``/index.html``), its ``/styles.css``,
+  ``/app.js`` and ``/renderers.js``, and the bundled D3.js (``/d3.v7.min.js``), and
 * a WebSocket endpoint (``/ws``) that pushes the unrolled tree layout on connect
   and then broadcasts live status and blackboard frames.
 
@@ -66,6 +66,7 @@ _STATIC_ROUTES = {
     "/index.html": ("index.html", "text/html; charset=utf-8"),
     "/styles.css": ("styles.css", "text/css; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "/renderers.js": ("renderers.js", "text/javascript; charset=utf-8"),
     "/d3.v7.min.js": ("d3.v7.min.js", "text/javascript; charset=utf-8"),
 }
 _INDEX_FALLBACK = b"<!doctype html><h1>klein: index.html missing from package</h1>"
@@ -198,6 +199,10 @@ class KleinGateway:
                 "name": element.get("name") or subtree_id or "SubTree",
                 "subtree_id": subtree_id,
                 "is_subtree_root": True,
+                # This instance's blackboard, named exactly as
+                # extract_blackboard_names asks the robot for it — the dashboard
+                # pairs each board with the node that owns it.
+                "board": element.get("_fullpath") or subtree_id,
                 "children": [],
             }
             subtree_root = self.all_behavior_trees.get(subtree_id)
@@ -250,6 +255,7 @@ class KleinGateway:
         root = ET.fromstring(xml_str)
 
         self.all_behavior_trees = {}
+        block_paths = {}            # tree ID -> that block's _fullpath, for the root's board
         first_tree_id = None
         for bt_block in root.findall(".//BehaviorTree"):
             tree_id = bt_block.get("ID")
@@ -257,6 +263,7 @@ class KleinGateway:
                 continue
             children = list(bt_block)
             self.all_behavior_trees[tree_id] = children[0] if children else None
+            block_paths[tree_id] = bt_block.get("_fullpath")
             if first_tree_id is None:
                 first_tree_id = tree_id
 
@@ -272,6 +279,11 @@ class KleinGateway:
         self._node_seq = 0
         self.tree_structure = self.unroll_node(self.all_behavior_trees[main_tree_id])
         self.tree_structure["root_tree_id"] = main_tree_id
+        # The root's own blackboard, taken from *its* block rather than the first
+        # one — main_tree_to_execute need not point at the first <BehaviorTree>.
+        # Real robots leave the root's _fullpath empty, so this falls through to
+        # the tree ID, exactly as extract_blackboard_names does.
+        self.tree_structure["board"] = block_paths.get(main_tree_id) or main_tree_id
         # Serialize once: the layout is immutable until the next handshake, so
         # every connecting (or reconnecting) client is sent this same frame.
         self._layout_json = json.dumps({"type": "layout", "data": self.tree_structure})
@@ -528,8 +540,8 @@ class KleinGateway:
         self._static.setdefault(
             "/index.html", (_INDEX_FALLBACK, "text/html; charset=utf-8")
         )
-        # The dashboard needs both D3 and its own script to render at all.
-        for asset in ("d3.v7.min.js", "app.js"):
+        # The dashboard needs D3 and both of its own scripts to render at all.
+        for asset in ("d3.v7.min.js", "app.js", "renderers.js"):
             if f"/{asset}" not in self._static:
                 print(f"[klein] warning: {asset} not bundled; dashboard will not render.",
                       file=sys.stderr)

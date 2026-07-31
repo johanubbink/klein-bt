@@ -4,6 +4,7 @@
     --border-color: #2d3748;
     --text-main: #f1f5f9;
     --text-muted: #94a3b8;
+    --accent: #38bdf8;
 
     /* Behavior Tree Status Colors */
     --color-IDLE: #64748b;
@@ -12,6 +13,8 @@
     --color-FAILURE: #dc2626;
     --color-SKIPPED: #2563eb;
     --color-TRANSITION: #475569;
+
+    --sidebar-width: 320px;
 }
 
 body, html {
@@ -25,31 +28,94 @@ body, html {
     overflow: hidden;
 }
 
-#ui-layer {
+/* Visible to screen readers, not on screen. */
+.sr-only {
     position: absolute;
-    top: 20px;
-    left: 20px;
-    z-index: 10;
-    background: rgba(26, 26, 34, 0.85);
-    backdrop-filter: blur(8px);
-    padding: 15px 20px;
-    border-radius: 8px;
-    border: 1px solid var(--border-color);
-    pointer-events: auto;
-    box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5);
+    width: 1px; height: 1px;
+    padding: 0; margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
 }
 
-h1 { margin: 0; font-size: 1.4rem; font-weight: 600; letter-spacing: -0.025em; }
+/* ------------------------------------------------------------------ */
+/* Sidebar — full-height pane over the canvas                          */
+/* ------------------------------------------------------------------ */
+/* Full height because a real robot's blackboards are far taller than any
+   floating card: eight boards and seventeen root entries need the screen. It
+   overlays rather than insets so the canvas keeps the whole viewport, and it
+   slides away entirely when you want the tree to itself. */
+#sidebar {
+    position: absolute;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: var(--sidebar-width);
+    box-sizing: border-box;     /* the stated width is the width, border included */
+    z-index: 10;
+    display: flex;
+    flex-direction: column;
+    background: rgba(26, 26, 34, 0.85);
+    backdrop-filter: blur(8px);
+    border-right: 1px solid var(--border-color);
+    box-shadow: 4px 0 15px -3px rgba(0, 0, 0, 0.5);
+    transition: transform 0.22s ease;
+}
+#sidebar.collapsed { transform: translateX(-100%); }
+
+#sidebar-header {
+    flex-shrink: 0;
+    padding: 16px 18px 14px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.header-row { display: flex; align-items: flex-start; gap: 10px; }
+
+h1 {
+    flex: 1;
+    margin: 0;
+    font-size: 1.05rem;
+    font-weight: 600;
+    letter-spacing: -0.015em;
+}
+
+#sidebar-collapse, #sidebar-show {
+    flex-shrink: 0;
+    padding: 1px 7px 3px;
+    font-size: 0.95rem;
+    line-height: 1;
+    font-family: inherit;
+    color: var(--text-muted);
+    background: #23232f;
+    border: 1px solid var(--border-color);
+    border-radius: 5px;
+    cursor: pointer;
+}
+#sidebar-collapse:hover, #sidebar-show:hover { color: var(--text-main); border-color: #475569; }
+
+/* The only way back once the pane is gone: a handle tucked against the edge. */
+#sidebar-show {
+    position: absolute;
+    top: 16px;
+    left: 0;
+    z-index: 10;
+    padding: 6px 8px 8px;
+    border-left: 0;
+    border-radius: 0 6px 6px 0;
+}
+#sidebar-show[hidden] { display: none; }
 
 .status-tracker {
     display: flex;
     align-items: center;
-    font-size: 0.85rem;
+    font-size: 0.8rem;
     color: var(--text-muted);
-    margin-top: 6px;
+    margin-top: 7px;
 }
 
 .dot {
+    flex-shrink: 0;
     width: 8px;
     height: 8px;
     background-color: #ef4444;
@@ -60,108 +126,184 @@ h1 { margin: 0; font-size: 1.4rem; font-weight: 600; letter-spacing: -0.025em; }
 .dot.online { background-color: #22c55e; box-shadow: 0 0 8px #22c55e; }
 .dot.warn { background-color: var(--color-RUNNING); box-shadow: 0 0 8px var(--color-RUNNING); }
 
-#orientation-toggle {
-    margin-top: 10px;
-    padding: 4px 10px;
-    font-size: 0.8rem;
-    font-family: inherit;
-    color: var(--text-muted);
-    background: #23232f;
-    border: 1px solid var(--border-color);
-    border-radius: 6px;
-    cursor: pointer;
-}
-#orientation-toggle:hover { color: var(--text-main); border-color: #475569; }
-
-/* Blackboards panel — one collapsible group per subtree, inside the control
-   card. Group names borrow the tree's node-type cyan and the flash borrows the
-   RUNNING amber, so the panel reads as part of the tree, not a separate widget. */
-#bb-section { margin-top: 10px; }
-
-#bb-toggle {
-    display: inline-flex;      /* hug the label, like #orientation-toggle */
+/* ------------------------------------------------------------------ */
+/* Layout selector — a segmented control, not a mystery button          */
+/* ------------------------------------------------------------------ */
+.control-row {
+    display: flex;
     align-items: center;
-    padding: 4px 10px;
-    font-size: 0.8rem;
-    font-family: inherit;
+    gap: 10px;
+    margin-top: 14px;
+}
+
+.control-label {
+    font-size: 10px;
+    font-weight: bold;
     color: var(--text-muted);
-    background: #23232f;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.segmented {
+    display: inline-flex;
     border: 1px solid var(--border-color);
     border-radius: 6px;
-    cursor: pointer;
+    overflow: hidden;
+    background: #1c1c26;
 }
-#bb-toggle:hover { color: var(--text-main); border-color: #475569; }
-#bb-count { color: #64748b; margin-left: 4px; }
 
-/* Shared disclosure arrow: points right when closed, down when open. */
-.bb-chevron {
+.segmented label { display: block; }
+.segmented label + label span { border-left: 1px solid var(--border-color); }
+
+/* The input carries state and keyboard focus; the span is what you see. */
+.segmented input {
+    position: absolute;
+    opacity: 0;
     width: 0;
     height: 0;
-    margin-right: 7px;
-    border-left: 4px solid currentColor;
-    border-top: 3.5px solid transparent;
-    border-bottom: 3.5px solid transparent;
-    transition: transform 0.15s ease;
 }
-.open > .bb-chevron { transform: rotate(90deg) translateX(1px); }
+
+.segmented span {
+    display: block;
+    padding: 4px 11px;
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: background-color 0.12s ease, color 0.12s ease;
+}
+.segmented span:hover { color: var(--text-main); }
+.segmented input:checked + span {
+    color: var(--text-main);
+    background: var(--border-color);
+    font-weight: 500;
+}
+.segmented input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* ------------------------------------------------------------------ */
+/* Blackboards — a heading, then every subtree's board beneath it       */
+/* ------------------------------------------------------------------ */
+/* The heading sits outside the scroll container so it stays put while boards
+   scroll under it, and so the boards read as its contents rather than as its
+   siblings. */
+#bb-heading {
+    flex-shrink: 0;
+    display: flex;
+    align-items: baseline;
+    margin: 0;
+    padding: 12px 18px 8px;
+    font-size: 10px;
+    font-weight: bold;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+#bb-count { margin-left: auto; font-family: monospace; font-weight: normal; color: #64748b; }
 
 #bb-panel {
-    margin-top: 8px;
-    min-width: 280px;
-    max-width: 340px;
-    max-height: 40vh;
+    flex: 1;
+    min-height: 0;              /* let the flex child actually shrink and scroll */
     overflow-y: auto;
     overscroll-behavior: contain;
+    padding: 0 12px 16px;
     scrollbar-width: thin;
     scrollbar-color: var(--border-color) transparent;
 }
 
 #bb-empty {
-    margin: 4px 0 0;
+    margin: 2px 6px;
     font-size: 0.75rem;
     color: var(--text-muted);
     font-style: italic;
 }
 
-.bb-group + .bb-group { margin-top: 2px; }
+/* Nesting mirrors the tree: a board owned by a subtree of a subtree is indented
+   under it, with a hairline guide so the relationship survives long names. */
+.bb-group { padding-left: calc(var(--depth, 0) * 12px); }
+.bb-group[data-nested="1"] { border-left: 1px solid var(--border-color); margin-left: 5px; }
 
+/* Two actions live here, so the header is a plain row holding two buttons:
+   the wide one opens the board, the uid badge finds it on the canvas. */
 .bb-group-header {
     display: flex;
     align-items: center;
-    width: 100%;
-    padding: 3px 4px;
+    gap: 6px;
+    padding-right: 4px;
+}
+
+.bb-group-toggle {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    flex: 1;
+    min-width: 0;
+    padding: 4px 5px;
     font-family: inherit;
     text-align: left;
-    color: var(--text-muted);
     background: none;
     border: 0;
     border-radius: 4px;
     cursor: pointer;
 }
-.bb-group-header:hover { background: rgba(255, 255, 255, 0.04); }
+.bb-group-toggle:hover:not(:disabled) { background: rgba(255, 255, 255, 0.05); }
+.bb-group-toggle:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 
-/* Same treatment as .node-type in the tree: this group *is* that SubTree. */
+/* Cyan because it is the same subtree the canvas paints cyan. */
 .bb-group-name {
     flex: 1;
-    font-size: 10px;
-    font-weight: bold;
-    color: #38bdf8;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+    min-width: 0;
+    font-size: 0.78rem;
+    font-weight: 500;
+    color: var(--accent);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
-.bb-group-count { font-size: 9px; font-family: monospace; color: #64748b; margin-left: 8px; }
 
-.bb-group-body { padding: 1px 0 4px 15px; }
-
-.bb-group-empty {
-    margin: 1px 0 2px 4px;
-    font-size: 0.7rem;
+/* Same treatment as .node-uid on the canvas card, so the badge and the card it
+   points at read as one label split across the panel and the tree. */
+.bb-group-locate {
+    flex-shrink: 0;
+    padding: 2px 4px;
+    font-size: 9px;
+    font-family: monospace;
     color: #64748b;
-    font-style: italic;
+    background: none;
+    border: 1px solid transparent;
+    border-radius: 3px;
+    cursor: pointer;
 }
+.bb-group-locate:hover { color: var(--accent); border-color: var(--border-color); }
+.bb-group-locate:focus-visible { outline: 1px solid var(--accent); outline-offset: 0; }
+
+.bb-group-count {
+    flex-shrink: 0;
+    min-width: 1.1rem;
+    text-align: right;
+    font-size: 9px;
+    font-family: monospace;
+    color: #64748b;
+}
+
+/* Shared disclosure arrow: points right when closed, down when open. */
+.bb-chevron {
+    flex-shrink: 0;
+    width: 0;
+    height: 0;
+    border-left: 4px solid currentColor;
+    border-top: 3.5px solid transparent;
+    border-bottom: 3.5px solid transparent;
+    color: var(--text-muted);
+    transition: transform 0.15s ease;
+}
+.open > .bb-chevron { transform: rotate(90deg) translateX(1px); }
+
+/* A subtree whose ports are all remapped to its parent owns nothing. It keeps
+   its row so the list still mirrors the tree, but there is nothing to open —
+   the locate badge stays live, since the subtree itself is still findable. */
+.bb-group.is-empty .bb-group-toggle { cursor: default; opacity: 0.5; }
+.bb-group.is-empty .bb-chevron { visibility: hidden; }
+
+.bb-group-body { padding: 1px 0 5px 16px; }
 
 .bb-row {
     display: flex;
@@ -179,6 +321,7 @@ h1 { margin: 0; font-size: 1.4rem; font-weight: 600; letter-spacing: -0.025em; }
     cursor: pointer;
 }
 .bb-row:hover { background: rgba(255, 255, 255, 0.05); }
+.bb-row:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 
 /* A shared minimum lines the values up into a scannable column, while an
    unusually long key is still allowed to push its own value right. The cap is
@@ -203,8 +346,33 @@ h1 { margin: 0; font-size: 1.4rem; font-weight: 600; letter-spacing: -0.025em; }
 }
 .bb-value.bb-unset { color: #64748b; font-style: italic; }
 
-/* Clicked open: let a long vector or struct wrap instead of being cut off. */
+/* Clicked open: let a long value wrap instead of being cut off. */
 .bb-row.expanded .bb-value { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* The breakdown a renderer produces for a struct: the fields worth naming,
+   in full precision, rather than the JSON they arrived as. */
+/* `display: grid` outranks the UA stylesheet's [hidden] rule, so the attribute
+   has to be honoured explicitly or every breakdown shows unasked. */
+.bb-detail[hidden] { display: none; }
+.bb-detail {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 1px 10px;
+    margin: 1px 0 4px 20px;
+    padding-left: 8px;
+    border-left: 1px solid var(--border-color);
+    font-family: monospace;
+    font-size: 0.7rem;
+    line-height: 1.5;
+}
+.bb-detail dt { color: var(--text-muted); }
+.bb-detail dd { margin: 0; color: var(--text-main); overflow-wrap: anywhere; }
+/* A value with no renderer falls back to pretty JSON, which spans both columns. */
+.bb-detail dd.bb-detail-block {
+    grid-column: 1 / -1;
+    white-space: pre-wrap;
+    color: var(--text-muted);
+}
 
 /* A value that just changed flashes once, in the same amber the tree uses for
    RUNNING — the reader's eye is already trained on it. */
@@ -216,7 +384,9 @@ h1 { margin: 0; font-size: 1.4rem; font-weight: 600; letter-spacing: -0.025em; }
 
 @media (prefers-reduced-motion: reduce) {
     .bb-row.bb-changed { animation: none; }
-    .bb-chevron { transition: none; }
+    .bb-chevron, .segmented span { transition: none; }
+    #sidebar { transition: none; }
+    .node-rect.focused { animation: none; stroke: var(--accent) !important; }
 }
 
 /* Hard-to-miss banner shown when klein cannot reach the robot (or the
@@ -265,9 +435,21 @@ svg:active { cursor: grabbing; }
 .node-rect.running,
 .status-pill.running { animation: klein-pulse 1.1s ease-in-out infinite; }
 
+/* Picked from the blackboard panel: say which card the camera just flew to,
+   without permanently recoloring a node whose status stroke means something. */
+@keyframes klein-focus {
+    0%, 100% { stroke: var(--accent); stroke-width: 2px; }
+    50%      { stroke: var(--accent); stroke-width: 5px; }
+}
+.node-rect.focused { animation: klein-focus 0.5s ease-in-out 2; }
+
+/* Hovering a board row in the panel: say which card it belongs to. The stroke
+   is set inline by applyStatus, so this has to shout to be heard. */
+.node-rect.highlight { stroke: var(--accent) !important; stroke-width: 4px; }
+
 /* Node Text Elements */
 .node-name { font-size: 13px; font-weight: 500; fill: #ffffff; }
-.node-type { font-size: 10px; font-weight: bold; fill: #38bdf8; text-transform: uppercase; letter-spacing: 0.05em; }
+.node-type { font-size: 10px; font-weight: bold; fill: var(--accent); text-transform: uppercase; letter-spacing: 0.05em; }
 .node-uid { font-size: 9px; font-family: monospace; fill: var(--text-muted); }
 .node-status-text { font-size: 10px; font-weight: bold; fill: #ffffff; }
 

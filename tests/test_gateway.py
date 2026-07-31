@@ -414,6 +414,109 @@ class BlackboardTest(unittest.TestCase):
         json.dumps(board)      # must not raise
 
 
+# A trimmed copy of a real ROS 2 mission tree's FULLTREE reply. It carries the
+# three shapes that matter: one subtree ID defined more than once with a
+# different _fullpath per instance, a nested instance path, and an instance
+# named in the XML whose path therefore carries no ::uid at all.
+REAL_SHAPED_XML = """<root BTCPP_format="4" main_tree_to_execute="MissionBehaviorTree">
+  <BehaviorTree ID="Pick_SubTree" _fullpath="Pick_SubTree::12">
+    <Sequence _uid="13">
+      <SubTree ID="MoveLift" _uid="17"
+               _fullpath="Pick_SubTree::12/MoveLift::17"/>
+    </Sequence>
+  </BehaviorTree>
+  <BehaviorTree ID="MissionBehaviorTree" _fullpath="">
+    <Sequence _uid="1">
+      <SubTree ID="Pick_SubTree" _uid="12" _fullpath="Pick_SubTree::12"/>
+      <SubTree ID="MoveLift" _uid="46" _fullpath="park_sequence"/>
+    </Sequence>
+  </BehaviorTree>
+  <BehaviorTree ID="MoveLift" _fullpath="park_sequence">
+    <Action ID="SetLiftHeight" _uid="47"/>
+  </BehaviorTree>
+</root>"""
+
+
+class BoardOnLayoutTest(unittest.TestCase):
+    """Each layout node carries the blackboard its subtree instance owns.
+
+    The dashboard pairs a board with the node that owns it — to indent nested
+    boards under their parent, and to fly the camera to a board's card. The name
+    alone cannot do that (``park_sequence`` carries no uid), so the pairing has
+    to come from the layout.
+    """
+
+    def setUp(self):
+        self.gw = KleinGateway("127.0.0.1", 1667, 8080)
+
+    def tearDown(self):
+        self.gw.ctx.destroy(linger=0)
+
+    @staticmethod
+    def boards(node, depth=0):
+        """Walk the layout the way the dashboard does: [(board, depth, uid)]."""
+        found = []
+        board = node.get("board")
+        if board:
+            found.append((board, depth, node.get("uid")))
+        for child in node.get("children", []):
+            found.extend(BoardOnLayoutTest.boards(child, depth + 1 if board else depth))
+        return found
+
+    def test_subtree_node_carries_its_instance_path(self):
+        self.gw._parse_layout(mock_robot.TREE_XML)
+        subtree = self.gw.tree_structure["children"][2]["children"][1]
+        self.assertEqual(subtree["type"], "SubTree")
+        self.assertEqual(subtree["board"], "DoorClosed::7")
+
+    def test_subtree_node_falls_back_to_its_id(self):
+        xml = """<root BTCPP_format="4">
+          <BehaviorTree ID="MainTree">
+            <Sequence _uid="1"><SubTree ID="Nav" _uid="2"/></Sequence>
+          </BehaviorTree>
+          <BehaviorTree ID="Nav"><Action ID="Go" _uid="3"/></BehaviorTree>
+        </root>"""
+        self.gw._parse_layout(xml)
+        self.assertEqual(self.gw.tree_structure["children"][0]["board"], "Nav")
+
+    def test_root_board_comes_from_its_own_block(self):
+        self.gw._parse_layout(mock_robot.TREE_XML)
+        self.assertEqual(self.gw.tree_structure["board"], "MainTree")
+
+    def test_root_board_falls_back_to_the_tree_id(self):
+        # What a real robot sends: the root block's _fullpath is empty.
+        self.gw._parse_layout(REAL_SHAPED_XML)
+        self.assertEqual(self.gw.tree_structure["board"], "MissionBehaviorTree")
+
+    def test_root_board_ignores_a_non_first_entrypoint(self):
+        # main_tree_to_execute names the *second* block in REAL_SHAPED_XML, so
+        # taking the first block's path would label the root "Pick_SubTree::12".
+        self.gw._parse_layout(REAL_SHAPED_XML)
+        self.assertEqual(self.gw.tree_structure["root_tree_id"], "MissionBehaviorTree")
+        self.assertEqual(self.gw.tree_structure["board"], "MissionBehaviorTree")
+
+    def test_repeated_subtree_id_keeps_per_instance_paths(self):
+        self.gw._parse_layout(REAL_SHAPED_XML)
+        found = self.boards(self.gw.tree_structure)
+        self.assertEqual(found, [
+            ("MissionBehaviorTree", 0, 1),
+            ("Pick_SubTree::12", 1, 12),
+            ("Pick_SubTree::12/MoveLift::17", 2, 17),
+            ("park_sequence", 1, 46),           # named instance: no ::uid in the path
+        ])
+
+    def test_every_requested_board_resolves_to_exactly_one_node(self):
+        # The invariant the whole panel rests on: what klein asks the robot for
+        # and what it can place in the tree are the same set, with no board
+        # claimed twice.
+        for xml in (mock_robot.TREE_XML, REAL_SHAPED_XML):
+            with self.subTest(xml=xml[:40]):
+                self.gw._parse_layout(xml)
+                found = [board for board, _depth, _uid in self.boards(self.gw.tree_structure)]
+                self.assertEqual(sorted(found), sorted(self.gw._blackboard_names))
+                self.assertEqual(len(found), len(set(found)))
+
+
 class HttpResponseTest(unittest.TestCase):
     def test_headers_and_body(self):
         r = KleinGateway._http_response(200, b"hello", "text/plain; charset=utf-8")

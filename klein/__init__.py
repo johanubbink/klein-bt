@@ -5,4 +5,4 @@ unrolls nested subtrees, and streams live status and blackboard values to an
 interactive D3.js browser dashboard. Run ``klein-bt --help`` for options.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"

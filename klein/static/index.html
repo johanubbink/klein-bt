@@ -10,24 +10,47 @@
 </head>
 <body>
 
-    <div id="ui-layer">
-        <h1>klein BT viewer</h1>
-        <div class="status-tracker">
-            <span id="conn-dot" class="dot"></span>
-            <span id="conn-text">Connecting to klein gateway…</span>
-        </div>
-        <button id="orientation-toggle">Layout: vertical</button>
-
-        <div id="bb-section">
-            <button id="bb-toggle" type="button" aria-expanded="false" aria-controls="bb-panel">
-                <span class="bb-chevron" aria-hidden="true"></span>Blackboards<span id="bb-count"></span>
-            </button>
-            <div id="bb-panel" hidden>
-                <p id="bb-empty">Waiting for values…</p>
-                <div id="bb-groups"></div>
+    <aside id="sidebar">
+        <header id="sidebar-header">
+            <div class="header-row">
+                <h1>klein BT viewer</h1>
+                <button id="sidebar-collapse" type="button" aria-expanded="true"
+                        aria-controls="sidebar" title="Hide panel">
+                    <span aria-hidden="true">«</span><span class="sr-only">Hide panel</span>
+                </button>
             </div>
+            <div class="status-tracker">
+                <span id="conn-dot" class="dot"></span>
+                <span id="conn-text">Connecting to klein gateway…</span>
+            </div>
+            <!-- Native radios: one keyboard-navigable group, correct semantics,
+                 and the checked segment is painted with :checked + span. -->
+            <div class="control-row">
+                <span class="control-label" id="layout-label">Layout</span>
+                <div class="segmented" role="group" aria-labelledby="layout-label">
+                    <label>
+                        <input type="radio" name="layout" value="vertical" checked>
+                        <span>Vertical</span>
+                    </label>
+                    <label>
+                        <input type="radio" name="layout" value="horizontal">
+                        <span>Horizontal</span>
+                    </label>
+                </div>
+            </div>
+        </header>
+
+        <h2 id="bb-heading">Blackboards<span id="bb-count"></span></h2>
+        <div id="bb-panel">
+            <p id="bb-empty">Waiting for values…</p>
+            <div id="bb-groups"></div>
         </div>
-    </div>
+    </aside>
+
+    <button id="sidebar-show" type="button" hidden aria-expanded="false" aria-controls="sidebar"
+            title="Show panel">
+        <span aria-hidden="true">»</span><span class="sr-only">Show panel</span>
+    </button>
 
     <div id="robot-banner"></div>
 
@@ -35,6 +58,7 @@
 
     <svg id="canvas"></svg>
 
+    <script src="/renderers.js"></script>
     <script src="/app.js"></script>
 </body>
 </html>

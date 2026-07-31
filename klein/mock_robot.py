@@ -18,7 +18,9 @@ Then, in another shell:
     klein-bt --robot-port <same-port>
 """
 import argparse
+import math
 import struct
+import sys
 
 import msgpack
 import zmq
@@ -186,6 +188,72 @@ def build_status_buffer(tick):
     return bytes(buf)
 
 
+# --------------------------------------------------------------------------- #
+# ROS-shaped values
+# --------------------------------------------------------------------------- #
+# A real ROS 2 robot puts whole messages on its blackboard, and BehaviorTree.CPP
+# serializes each one to JSON tagged with its C++ type name — nested all the way
+# down, so a Path carries a Header which carries a Time. The dashboard's
+# renderers key on those tags, so the mock has to produce the same shapes.
+DOOR_X = 4.0                # where the door is; the mission drives toward it
+PATH_POSES = 8              # waypoints between the robot and the door
+MOCK_EPOCH_SEC = 1761922    # an arbitrary fixed wall-clock second
+
+
+def _ros_time(seconds):
+    sec = int(seconds)
+    return {
+        "__type": "builtin_interfaces::msg::Time",
+        "sec": sec,
+        "nanosec": int(round((seconds - sec) * 1e9)),
+    }
+
+
+def _header(seconds, frame_id="map"):
+    return {
+        "__type": "std_msgs::msg::Header",
+        "frame_id": frame_id,
+        "stamp": _ros_time(seconds),
+    }
+
+
+def _quaternion(yaw):
+    return {
+        "__type": "geometry_msgs::msg::Quaternion",
+        "x": 0.0, "y": 0.0,
+        "z": math.sin(yaw / 2), "w": math.cos(yaw / 2),
+    }
+
+
+def _pose(x, y, yaw):
+    return {
+        "__type": "geometry_msgs::msg::Pose",
+        "position": {"__type": "geometry_msgs::msg::Point", "x": x, "y": y, "z": 0.0},
+        "orientation": _quaternion(yaw),
+    }
+
+
+def _pose_stamped(x, y, yaw, seconds):
+    return {
+        "__type": "geometry_msgs::msg::PoseStamped",
+        "header": _header(seconds),
+        "pose": _pose(x, y, yaw),
+    }
+
+
+def _accumulated(step, times):
+    """Sum ``step`` ``times`` over, keeping the float noise a real robot has.
+
+    Repeated addition is how a pose integrator actually advances, and it is what
+    turns a tidy 1.3 into 1.2999999999999985 — the noise the dashboard's number
+    formatting exists to hide.
+    """
+    total = 0.0
+    for _ in range(times):
+        total += step
+    return total
+
+
 def build_blackboard(tick):
     """Return ``{blackboard_name: {key: value}}`` for the current tick.
 
@@ -194,19 +262,44 @@ def build_blackboard(tick):
     a vector, a JSON-registered struct (tagged with ``__type``), and an entry
     that is declared but never written (``None``). ``_debug_internal`` is a
     private key: the gateway must filter it out before it reaches the browser.
+
+    It also carries the ROS 2 messages the renderers know how to summarize — a
+    live ``nav_msgs::msg::Path``, a ``PoseStamped``, a ``Quaternion`` — plus the
+    two float cases that are unreadable raw: accumulated noise, and the DBL_MAX
+    sentinel BT.CPP ports use for "no limit".
     """
     _status, bb = _frame_at(tick)
     t = tick % CYCLE_TICKS
+    seconds = MOCK_EPOCH_SEC + t * 0.1
+    # The robot creeps toward the door, so the path ahead of it shortens and the
+    # distance-to-goal ticks down — both visibly live in the panel.
+    robot_x = _accumulated(0.05, t)
+    remaining = DOOR_X - robot_x
+    step = remaining / PATH_POSES
     return {
         "MainTree": {
             "door_open": bb["door_open"],
             "mission_phase": bb["mission_phase"],
             "tick": t,
             # Advances every tick, so at least one row always flashes on update.
-            "robot_position": [round(t * 0.05, 2), 0.5, 1.57],
+            "robot_position": [round(robot_x, 2), 0.5, 1.57],
             # Static: proves unchanged rows stay quiet while their neighbours flash.
             "target_pose": {"__type": "Pose2D", "x": 3.0, "y": 0.5, "theta": 1.57},
-            "last_error": None,             # declared but unset -> renders "(unset)"
+            "last_error": None,             # unset -> renders "(not shown)"
+            "path": {
+                "__type": "nav_msgs::msg::Path",
+                "header": _header(seconds),
+                "poses": [
+                    _pose_stamped(robot_x + step * i, 0.5, 0.0, seconds)
+                    for i in range(PATH_POSES)
+                ],
+            },
+            # Stamped once at mission start, so this row stays quiet too.
+            "goal": _pose_stamped(DOOR_X, 0.5, math.pi / 2, MOCK_EPOCH_SEC),
+            "heading": _quaternion(robot_x * 0.1),
+            "distance_to_goal": remaining,
+            # DBL_MAX: what a "no limit" double port reports until something sets it.
+            "distance_to_end_of_route": sys.float_info.max,
             "_debug_internal": "must never reach the dashboard",
         },
         "DoorClosed::7": {

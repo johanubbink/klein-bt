@@ -1,7 +1,9 @@
 """Unit tests for klein.mock_robot — the fake Groot2 publisher used to drive
 klein in tests. Verifies the status animation, blackboard content and reply
 framing, and round-trips its output through the real gateway parser."""
+import json
 import struct
+import sys
 import unittest
 import xml.etree.ElementTree as ET
 
@@ -121,6 +123,44 @@ class BlackboardTest(unittest.TestCase):
     def test_missing_argument_frame_is_tolerated(self):
         raw = mock_robot.build_blackboard_reply([b"header"], 0)
         self.assertEqual(KleinGateway.parse_blackboard(raw), {})
+
+    def test_carries_ros_messages_the_renderers_summarize(self):
+        board = self.board(0)
+        path = board["path"]
+        self.assertEqual(path["__type"], "nav_msgs::msg::Path")
+        # Nested all the way down, as BehaviorTree.CPP serializes it: the
+        # dashboard's renderers key on the tag at every level.
+        self.assertEqual(path["header"]["__type"], "std_msgs::msg::Header")
+        self.assertEqual(path["header"]["stamp"]["__type"], "builtin_interfaces::msg::Time")
+        self.assertGreater(len(path["poses"]), 1)     # a length needs two points
+        first = path["poses"][0]
+        self.assertEqual(first["__type"], "geometry_msgs::msg::PoseStamped")
+        self.assertEqual(first["pose"]["position"]["__type"], "geometry_msgs::msg::Point")
+        self.assertEqual(first["pose"]["orientation"]["__type"],
+                         "geometry_msgs::msg::Quaternion")
+        self.assertEqual(board["goal"]["__type"], "geometry_msgs::msg::PoseStamped")
+        self.assertEqual(board["heading"]["__type"], "geometry_msgs::msg::Quaternion")
+
+    def test_carries_both_unreadable_float_cases(self):
+        # DBL_MAX is what a "no limit" double port reports; the dashboard shows
+        # it as a sentinel rather than 1.7976931348623157e+308.
+        self.assertEqual(self.board(0)["distance_to_end_of_route"], sys.float_info.max)
+        # And an accumulated distance keeps the noise the formatting hides.
+        noisy = [self.board(t)["distance_to_goal"] for t in range(mock_robot.CYCLE_TICKS)]
+        self.assertTrue(any(len(repr(value)) > 6 for value in noisy), noisy[:5])
+
+    def test_the_path_shortens_as_the_robot_advances(self):
+        def remaining(tick):
+            poses = self.board(tick)["path"]["poses"]
+            return poses[-1]["pose"]["position"]["x"] - poses[0]["pose"]["position"]["x"]
+        self.assertLess(remaining(20), remaining(1))
+
+    def test_ros_messages_survive_the_gateway_json_conversion(self):
+        raw = mock_robot.build_blackboard_reply([b"header", b"MainTree"], 0)
+        board = KleinGateway.parse_blackboard(raw)["MainTree"]
+        json.dumps(board)      # must not raise: this is what reaches the browser
+        self.assertEqual(board["path"]["__type"], "nav_msgs::msg::Path")
+        self.assertEqual(board["distance_to_end_of_route"], sys.float_info.max)
 
 
 class ReplyHeaderTest(unittest.TestCase):

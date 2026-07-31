@@ -62,5 +62,6 @@ klein = [
     "static/index.html",
     "static/styles.css",
     "static/app.js",
+    "static/renderers.js",
     "static/d3.v7.min.js",
 ]

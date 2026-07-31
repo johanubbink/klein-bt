@@ -6,6 +6,38 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- The dashboard's controls now live in a **full-height, collapsible side pane**
+  instead of a floating card, so a real robot's blackboards get the whole screen
+  rather than 40% of it. Collapsing it slides the pane away and hands the canvas
+  back; the camera stays centred on what is actually visible either way.
+- **Layout** is now a segmented control that shows which of Vertical / Horizontal
+  is active, rather than a button whose label had to be read to be understood.
+- **Renderers for ROS 2 message types**, in `klein/static/renderers.js`: `Path`,
+  `PoseStamped`, `Pose`, `Point`, `Vector3`, `Quaternion`, `Twist`, `Header`,
+  `Time` and `Duration` each collapse to one readable line — a 151-pose path
+  reads `151 poses · map · 12.4 m` — and expand to a labelled breakdown of their
+  fields. Adding a type is one entry in the registry.
+- Numbers are formatted for reading: float noise is trimmed to six significant
+  digits (`1.2999999999999985` → `1.3`) and the `DBL_MAX` sentinel a "no limit"
+  double port reports reads `∞ (DBL_MAX)`. The exact value the robot sent is
+  always on hover.
+- Each subtree node in the layout now carries the blackboard it owns, so a board
+  can be paired with its card on the canvas: hovering a board highlights that
+  node, and clicking its uid badge flies the camera there, reopening any
+  collapsed subtree on the way.
+
+### Changed
+- **Blackboards** is a heading rather than a disclosure button, with every
+  subtree's board always listed beneath it — nested boards indented under their
+  parent, named by their last path segment, badged with their node's uid. The
+  root board is expanded on load; the rest open on click.
+- A board with no values of its own keeps its row, dimmed and unexpandable with a
+  dash instead of a count, so the list still mirrors the tree.
+- `klein-bt-mock` now publishes ROS-shaped values — a live `nav_msgs::msg::Path`,
+  a `PoseStamped`, a `Quaternion`, an accumulated noisy float and a `DBL_MAX`
+  sentinel — so every renderer can be driven without a real robot.
+
 ## [0.2.0] - 2026-07-31
 
 ### Added

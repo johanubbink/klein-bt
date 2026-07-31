@@ -207,102 +207,126 @@ function applyStatus(telemetryMap) {
 }
 
 // ------------------------------------------------------------------ //
-// Blackboards — one collapsible group per subtree, values live at 2 Hz
+// Blackboards — one group per subtree, in tree order, values live at 2 Hz
 // ------------------------------------------------------------------ //
-// Everything here starts collapsed: on a real tree the boards are far taller
-// than the controls above them, and the panel floats over the canvas. The
-// open/closed state and the last-seen values live outside the DOM so they
+// The list mirrors the canvas: every subtree that owns a blackboard gets a row,
+// nested boards are indented under their parent, and each row is bound to the
+// node it belongs to. The root board opens on load because it holds the
+// mission's own state; the rest stay closed to keep the list scannable.
+//
+// Open/closed state and the last-seen values live outside the DOM so they
 // survive every update frame.
 const bbGroupOpen = {};     // board name -> is its body expanded?
-const bbLastValues = {};    // "board key" -> last value, serialized, for the flash
-const bbGroupEls = {};      // board name -> { group, body, count, rows: {key: row} }
+const bbLastValues = {};    // "board key" -> last value, serialized, for the flash
+const bbGroupEls = {};      // board name -> { group, header, toggle, body, count, rows }
 
-const bbToggle = document.getElementById("bb-toggle");
-const bbPanel = document.getElementById("bb-panel");
+// Boards in tree order, from the layout — see collectBoards().
+let bbBoardList = [];
+
 const bbGroups = document.getElementById("bb-groups");
 const bbCount = document.getElementById("bb-count");
 const bbEmpty = document.getElementById("bb-empty");
 
-bbToggle.addEventListener("click", () => {
-    const open = bbPanel.hidden;
-    bbPanel.hidden = !open;
-    bbToggle.classList.toggle("open", open);
-    bbToggle.setAttribute("aria-expanded", String(open));
-});
-
-// BehaviorTree.CPP sends ints for bools (0/1), arrays for vectors, and objects
-// tagged with "__type" for structs it has a JSON converter for.
-//
-// Null covers two cases the protocol can't tell apart: an entry declared but
-// never written, and one holding a type with no JSON converter (a ROS node
-// handle, a TF buffer, a chrono duration). On a real robot the second case is
-// the common one, so the label says the value isn't shown rather than claiming
-// it isn't set, and the tooltip explains how to make it visible.
-const BB_NO_VALUE = "(not shown)";
-const BB_NO_VALUE_HINT =
-    "Either no value has been written, or its type has no JSON converter " +
-    "(register one with BT::RegisterJsonDefinition<T>() to see it here).";
-
-// Real blackboards carry values no side panel can show: a 150-pose nav path
-// serializes to ~68 kB, which expands to a row tens of thousands of pixels tall
-// and puts as much text in the DOM on every frame. Cap what we render and say
-// how much was left out, so a huge value stays a readable sample of itself.
-const BB_MAX_CHARS = 2000;
-
-function formatBBValue(value) {
-    if (value === null || value === undefined) return BB_NO_VALUE;
-    const text = typeof value === "string" ? value : JSON.stringify(value);
-    if (text.length <= BB_MAX_CHARS) return text;
-    return `${text.slice(0, BB_MAX_CHARS)}… (${text.length.toLocaleString()} chars total)`;
+// The panel names a board by its last path segment, minus the ::uid suffix
+// BehaviorTree.CPP appends to unnamed instances — "MuteRearScannerAndMoveLift",
+// not "Pick_SubTree::12/MuteRearScannerAndMoveLift::17". The uid gets its own
+// badge and the full path lives in the tooltip.
+function boardLabel(path) {
+    return path.split("/").pop().replace(/::\d+$/, "");
 }
 
-function createBBGroup(name) {
+// Walk the layout depth-first for every node carrying a board. One pass yields
+// tree order, nesting depth, and the node itself — which is what lets a board
+// row find its card on the canvas. Board names alone could not: an instance
+// named in the XML (`park_sequence`) carries no uid in its path.
+function collectBoards(root) {
+    const boards = [];
+    (function walk(node, depth) {
+        const board = node.data.board;
+        if (board) {
+            boards.push({
+                board,
+                depth,
+                label: boardLabel(board),
+                uid: node.data.uid,
+                nodeName: node.data.name,
+                isRoot: node === root,
+                node,
+            });
+        }
+        // Both branches: a collapsed subtree keeps its children in _children.
+        for (const child of node.children || node._children || []) {
+            walk(child, board ? depth + 1 : depth);
+        }
+    })(root, 0);
+    return boards;
+}
+
+function createBBGroup(info) {
     const group = document.createElement("div");
     group.className = "bb-group";
+    group.style.setProperty("--depth", String(info.depth));
+    if (info.depth > 0) group.dataset.nested = "1";
 
-    const header = document.createElement("button");
-    header.type = "button";
+    // A div, not a button: it carries two separate actions — open the board,
+    // and find its subtree on the canvas.
+    const header = document.createElement("div");
     header.className = "bb-group-header";
-    header.setAttribute("aria-expanded", String(Boolean(bbGroupOpen[name])));
+
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "bb-group-toggle";
+    toggle.title = info.board;      // the full instance path, however long
+    toggle.setAttribute("aria-expanded", String(Boolean(bbGroupOpen[info.board])));
 
     const chevron = document.createElement("span");
     chevron.className = "bb-chevron";
     chevron.setAttribute("aria-hidden", "true");
     const label = document.createElement("span");
     label.className = "bb-group-name";
-    label.textContent = name;
+    label.textContent = info.label;
+    toggle.append(chevron, label);
+
     const count = document.createElement("span");
     count.className = "bb-group-count";
-    header.append(chevron, label, count);
+
+    header.appendChild(toggle);
+    // The uid badge doubles as the locate control: it already names the card to
+    // look for, so clicking it flies there.
+    if (info.node) {
+        const locate = document.createElement("button");
+        locate.type = "button";
+        locate.className = "bb-group-locate";
+        locate.textContent = info.isRoot ? "root" : (info.uid == null ? "find" : `uid ${info.uid}`);
+        locate.title = `Find ${info.nodeName} in the tree`;
+        locate.addEventListener("click", () => focusNode(info.node));
+        header.append(locate);
+        header.addEventListener("mouseenter", () => highlightNode(info.node, true));
+        header.addEventListener("mouseleave", () => highlightNode(info.node, false));
+    }
+    header.appendChild(count);
 
     const body = document.createElement("div");
     body.className = "bb-group-body";
-    body.hidden = !bbGroupOpen[name];
+    body.hidden = !bbGroupOpen[info.board];
 
-    // Shown when the board holds nothing: a subtree whose ports are all
-    // remapped to its parent has no entries of its own, and saying so beats
-    // leaving a header with nothing under it.
-    const empty = document.createElement("p");
-    empty.className = "bb-group-empty";
-    empty.textContent = "no local entries";
-    body.appendChild(empty);
-
-    header.addEventListener("click", () => {
-        const open = !bbGroupOpen[name];
-        bbGroupOpen[name] = open;
+    toggle.addEventListener("click", () => {
+        const open = !bbGroupOpen[info.board];
+        bbGroupOpen[info.board] = open;
         body.hidden = !open;
-        header.classList.toggle("open", open);
-        header.setAttribute("aria-expanded", String(open));
+        toggle.classList.toggle("open", open);
+        toggle.setAttribute("aria-expanded", String(open));
     });
-    header.classList.toggle("open", Boolean(bbGroupOpen[name]));
+    toggle.classList.toggle("open", Boolean(bbGroupOpen[info.board]));
 
     group.append(header, body);
     bbGroups.appendChild(group);
-    return { group, body, count, empty, rows: {} };
+    return { group, header, toggle, body, count, rows: {} };
 }
 
-// Rows are buttons because they are disclosures too: clicking one unwraps a
-// value too long for the panel's width.
+// Rows are buttons because they are disclosures: clicking one unwraps a value
+// too long for the panel and, when the value has a renderer, reveals the
+// labelled breakdown of its fields.
 function createBBRow(group, key) {
     const row = document.createElement("button");
     row.type = "button";
@@ -314,11 +338,39 @@ function createBBRow(group, key) {
     keyEl.title = key;      // long, similar keys truncate alike; hover disambiguates
     const valueEl = document.createElement("span");
     valueEl.className = "bb-value";
-
     row.append(keyEl, valueEl);
-    row.addEventListener("click", () => row.classList.toggle("expanded"));
-    group.body.appendChild(row);
-    return { row, value: valueEl, text: null };
+
+    // A definition list cannot live inside a button, so the breakdown is the
+    // row's sibling and the row drives its visibility.
+    const detail = document.createElement("dl");
+    detail.className = "bb-detail";
+    detail.hidden = true;
+
+    const entry = { row, value: valueEl, detail, text: null, hasDetail: false };
+    row.addEventListener("click", () => {
+        const open = !row.classList.contains("expanded");
+        row.classList.toggle("expanded", open);
+        detail.hidden = !(open && entry.hasDetail);
+    });
+
+    group.body.append(row, detail);
+    return entry;
+}
+
+function fillBBDetail(dl, entries) {
+    dl.textContent = "";
+    for (const [label, text] of entries) {
+        const dd = document.createElement("dd");
+        dd.textContent = text;
+        if (label === null) {       // a full-width block: pretty JSON, no label
+            dd.className = "bb-detail-block";
+            dl.appendChild(dd);
+            continue;
+        }
+        const dt = document.createElement("dt");
+        dt.textContent = label;
+        dl.append(dt, dd);
+    }
 }
 
 // Reorder children only when the order is actually wrong: re-appending a row
@@ -330,33 +382,53 @@ function syncBBOrder(container, ordered) {
 }
 
 function renderBlackboards(boards) {
-    // Board order comes from the gateway and follows the tree — root first,
-    // then subtrees as they appear — so the panel reads like the canvas.
-    const names = Object.keys(boards);
+    // Layout order first, so the panel reads like the canvas. A board the robot
+    // reports that the layout never mentioned is still shown, flat at the
+    // bottom — cover for a robot whose XML omits the instance paths.
+    const known = new Set(bbBoardList.map(info => info.board));
+    const listed = [
+        ...bbBoardList.filter(info => info.board in boards),
+        ...Object.keys(boards).filter(name => !known.has(name)).map(name => ({
+            board: name, depth: 0, label: name, uid: null, nodeName: name,
+            isRoot: false, node: null,
+        })),
+    ];
 
-    for (const name of names) {
-        const group = bbGroupEls[name] || (bbGroupEls[name] = createBBGroup(name));
+    for (const info of listed) {
+        const name = info.board;
+        const group = bbGroupEls[name] || (bbGroupEls[name] = createBBGroup(info));
         const entries = boards[name];
         // The robot's map order is arbitrary (it walks an unordered_map), so
         // sort to keep rows from reshuffling under the reader between frames.
         const keys = Object.keys(entries).sort();
-        group.count.textContent = keys.length;
-        group.empty.hidden = keys.length > 0;
+
+        // A subtree whose ports are all remapped to its parent owns nothing. It
+        // keeps its row so the list still mirrors the tree, but there is
+        // nothing to open.
+        const isEmpty = keys.length === 0;
+        group.count.textContent = isEmpty ? "—" : String(keys.length);
+        group.group.classList.toggle("is-empty", isEmpty);
+        group.toggle.disabled = isEmpty;
+        group.toggle.title = isEmpty
+            ? `${name}\nNo values of its own — its ports are remapped to the parent board.`
+            : name;
 
         for (const key of keys) {
             const row = group.rows[key] || (group.rows[key] = createBBRow(group, key));
             const value = entries[key];
-            const text = formatBBValue(value);
-            if (row.text !== text) {
-                const missing = value === null || value === undefined;
-                row.value.textContent = text;
-                row.value.title = missing ? BB_NO_VALUE_HINT : text;   // full value on hover
-                row.value.classList.toggle("bb-unset", missing);
-                row.text = text;
+            const render = KleinRenderers.renderValue(value);
+            if (row.text !== render.summary) {
+                row.value.textContent = render.summary;
+                row.value.title = KleinRenderers.exactText(value);   // exact, on hover
+                row.value.classList.toggle("bb-unset", Boolean(render.missing));
+                row.text = render.summary;
+                fillBBDetail(row.detail, render.detail);
+                row.hasDetail = render.detail.length > 0;
+                row.detail.hidden = !(row.hasDetail && row.row.classList.contains("expanded"));
             }
 
             // Flash on a real change only — not the first time a key is seen.
-            const stateKey = name + " " + key;
+            const stateKey = name + " " + key;
             const serialized = JSON.stringify(value === undefined ? null : value);
             if (stateKey in bbLastValues && bbLastValues[stateKey] !== serialized) {
                 row.row.classList.remove("bb-changed");
@@ -369,23 +441,26 @@ function renderBlackboards(boards) {
         for (const key of Object.keys(group.rows)) {     // keys the robot dropped
             if (!(key in entries)) {
                 group.rows[key].row.remove();
+                group.rows[key].detail.remove();
                 delete group.rows[key];
-                delete bbLastValues[name + " " + key];
+                delete bbLastValues[name + " " + key];
             }
         }
-        syncBBOrder(group.body, [group.empty, ...keys.map(key => group.rows[key].row)]);
+        syncBBOrder(group.body,
+            keys.flatMap(key => [group.rows[key].row, group.rows[key].detail]));
     }
 
+    const names = listed.map(info => info.board);
     for (const name of Object.keys(bbGroupEls)) {        // boards the robot dropped
-        if (!(name in boards)) {
+        if (!names.includes(name)) {
             bbGroupEls[name].group.remove();
             delete bbGroupEls[name];
         }
     }
     syncBBOrder(bbGroups, names.map(name => bbGroupEls[name].group));
 
-    bbCount.textContent = names.length ? ` (${names.length})` : "";
-    // Per-group notes cover empty boards; this line is for having none at all.
+    bbCount.textContent = names.length ? String(names.length) : "";
+    // Per-board dashes cover empty boards; this line is for having none at all.
     bbEmpty.hidden = names.length > 0;
     bbEmpty.textContent = "This robot reports no blackboards.";
 }
@@ -397,33 +472,117 @@ function resetBlackboards() {
     for (const key of Object.keys(bbGroupEls)) delete bbGroupEls[key];
     for (const key of Object.keys(bbLastValues)) delete bbLastValues[key];
     for (const key of Object.keys(bbGroupOpen)) delete bbGroupOpen[key];
+    // The root board carries the mission's own state, so it is the one worth
+    // seeing without a click.
+    for (const info of bbBoardList) bbGroupOpen[info.board] = info.isRoot;
     bbCount.textContent = "";
     bbEmpty.hidden = false;
     bbEmpty.textContent = "Waiting for values…";
 }
 
+// ------------------------------------------------------------------ //
+// Sidebar — collapsible, and the camera works around it
+// ------------------------------------------------------------------ //
+const sidebar = document.getElementById("sidebar");
+const sidebarCollapse = document.getElementById("sidebar-collapse");
+const sidebarShow = document.getElementById("sidebar-show");
+
+// How much of the viewport's left edge the pane covers. The canvas spans the
+// whole window, so this is what keeps the tree out from under the pane.
+function sidebarWidth() {
+    return sidebar.classList.contains("collapsed") ? 0 : sidebar.offsetWidth;
+}
+
+function setSidebarOpen(open) {
+    const width = sidebar.offsetWidth;
+    sidebar.classList.toggle("collapsed", !open);
+    sidebarShow.hidden = open;
+    sidebarCollapse.setAttribute("aria-expanded", String(open));
+    sidebarShow.setAttribute("aria-expanded", String(open));
+
+    // Nudge the view by half the pane so the tree stays centred in the space
+    // that is actually visible — without throwing away the reader's zoom/pan.
+    if (!rootNodeSnapshot) return;
+    const current = d3.zoomTransform(svg.node());
+    const shifted = d3.zoomIdentity
+        .translate(current.x + (open ? width / 2 : -width / 2), current.y)
+        .scale(current.k);
+    svg.transition().duration(220).call(zoomBehavior.transform, shifted);
+}
+
+sidebarCollapse.addEventListener("click", () => setSidebarOpen(false));
+sidebarShow.addEventListener("click", () => setSidebarOpen(true));
+
 // Pan the camera so the root sits at the conventional entry point:
 // top-center for vertical trees, left-center for horizontal ones.
 function resetCamera() {
     // Cards are center-anchored, so offset by half a card to keep the root
-    // fully on-screen.
+    // fully on-screen — and clear of the sidebar.
     const scale = 0.8;
+    const left = sidebarWidth();
     const target = orientation === "vertical"
-        ? d3.zoomIdentity.translate(window.innerWidth / 2, 80).scale(scale)
-        : d3.zoomIdentity.translate(80 + (nodeWidth / 2) * scale, window.innerHeight / 2).scale(scale);
+        ? d3.zoomIdentity.translate(left + (window.innerWidth - left) / 2, 80).scale(scale)
+        : d3.zoomIdentity.translate(left + 40 + (nodeWidth / 2) * scale, window.innerHeight / 2).scale(scale);
     svg.transition().duration(500).call(zoomBehavior.transform, target);
 }
 
-// Orientation toggle — reflow the same hierarchy and re-aim the camera; the
-// 250ms node/link transitions animate the change.
-d3.select("#orientation-toggle").on("click", () => {
-    orientation = orientation === "vertical" ? "horizontal" : "vertical";
-    d3.select("#orientation-toggle").text(`Layout: ${orientation}`);
-    if (rootNodeSnapshot) {
-        updateTreeLayout(rootNodeSnapshot);
-        resetCamera();
+// Fly the camera to one node and pulse its card — the blackboard panel's answer
+// to "where is this subtree?". Collapsed ancestors are reopened first, since a
+// board can belong to a subtree the reader has folded away.
+function focusNode(node) {
+    if (!node || !rootNodeSnapshot) return;
+
+    let reopened = false;
+    for (let ancestor = node.parent; ancestor; ancestor = ancestor.parent) {
+        if (ancestor._children) {
+            ancestor.children = ancestor._children;
+            ancestor._children = null;
+            reopened = true;
+        }
     }
-});
+    if (reopened) updateTreeLayout(rootNodeSnapshot);   // node.x/y are set here
+
+    const scale = 0.9;
+    const [x, y] = orientation === "vertical" ? [node.x, node.y] : [node.y, node.x];
+    const left = sidebarWidth();
+    const centerX = left + (window.innerWidth - left) / 2;
+    svg.transition().duration(500).call(
+        zoomBehavior.transform,
+        d3.zoomIdentity.translate(centerX - x * scale, window.innerHeight / 2 - y * scale).scale(scale)
+    );
+    pulseNode(node);
+}
+
+let pulseTimer = null;
+
+function pulseNode(node) {
+    gContainer.selectAll(".node-rect.focused").classed("focused", false);
+    const rect = gContainer.selectAll("g.node").filter(d => d === node).select(".node-rect");
+    void rect.node()?.getBoundingClientRect();      // restart a pulse in flight
+    rect.classed("focused", true);
+    clearTimeout(pulseTimer);
+    pulseTimer = setTimeout(
+        () => gContainer.selectAll(".node-rect.focused").classed("focused", false), 1100);
+}
+
+// Hovering a board row says which card it belongs to, without moving anything.
+function highlightNode(node, on) {
+    gContainer.selectAll("g.node").filter(d => d === node)
+        .select(".node-rect").classed("highlight", on);
+}
+
+// Layout selector — reflow the same hierarchy and re-aim the camera; the
+// 250ms node/link transitions animate the change.
+for (const input of document.querySelectorAll('input[name="layout"]')) {
+    input.addEventListener("change", () => {
+        if (!input.checked) return;
+        orientation = input.value;
+        if (rootNodeSnapshot) {
+            updateTreeLayout(rootNodeSnapshot);
+            resetCamera();
+        }
+    });
+}
 
 // Reflect both links: green when the robot is streaming, amber (plus a
 // banner) when klein is up but the robot is unreachable, red when klein
@@ -482,6 +641,7 @@ function connectGatewayPipeline() {
             rootNodeSnapshot.x0 = 0;
             rootNodeSnapshot.y0 = 0;
 
+            bbBoardList = collectBoards(rootNodeSnapshot);
             resetBlackboards();
             updateTreeLayout(rootNodeSnapshot);
             resetCamera();

@@ -98,14 +98,13 @@ type you look at often deserves better. Add one entry to `REGISTRY` in
 string, returning `{summary, detail}`. Renderers are pure functions and compose,
 so a wrapper type can reuse the renderer for what it wraps.
 
-## Architecture
+## Documentation
 
-```
-   robot (BT.CPP)          klein gateway              browser (D3.js)
-   ZMQ_REP :1667  <──REQ──  status @10Hz  ──WS /ws push──>  one port :8080
-                            blackboard @2Hz
-                            serve dashboard ──HTTP GET──>   (HTTP + WebSocket)
-```
+- [docs/architecture.md](docs/architecture.md) — how klein is put together:
+  the ZeroMQ→WebSocket gateway, subtree unrolling, and the single-port design.
+- [docs/protocol.md](docs/protocol.md) — the Groot2 publisher wire protocol
+  klein speaks: ports (including the implicit `port + 1`), framing, and every
+  request type.
 
 ## Testing without a robot
 

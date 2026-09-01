@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-01
+
 ### Added
 - The dashboard's controls now live in a **full-height, collapsible side pane**
   instead of a floating card, so a real robot's blackboards get the whole screen
@@ -73,6 +75,7 @@ Initial release.
 - `klein-bt-mock`: a fake Groot2 publisher that drives the dashboard with no real
   robot, for demos and testing.
 
-[Unreleased]: https://github.com/johanubbink/klein-bt/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/johanubbink/klein-bt/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/johanubbink/klein-bt/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/johanubbink/klein-bt/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/johanubbink/klein-bt/releases/tag/v0.1.0

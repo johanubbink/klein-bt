@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-16
+
 ### Added
 - **Node ports on the card.** Each node now shows the attributes the tree author
   wrote on it — a `Precondition`'s `if=critical == true`, a
@@ -16,6 +18,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or uses to wire the tree up (`name`, `ID`, `_uid`, `_fullpath`) are not
   repeated; BehaviorTree.CPP's scripting hooks (`_skipIf`, `_while`,
   `_onSuccess`) are the author's writing too, so they are shown.
+
+### Changed
+- `klein-bt-mock`'s tree now carries ports of its own — an output port bound to
+  a blackboard key, a subtree remapping, the scripting hooks BT.CPP writes out
+  of pre/post-conditions, and a node with more ports than fit on a card — so the
+  card rendering, the truncation and the hover tooltip can all be seen without a
+  real robot.
 
 ## [0.3.0] - 2026-09-01
 
@@ -86,7 +95,8 @@ Initial release.
 - `klein-bt-mock`: a fake Groot2 publisher that drives the dashboard with no real
   robot, for demos and testing.
 
-[Unreleased]: https://github.com/johanubbink/klein-bt/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/johanubbink/klein-bt/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/johanubbink/klein-bt/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/johanubbink/klein-bt/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/johanubbink/klein-bt/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/johanubbink/klein-bt/releases/tag/v0.1.0

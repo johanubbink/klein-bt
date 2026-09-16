@@ -6,6 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Node ports on the card.** Each node now shows the attributes the tree author
+  wrote on it — a `Precondition`'s `if=critical == true`, a
+  `RetryUntilSuccessful`'s `num_attempts=5`, a `Switch`'s cases — along the
+  bottom of its card, with the full set one hover away. A tree whose leaves are
+  six `Dock` actions distinguished only by their ports is readable on the canvas
+  instead of only in the source XML. Structural attributes klein already draws
+  or uses to wire the tree up (`name`, `ID`, `_uid`, `_fullpath`) are not
+  repeated; BehaviorTree.CPP's scripting hooks (`_skipIf`, `_while`,
+  `_autoremap`) are the author's writing too, so they are shown.
+
 ## [0.3.0] - 2026-09-01
 
 ### Added

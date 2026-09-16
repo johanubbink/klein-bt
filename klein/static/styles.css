@@ -451,6 +451,9 @@ svg:active { cursor: grabbing; }
 .node-name { font-size: 13px; font-weight: 500; fill: #ffffff; }
 .node-type { font-size: 10px; font-weight: bold; fill: var(--accent); text-transform: uppercase; letter-spacing: 0.05em; }
 .node-uid { font-size: 9px; font-family: monospace; fill: var(--text-muted); }
+/* The node's ports, along the bottom of the card. Same muted monospace as
+   .node-uid: supporting detail, never competing with the name above it. */
+.node-ports { font-size: 9px; font-family: monospace; fill: var(--text-muted); }
 .node-status-text { font-size: 10px; font-weight: bold; fill: #ffffff; }
 
 /* Links/Edges connecting nodes */

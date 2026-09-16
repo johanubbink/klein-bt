@@ -165,6 +165,47 @@ class LayoutTest(unittest.TestCase):
         self.assertEqual(top["children"][0]["children"], [])
 
 
+class PortsTest(unittest.TestCase):
+    """Ports ride along with the layout so the dashboard can draw them."""
+
+    def setUp(self):
+        self.gw = KleinGateway("127.0.0.1", 1667, 8080)
+
+    def tearDown(self):
+        self.gw.ctx.destroy(linger=0)
+
+    def test_ports_are_carried_through(self):
+        self.gw._parse_layout(mock_robot.TREE_XML)
+        script = _find(self.gw.tree_structure, 2)        # <Script code="door_open:=false"/>
+        self.assertEqual(script["ports"], {"code": "door_open:=false"})
+        retry = _find(self.gw.tree_structure, 10)        # <RetryUntilSuccessful num_attempts="5"/>
+        self.assertEqual(retry["ports"], {"num_attempts": "5"})
+
+    def test_structural_attributes_are_not_ports(self):
+        self.gw._parse_layout(mock_robot.TREE_XML)
+        sequence = _find(self.gw.tree_structure, 1)      # name + _uid only
+        self.assertEqual(sequence["ports"], {})
+        subtree_ref = _find(self.gw.tree_structure, 7)   # ID + _uid + _fullpath only
+        self.assertEqual(subtree_ref["ports"], {})
+
+    def test_ports_keep_document_order(self):
+        xml = ('<root BTCPP_format="4" main_tree_to_execute="A"><BehaviorTree ID="A">'
+               '<Switch2 name="pick" _uid="1" variable="{mode}" case_1="GO" case_2="STOP"/>'
+               '</BehaviorTree></root>')
+        self.gw._parse_layout(xml)
+        self.assertEqual(
+            list(self.gw.tree_structure["ports"]), ["variable", "case_1", "case_2"])
+
+    def test_scripting_hooks_count_as_ports(self):
+        # _skipIf and friends are written by the tree author, unlike _uid.
+        xml = ('<root BTCPP_format="4" main_tree_to_execute="A"><BehaviorTree ID="A">'
+               '<Wait name="hold" _uid="1" _skipIf="done" msec="500"/>'
+               '</BehaviorTree></root>')
+        self.gw._parse_layout(xml)
+        self.assertEqual(
+            self.gw.tree_structure["ports"], {"_skipIf": "done", "msec": "500"})
+
+
 class StaticAssetsTest(unittest.TestCase):
     def setUp(self):
         self.gw = KleinGateway("127.0.0.1", 1667, 8080)

@@ -179,6 +179,22 @@ class KleinGateway:
             return int(uid_str)
         return None
 
+    # Structural attributes: klein renders these itself (name, ID) or uses them
+    # to wire the tree up (_uid, _fullpath). Everything else the robot stamped
+    # on the element is a port the tree author wrote — a Precondition's `if`, a
+    # RetryUntilSuccessful's `num_attempts`, a Switch's cases, a subtree's
+    # `_autoremap` — and is what the node card shows.
+    STRUCTURAL_ATTRS = frozenset({"name", "ID", "uid", "_uid", "_fullpath"})
+
+    @classmethod
+    def extract_ports(cls, element):
+        """Return the element's port attributes, in document order."""
+        return {
+            key: value
+            for key, value in element.attrib.items()
+            if key not in cls.STRUCTURAL_ATTRS
+        }
+
     def unroll_node(self, element, expanding=frozenset()):
         """Recursively convert a layout element into a nested dict.
 
@@ -203,6 +219,7 @@ class KleinGateway:
                 # extract_blackboard_names asks the robot for it — the dashboard
                 # pairs each board with the node that owns it.
                 "board": element.get("_fullpath") or subtree_id,
+                "ports": self.extract_ports(element),
                 "children": [],
             }
             subtree_root = self.all_behavior_trees.get(subtree_id)
@@ -217,6 +234,7 @@ class KleinGateway:
             "uid": self.extract_uid(element),
             "type": node_type,
             "name": element.get("name") or node_type,
+            "ports": self.extract_ports(element),
             "children": [self.unroll_node(child, expanding) for child in element],
         }
 

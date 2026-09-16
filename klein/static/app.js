@@ -14,6 +14,27 @@ const nodeHeight = 50;
 // siblings ticked left-to-right. "horizontal" grows the tree rightward.
 let orientation = "vertical";
 
+// Ports — the attributes the tree author wrote on a node in the XML. klein
+// carries them through untouched, so `if`, `num_attempts`, `case_1` and the
+// rest read exactly as they do in the source tree.
+function portSummary(ports) {
+    if (!ports) return "";
+    return Object.entries(ports).map(([key, value]) => `${key}=${value}`).join("  ");
+}
+
+function truncate(text, limit) {
+    return text.length > limit ? text.slice(0, limit - 1) + "\u2026" : text;
+}
+
+// One port per line, under the node's own name, for the hover tooltip. A node
+// with no ports gets no title at all rather than an empty box.
+function portTitle(node) {
+    const entries = Object.entries(node.ports || {});
+    if (!entries.length) return "";
+    const lines = entries.map(([key, value]) => `  ${key} = ${value}`);
+    return [`${node.type} "${node.name}"`, ...lines].join("\n");
+}
+
 // Setup scalable D3 viewport selections
 const svg = d3.select("#canvas");
 const gContainer = svg.append("g").attr("class", "draw-group");
@@ -105,28 +126,44 @@ function updateTreeLayout(sourceNode) {
     nodeEnter.append("text")
         .attr("class", "node-type")
         .attr("x", -nodeWidth / 2 + 12)
-        .attr("y", -10)
+        .attr("y", -13)
         .text(d => d.data.type);
 
     // Display name (truncated)
     nodeEnter.append("text")
         .attr("class", "node-name")
         .attr("x", -nodeWidth / 2 + 12)
-        .attr("y", 8)
+        .attr("y", 2)
         .text(d => d.data.name.length > 20 ? d.data.name.substring(0, 18) + "..." : d.data.name);
+
+    // Ports the tree author wrote on this node, along the card's bottom edge —
+    // what a Precondition actually tests, which case a Switch matched. Blank
+    // for a node with no ports; the untruncated set is in the hover title.
+    nodeEnter.append("text")
+        .attr("class", "node-ports")
+        .attr("x", -nodeWidth / 2 + 12)
+        .attr("y", 20)
+        .text(d => truncate(portSummary(d.data.ports), 34));
+
+    // Native tooltip: the full port list, one per line, so a truncated summary
+    // is always one hover away from being readable in full. A node with no
+    // ports gets no <title>, and so no empty tooltip.
+    nodeEnter.filter(d => portSummary(d.data.ports) !== "")
+        .append("title")
+        .text(d => portTitle(d.data));
 
     // UID label (blank when this node carries no UID)
     nodeEnter.append("text")
         .attr("class", "node-uid")
         .attr("x", nodeWidth / 2 - 55)
-        .attr("y", -10)
+        .attr("y", -13)
         .text(d => d.data.uid == null ? "" : `UID ${String(d.data.uid).padStart(3, '0')}`);
 
     // Status pill background
     nodeEnter.append("rect")
         .attr("class", "status-pill")
         .attr("x", nodeWidth / 2 - 75)
-        .attr("y", 2)
+        .attr("y", -6)
         .attr("width", 65)
         .attr("height", 16)
         .attr("rx", 3)
@@ -136,7 +173,7 @@ function updateTreeLayout(sourceNode) {
     nodeEnter.append("text")
         .attr("class", "node-status-text")
         .attr("x", nodeWidth / 2 - 42)
-        .attr("y", 13)
+        .attr("y", 5)
         .attr("text-anchor", "middle")
         .text("IDLE");
 

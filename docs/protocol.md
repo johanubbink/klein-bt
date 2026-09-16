@@ -112,8 +112,9 @@ Semantics to know:
 - msgpack **nil** replaces the map when no requested name matched a live
   subtree — and also stands in for a subtree whose every port is remapped to
   its parent (it owns no storage of its own).
-- Keys starting with `_` (`_autoremap`, …) are BehaviorTree.CPP's private
-  bookkeeping, not user values.
+- Keys starting with `_` are private by BehaviorTree.CPP's own convention:
+  autoremapping skips them, so a subtree keeps them to itself. klein drops
+  them rather than showing them as user values.
 - Values appear only for types with a registered JSON converter
   (`BT::RegisterJsonDefinition<T>()`); a type without one is silently absent,
   indistinguishable from "never written".

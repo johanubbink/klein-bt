@@ -400,7 +400,8 @@ class BlackboardTest(unittest.TestCase):
         self.assertEqual(KleinGateway.parse_blackboard(msgpack.packb(None)), {})
 
     def test_private_keys_are_filtered(self):
-        raw = msgpack.packb({"MainTree": {"speed": 1, "_autoremap": True, "_uid": 4}})
+        raw = msgpack.packb(
+            {"MainTree": {"speed": 1, "_debug_internal": "x", "_scratch": 4}})
         self.assertEqual(KleinGateway.parse_blackboard(raw), {"MainTree": {"speed": 1}})
 
     def test_value_types_survive_decoding(self):

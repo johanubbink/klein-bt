@@ -182,8 +182,10 @@ class KleinGateway:
     # Structural attributes: klein renders these itself (name, ID) or uses them
     # to wire the tree up (_uid, _fullpath). Everything else the robot stamped
     # on the element is a port the tree author wrote — a Precondition's `if`, a
-    # RetryUntilSuccessful's `num_attempts`, a Switch's cases, a subtree's
-    # `_autoremap` — and is what the node card shows.
+    # RetryUntilSuccessful's `num_attempts`, a Switch's cases, a subtree's port
+    # remapping — and is what the node card shows. That includes the scripting
+    # hooks BT.CPP serializes out of a node's pre/post-conditions (`_skipIf`,
+    # `_while`, `_onSuccess`, …): underscored, but the author's writing.
     STRUCTURAL_ATTRS = frozenset({"name", "ID", "uid", "_uid", "_fullpath"})
 
     @classmethod
@@ -408,10 +410,10 @@ class KleinGateway:
 
         The publisher replies with msgpack nil when no requested name matched a
         live subtree, which decodes to ``None`` — reported here as no boards at
-        all. Keys starting with ``_`` are BehaviorTree.CPP's private bookkeeping
-        entries (``_autoremap`` and friends); they are dropped here rather than
-        in the browser so the 2 Hz frame stays small and the dashboard needs no
-        knowledge of the protocol's conventions.
+        all. Keys starting with ``_`` are private by BehaviorTree.CPP's own
+        convention — autoremapping skips them, so a subtree keeps them to itself
+        — and they are dropped here rather than in the browser so the 2 Hz frame
+        stays small and the dashboard needs no knowledge of that convention.
 
         The robot walks an unordered map, so its reply order is arbitrary.
         ``order`` (the names we asked for, in tree order) restores a stable,

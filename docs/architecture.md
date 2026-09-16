@@ -63,7 +63,7 @@ recursing forever.
 Every node carries its **ports** through to the dashboard: the attributes the
 tree author wrote in the XML, minus the structural ones klein renders or wires
 up itself (`name`, `ID`, `_uid`, `_fullpath`). BehaviorTree.CPP's scripting
-hooks (`_skipIf`, `_while`, `_autoremap`, …) are the author's too, so they are
+hooks (`_skipIf`, `_while`, `_onSuccess`, …) are the author's too, so they are
 kept. Ports are fixed for the life of a tree, so they ride in the cached layout
 frame rather than being polled.
 

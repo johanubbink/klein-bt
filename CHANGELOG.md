@@ -15,7 +15,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   instead of only in the source XML. Structural attributes klein already draws
   or uses to wire the tree up (`name`, `ID`, `_uid`, `_fullpath`) are not
   repeated; BehaviorTree.CPP's scripting hooks (`_skipIf`, `_while`,
-  `_autoremap`) are the author's writing too, so they are shown.
+  `_onSuccess`) are the author's writing too, so they are shown.
 
 ## [0.3.0] - 2026-09-01
 

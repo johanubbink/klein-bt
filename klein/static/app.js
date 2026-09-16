@@ -8,7 +8,25 @@ let robotConnected = false;
 let robotDetail = "Connecting to klein gateway…";
 
 const nodeWidth = 220;
-const nodeHeight = 50;
+// Three text rows (type, name, ports) plus even ~7px gaps above, between and
+// below them. Their ink is ~28px, so the card needs ~56px for the rows to sit
+// evenly; at 50 the name ends up crowding the type line above it.
+const nodeHeight = 56;
+const cardPadX = 12;            // left/right text inset, shared by every row
+
+// Text row baselines, measured from the card's centre. Spaced so the whitespace
+// above the type, between type and name, between name and ports, and below the
+// ports is the same ~7px — uppercase type has no descenders and the 13px name
+// has a tall cap height, so even spacing needs uneven baseline steps.
+const rowType = -14;            // 10px uppercase — shares its baseline with the UID
+const rowName = 3;              // 13px — the status pill centres on this row
+const rowPorts = 19;            // 9px monospace
+
+// How many characters of the port summary fit on a card. .node-ports is 9px
+// monospace and a monospace advance is ~0.6em, so this follows the card width
+// rather than being tuned to it by hand — change nodeWidth, cardPadX or that
+// font size and the limit follows instead of overflowing the card.
+const maxPortChars = Math.floor((nodeWidth - cardPadX * 2) / (9 * 0.6));
 
 // "vertical" is the standard BT convention: root at the top, children below,
 // siblings ticked left-to-right. "horizontal" grows the tree rightward.
@@ -51,7 +69,7 @@ svg.call(zoomBehavior);
 // along y; nodeSize is [sibling spacing, depth spacing] in those layout coords.
 const layoutConfig = {
     vertical:   { nodeSize: [240, 130], depthStep: 130 },
-    horizontal: { nodeSize: [70, 300],  depthStep: 280 },
+    horizontal: { nodeSize: [76, 300],  depthStep: 280 },   // sibling spacing = card height + 20
 };
 const treeLayout = d3.tree();
 
@@ -125,15 +143,15 @@ function updateTreeLayout(sourceNode) {
     // Type tag
     nodeEnter.append("text")
         .attr("class", "node-type")
-        .attr("x", -nodeWidth / 2 + 12)
-        .attr("y", -13)
+        .attr("x", -nodeWidth / 2 + cardPadX)
+        .attr("y", rowType)
         .text(d => d.data.type);
 
     // Display name (truncated)
     nodeEnter.append("text")
         .attr("class", "node-name")
-        .attr("x", -nodeWidth / 2 + 12)
-        .attr("y", 2)
+        .attr("x", -nodeWidth / 2 + cardPadX)
+        .attr("y", rowName)
         .text(d => d.data.name.length > 20 ? d.data.name.substring(0, 18) + "..." : d.data.name);
 
     // Ports the tree author wrote on this node, along the card's bottom edge —
@@ -141,9 +159,9 @@ function updateTreeLayout(sourceNode) {
     // for a node with no ports; the untruncated set is in the hover title.
     nodeEnter.append("text")
         .attr("class", "node-ports")
-        .attr("x", -nodeWidth / 2 + 12)
-        .attr("y", 20)
-        .text(d => truncate(portSummary(d.data.ports), 34));
+        .attr("x", -nodeWidth / 2 + cardPadX)
+        .attr("y", rowPorts)
+        .text(d => truncate(portSummary(d.data.ports), maxPortChars));
 
     // Native tooltip: the full port list, one per line, so a truncated summary
     // is always one hover away from being readable in full. A node with no
@@ -156,14 +174,14 @@ function updateTreeLayout(sourceNode) {
     nodeEnter.append("text")
         .attr("class", "node-uid")
         .attr("x", nodeWidth / 2 - 55)
-        .attr("y", -13)
+        .attr("y", rowType)
         .text(d => d.data.uid == null ? "" : `UID ${String(d.data.uid).padStart(3, '0')}`);
 
     // Status pill background
     nodeEnter.append("rect")
         .attr("class", "status-pill")
         .attr("x", nodeWidth / 2 - 75)
-        .attr("y", -6)
+        .attr("y", rowName - 12)
         .attr("width", 65)
         .attr("height", 16)
         .attr("rx", 3)
@@ -173,7 +191,7 @@ function updateTreeLayout(sourceNode) {
     nodeEnter.append("text")
         .attr("class", "node-status-text")
         .attr("x", nodeWidth / 2 - 42)
-        .attr("y", 5)
+        .attr("y", rowName)
         .attr("text-anchor", "middle")
         .text("IDLE");
 

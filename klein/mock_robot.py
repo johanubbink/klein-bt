@@ -46,25 +46,35 @@ from .groot2_protocol import (
 # name in a BLACKBOARD request. Real robots stamp it on every <BehaviorTree>
 # block and on the <SubTree> element that references it (hence the duplicate
 # "DoorClosed::7" below, which klein dedupes).
+#
+# The nodes also carry ports, the way a real robot serializes them next to the
+# _uid, so the dashboard's node cards have the same variety to draw: an output
+# port bound to a blackboard key (UpdatePosition's ``pos``), the scripting hooks
+# BT.CPP writes out of a node's pre/post-conditions (IsDoorClosed's ``_skipIf``,
+# PickLock's ``_onSuccess``), a <SubTree> remapping a child key onto its
+# parent's board (``door_open`` — remapped keys live in the parent, which is why
+# the DoorClosed board further down does not list it), and a node with more
+# ports than fit on a card (PassThroughDoor), for the truncation and the hover
+# tooltip. Deliberately left bare: the control nodes, OpenDoor and SmashDoor.
 TREE_XML = """<root BTCPP_format="4" main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree" _fullpath="MainTree">
     <Sequence name="Sequence" _uid="1">
       <Script name="Script" code="door_open:=false" _uid="2"/>
-      <UpdatePosition name="UpdatePosition" _uid="3"/>
+      <UpdatePosition name="UpdatePosition" pos="{robot_position}" _uid="3"/>
       <Fallback name="Fallback" _uid="4">
         <Inverter name="Inverter" _uid="5">
-          <IsDoorClosed name="IsDoorClosed" _uid="6"/>
+          <IsDoorClosed name="IsDoorClosed" _skipIf="door_open" _uid="6"/>
         </Inverter>
-        <SubTree ID="DoorClosed" _uid="7" _fullpath="DoorClosed::7"/>
+        <SubTree ID="DoorClosed" door_open="{door_open}" _uid="7" _fullpath="DoorClosed::7"/>
       </Fallback>
-      <PassThroughDoor name="PassThroughDoor" _uid="13"/>
+      <PassThroughDoor name="PassThroughDoor" goal="{goal}" speed="0.35" timeout_ms="2500" _uid="13"/>
     </Sequence>
   </BehaviorTree>
   <BehaviorTree ID="DoorClosed" _fullpath="DoorClosed::7">
     <Fallback name="tryOpen" _uid="8">
       <OpenDoor name="OpenDoor" _uid="9"/>
       <RetryUntilSuccessful name="RetryUntilSuccessful" num_attempts="5" _uid="10">
-        <PickLock name="PickLock" _uid="11"/>
+        <PickLock name="PickLock" _onSuccess="lock_status:='picked'" _uid="11"/>
       </RetryUntilSuccessful>
       <SmashDoor name="SmashDoor" _uid="12"/>
     </Fallback>

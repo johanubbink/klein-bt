@@ -185,8 +185,17 @@ class PortsTest(unittest.TestCase):
         self.gw._parse_layout(mock_robot.TREE_XML)
         sequence = _find(self.gw.tree_structure, 1)      # name + _uid only
         self.assertEqual(sequence["ports"], {})
-        subtree_ref = _find(self.gw.tree_structure, 7)   # ID + _uid + _fullpath only
-        self.assertEqual(subtree_ref["ports"], {})
+        open_door = _find(self.gw.tree_structure, 9)     # inside a subtree, still bare
+        self.assertEqual(open_door["ports"], {})
+
+    def test_subtree_keeps_its_remapping_and_drops_its_structure(self):
+        # A <SubTree>'s remapping is the author's writing, so it shows; ID and
+        # _fullpath are how klein stitches and names the instance, so they don't.
+        self.gw._parse_layout(mock_robot.TREE_XML)
+        subtree_ref = _find(self.gw.tree_structure, 7)
+        self.assertEqual(subtree_ref["ports"], {"door_open": "{door_open}"})
+        self.assertEqual(subtree_ref["subtree_id"], "DoorClosed")
+        self.assertEqual(subtree_ref["board"], "DoorClosed::7")
 
     def test_ports_keep_document_order(self):
         xml = ('<root BTCPP_format="4" main_tree_to_execute="A"><BehaviorTree ID="A">'
@@ -204,6 +213,13 @@ class PortsTest(unittest.TestCase):
         self.gw._parse_layout(xml)
         self.assertEqual(
             self.gw.tree_structure["ports"], {"_skipIf": "done", "msec": "500"})
+
+        # Both ends of the hook family, as the mock robot publishes them.
+        self.gw._parse_layout(mock_robot.TREE_XML)
+        is_door_closed = _find(self.gw.tree_structure, 6)
+        self.assertEqual(is_door_closed["ports"], {"_skipIf": "door_open"})
+        pick_lock = _find(self.gw.tree_structure, 11)
+        self.assertEqual(pick_lock["ports"], {"_onSuccess": "lock_status:='picked'"})
 
 
 class StaticAssetsTest(unittest.TestCase):

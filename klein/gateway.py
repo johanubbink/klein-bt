@@ -97,7 +97,12 @@ class KleinGateway:
 
         self.ctx = zmq.asyncio.Context()
         self.socket = None                  # created lazily / recreated on fault
-        self._req_lock = asyncio.Lock()     # REQ/REP is strictly send→recv
+        # REQ/REP is strictly send→recv, so requests are serialized through one
+        # lock. It is created on first use, inside the running event loop: on
+        # Python 3.9 an asyncio.Lock binds to whatever loop is current when it
+        # is constructed, and a gateway is constructed before asyncio.run()
+        # starts its loop (or, in tests, with no loop at all).
+        self._req_lock = None
 
         self.all_behavior_trees = {}        # tree_id -> root <element> of that block
         self.tree_structure = None          # unrolled nested dict sent to clients
@@ -145,6 +150,8 @@ class KleinGateway:
         payload (tree XML, status buffer, or msgpack blackboards). On any
         timeout/fault the socket is recreated and ``RobotTimeout`` is raised.
         """
+        if self._req_lock is None:
+            self._req_lock = asyncio.Lock()
         async with self._req_lock:
             if self.socket is None:
                 self._new_socket()

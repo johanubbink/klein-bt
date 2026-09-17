@@ -15,11 +15,27 @@ import msgpack
 
 from klein import gateway, mock_robot
 from klein.gateway import KleinGateway, _port_available
-from klein.groot2_protocol import STATUS_RECORD_FORMAT
+from klein.groot2_protocol import (
+    HEADER_FORMAT,
+    PROTOCOL_ID,
+    REQ_FULLTREE,
+    REQ_STATUS,
+    STATUS_RECORD_FORMAT,
+)
 
 
 def _rec(uid, status_int):
     return struct.pack(STATUS_RECORD_FORMAT, uid, status_int)
+
+
+UUID_A = bytes([0xA1] * 16)
+UUID_B = bytes([0xB2] * 16)
+
+
+def _reply(uuid, payload=b"", req_type=REQ_STATUS, unique_id=7):
+    """A two-frame robot reply whose header carries ``uuid``."""
+    header = struct.pack(HEADER_FORMAT, PROTOCOL_ID, req_type, unique_id) + uuid
+    return [header, payload]
 
 
 def _collect_uids(node, acc=None):
@@ -85,6 +101,121 @@ class ParseStatusTest(unittest.TestCase):
 
     def test_empty_buffer(self):
         self.assertEqual(KleinGateway.parse_status(b""), {})
+
+
+class ReplyUuidTest(unittest.TestCase):
+    def test_extracts_the_uuid_from_a_22_byte_header(self):
+        self.assertEqual(KleinGateway.reply_uuid(_reply(UUID_A)), UUID_A)
+
+    def test_ignores_bytes_beyond_the_header(self):
+        header = struct.pack(HEADER_FORMAT, PROTOCOL_ID, REQ_STATUS, 1) + UUID_A + b"trailing"
+        self.assertEqual(KleinGateway.reply_uuid([header, b""]), UUID_A)
+
+    def test_short_or_missing_header_is_unknown(self):
+        self.assertIsNone(KleinGateway.reply_uuid([b"error", b"unsupported request"]))
+        self.assertIsNone(KleinGateway.reply_uuid([_reply(UUID_A)[0][:21], b""]))
+        self.assertIsNone(KleinGateway.reply_uuid([]))
+        self.assertIsNone(KleinGateway.reply_uuid(None))
+
+    def test_zero_uuid_is_unknown(self):
+        # An all-zero UUID carries no identity, so it can never signal a change.
+        self.assertIsNone(KleinGateway.reply_uuid(_reply(bytes(16))))
+
+
+class TreeChangeTest(unittest.TestCase):
+    def setUp(self):
+        self.gw = KleinGateway("127.0.0.1", 1667, 8080)
+
+    def tearDown(self):
+        self.gw.ctx.destroy(linger=0)
+
+    def test_layout_uuid_starts_unknown(self):
+        self.assertIsNone(self.gw._layout_uuid)
+
+    def test_parse_layout_leaves_the_binding_to_the_handshake(self):
+        self.gw._parse_layout(mock_robot.TREE_XML)
+        self.assertIsNone(self.gw._layout_uuid)
+
+    def test_same_uuid_is_no_change(self):
+        self.gw._layout_uuid = UUID_A
+        self.assertFalse(self.gw._tree_changed(UUID_A))
+
+    def test_other_uuid_is_a_change(self):
+        self.gw._layout_uuid = UUID_A
+        self.assertTrue(self.gw._tree_changed(UUID_B))
+
+    def test_unknown_on_either_side_is_no_change(self):
+        self.assertFalse(self.gw._tree_changed(UUID_B))          # layout UUID unknown
+        self.gw._layout_uuid = UUID_A
+        self.assertFalse(self.gw._tree_changed(None))            # reply UUID unknown
+        self.assertFalse(self.gw._tree_changed(KleinGateway.reply_uuid(_reply(bytes(16)))))
+
+
+class ReloadLayoutTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.gw = KleinGateway("127.0.0.1", 1667, 8080)
+
+    async def asyncTearDown(self):
+        self.gw.ctx.destroy(linger=0)
+
+    async def test_reload_drops_stale_boards_and_handshakes_again(self):
+        self.gw._blackboard_json = '{"type":"blackboard","data":{}}'
+        self.gw.fetch_layout = mock.AsyncMock()
+        with contextlib.redirect_stdout(io.StringIO()):
+            await self.gw._reload_layout()
+        self.gw.fetch_layout.assert_awaited_once()
+        self.assertIsNone(self.gw._blackboard_json)
+        self.assertTrue(self.gw._robot_connected)            # the robot did answer
+        self.assertIn("Tree changed", self.gw._robot_detail)
+
+
+class FetchLayoutBindsUuidTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.gw = KleinGateway("127.0.0.1", 1667, 8080)
+
+    async def asyncTearDown(self):
+        self.gw.ctx.destroy(linger=0)
+
+    async def fetch(self, uuid, xml):
+        self.gw._request = mock.AsyncMock(
+            return_value=_reply(uuid, xml.encode("utf-8"), req_type=REQ_FULLTREE))
+        with contextlib.redirect_stdout(io.StringIO()):
+            await self.gw.fetch_layout()
+
+    async def test_binds_the_layout_to_the_fulltree_reply_uuid(self):
+        await self.fetch(UUID_A, mock_robot.TREE_XML)
+        self.assertEqual(self.gw._layout_uuid, UUID_A)
+        self.assertEqual(self.gw.tree_structure["root_tree_id"], "MainTree")
+        self.assertTrue(self.gw._robot_connected)
+
+    async def test_zero_uuid_leaves_the_layout_unbound(self):
+        await self.fetch(bytes(16), mock_robot.TREE_XML)
+        self.assertIsNone(self.gw._layout_uuid)
+        self.assertIsNotNone(self.gw._layout_json)            # the tree itself still loads
+
+    async def test_second_handshake_rebinds_and_swaps_the_tree(self):
+        await self.fetch(UUID_A, mock_robot.TREE_XML)
+        self.assertTrue(self.gw._tree_changed(UUID_B))
+        await self.fetch(UUID_B, mock_robot.PATROL_TREE_XML)
+        self.assertEqual(self.gw._layout_uuid, UUID_B)
+        self.assertFalse(self.gw._tree_changed(UUID_B))
+        self.assertEqual(self.gw.tree_structure["root_tree_id"], "PatrolTree")
+        self.assertEqual(self.gw._blackboard_names, mock_robot.PATROL_BLACKBOARD_NAMES)
+
+    async def test_identical_tree_is_not_rebroadcast(self):
+        # A robot process restarted with the same tree carries a new UUID; the
+        # dashboards keep their camera and boards since nothing they show changed.
+        sent = []
+        self.gw.clients = {object()}
+        with mock.patch.object(gateway.websockets, "broadcast",
+                               side_effect=lambda clients, msg: sent.append(msg)):
+            await self.fetch(UUID_A, mock_robot.TREE_XML)
+            await self.fetch(UUID_B, mock_robot.TREE_XML)
+            await self.fetch(UUID_A, mock_robot.PATROL_TREE_XML)
+        layouts = [m for m in sent if json.loads(m)["type"] == "layout"]
+        self.assertEqual(len(layouts), 2)
+        self.assertEqual(json.loads(layouts[0])["data"]["root_tree_id"], "MainTree")
+        self.assertEqual(json.loads(layouts[1])["data"]["root_tree_id"], "PatrolTree")
 
 
 class LayoutTest(unittest.TestCase):

@@ -9,7 +9,18 @@ import xml.etree.ElementTree as ET
 
 from klein import mock_robot
 from klein.gateway import KleinGateway
-from klein.groot2_protocol import HEADER_FORMAT, PROTOCOL_ID, REQ_STATUS, STATUS_RECORD_SIZE
+from klein.groot2_protocol import (
+    HEADER_FORMAT,
+    PROTOCOL_ID,
+    REQ_BLACKBOARD,
+    REQ_FULLTREE,
+    REQ_STATUS,
+    STATUS_RECORD_SIZE,
+)
+
+
+def _request(req_type, unique_id=424242):
+    return struct.pack(HEADER_FORMAT, PROTOCOL_ID, req_type, unique_id)
 
 
 class StatusBufferTest(unittest.TestCase):
@@ -177,6 +188,97 @@ class ReplyHeaderTest(unittest.TestCase):
         self.assertEqual(len(header), 22)
         proto, req_type, unique_id = struct.unpack(HEADER_FORMAT, header[:6])
         self.assertEqual((proto, req_type, unique_id), (PROTOCOL_ID, 0, 0))
+
+    def test_carries_the_publisher_uuid_it_is_given(self):
+        header = mock_robot.reply_header(_request(REQ_STATUS), tree_uuid=b"\x07" * 16)
+        self.assertEqual(header[6:], b"\x07" * 16)
+
+
+class MockPublisherTest(unittest.TestCase):
+    """A MockPublisher stands for one Groot2Publisher instance: its own UUID,
+    its own tree, UIDs from 1 — so swapping publishers is what a tree switch on
+    Nav2's bt_navigator looks like on the wire."""
+
+    def setUp(self):
+        self.gw = KleinGateway("127.0.0.1", 1667, 8080)
+
+    def tearDown(self):
+        self.gw.ctx.destroy(linger=0)
+
+    def test_each_instance_mints_its_own_uuid(self):
+        a = mock_robot.MockPublisher(*mock_robot.TREES[0])
+        b = mock_robot.MockPublisher(*mock_robot.TREES[0])
+        self.assertEqual(len(a.tree_uuid), 16)
+        self.assertTrue(any(a.tree_uuid))                  # never the null UUID
+        self.assertNotEqual(a.tree_uuid, b.tree_uuid)
+
+    def test_default_run_keeps_the_stable_uuid(self):
+        pub = mock_robot.MockPublisher(*mock_robot.TREES[0], tree_uuid=mock_robot.DEFAULT_TREE_UUID)
+        reply = pub.reply([_request(REQ_STATUS)], 0)
+        self.assertEqual(KleinGateway.reply_uuid(reply), bytes(range(16)))
+
+    def test_every_reply_carries_the_instance_uuid(self):
+        pub = mock_robot.MockPublisher(*mock_robot.TREES[1])
+        for frames in ([_request(REQ_FULLTREE)], [_request(REQ_STATUS)],
+                       [_request(REQ_BLACKBOARD), b"PatrolTree"]):
+            reply = pub.reply(frames, 3)
+            self.assertEqual(KleinGateway.reply_uuid(reply), pub.tree_uuid)
+        self.assertEqual(pub.reply([_request(REQ_FULLTREE)], 0)[1].decode(), mock_robot.PATROL_TREE_XML)
+
+    def test_unknown_request_type_yields_the_error_reply(self):
+        pub = mock_robot.MockPublisher(*mock_robot.TREES[0])
+        self.assertEqual(pub.reply([_request(ord("?"))], 0)[0], b"error")
+        self.assertEqual(pub.reply([], 0)[0], b"error")
+
+    def test_switching_publishers_changes_uuid_and_restarts_uids(self):
+        first = mock_robot.MockPublisher(*mock_robot.TREES[0])
+        second = mock_robot.MockPublisher(*mock_robot.TREES[1])
+        shapes = []
+        for pub in (first, second):
+            self.gw._parse_layout(pub.reply([_request(REQ_FULLTREE)], 0)[1].decode())
+            uids = KleinGateway.parse_status(pub.reply([_request(REQ_STATUS)], 0)[1])
+            self.assertEqual(min(uids), 1)                 # UIDs restart with the publisher
+            shapes.append((self.gw.tree_structure["root_tree_id"], self.gw._node_seq))
+        self.assertNotEqual(shapes[0][0], shapes[1][0])    # different root trees...
+        self.assertNotEqual(shapes[0][1], shapes[1][1])    # ...of different size
+        # The decision klein's reload rests on, fed with the mock's real headers.
+        self.gw._layout_uuid = KleinGateway.reply_uuid(first.reply([_request(REQ_STATUS)], 0))
+        self.assertFalse(self.gw._tree_changed(KleinGateway.reply_uuid(first.reply([_request(REQ_STATUS)], 1))))
+        self.assertTrue(self.gw._tree_changed(KleinGateway.reply_uuid(second.reply([_request(REQ_STATUS)], 0))))
+
+
+class PatrolTreeTest(unittest.TestCase):
+    def parse(self, tick):
+        return KleinGateway.parse_status(mock_robot.build_patrol_status_buffer(tick))
+
+    def test_status_covers_every_uid_and_decodes(self):
+        self.assertEqual(set(self.parse(0)), set(mock_robot.PATROL_UIDS))
+        for t in range(mock_robot.PATROL_CYCLE_TICKS * 2):
+            for entry in self.parse(t).values():
+                self.assertNotEqual(entry["status"], "UNKNOWN")
+
+    def test_root_decorator_runs_throughout_the_lap(self):
+        for t in range(mock_robot.PATROL_CYCLE_TICKS):
+            self.assertEqual(self.parse(t)[1]["status"], "RUNNING")
+
+    def test_blackboard_serves_the_names_the_layout_advertises(self):
+        names = KleinGateway.extract_blackboard_names(ET.fromstring(mock_robot.PATROL_TREE_XML))
+        self.assertEqual(names, mock_robot.PATROL_BLACKBOARD_NAMES)
+        self.assertEqual(set(mock_robot.build_patrol_blackboard(0)), set(names))
+
+    def test_values_advance_across_laps(self):
+        first = mock_robot.build_patrol_blackboard(0)["PatrolTree"]
+        later = mock_robot.build_patrol_blackboard(mock_robot.PATROL_CYCLE_TICKS)["PatrolTree"]
+        self.assertEqual((first["lap"], later["lap"]), (0, 1))
+        self.assertNotEqual(first["waypoint"], later["waypoint"])
+        self.assertLess(later["battery_pct"], first["battery_pct"])
+
+    def test_reply_round_trips_through_the_gateway_parser(self):
+        raw = mock_robot.build_blackboard_reply(
+            [_request(REQ_BLACKBOARD), b"PatrolTree;Inspect::5"], 5, mock_robot.build_patrol_blackboard)
+        boards = KleinGateway.parse_blackboard(raw, mock_robot.PATROL_BLACKBOARD_NAMES)
+        self.assertEqual(list(boards), mock_robot.PATROL_BLACKBOARD_NAMES)
+        json.dumps(boards)
 
 
 if __name__ == "__main__":

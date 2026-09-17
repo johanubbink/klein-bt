@@ -49,6 +49,10 @@ access.
 The side pane collapses with the `«` button when you want the canvas to itself,
 and comes back with the handle it leaves behind.
 
+If the robot swaps its tree while running — Nav2's `bt_navigator` does,
+whenever a goal names a different BT XML — klein notices the new tree UUID in
+the robot's replies, fetches the new tree and the dashboard lays it out afresh.
+
 ### Blackboards
 
 The pane's **Blackboards** section lists every subtree's board, refreshed at 2 Hz
@@ -75,6 +79,7 @@ protocol to drive the dashboard with no real robot (it ships with the package):
 ```bash
 klein-bt-mock --port 1777             # in one shell
 klein-bt --robot-port 1777            # in another
+klein-bt-mock --port 1777 --switch-tree-every 20   # swap trees every 20 s, as Nav2 does
 ```
 
 Run the unit tests (no extra dependencies — stdlib `unittest`):

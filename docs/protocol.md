@@ -52,13 +52,24 @@ Replies are two frames. Frame 0 is a 22-byte reply header — the request's
 (`groot2_protocol.h :: ReplyHeader`). Frame 1 is the payload. On a malformed
 request the publisher replies `[b"error", <message>]` instead.
 
+The tree UUID is minted once, when the publisher's server thread starts
+(`CreateRandomUUID()` in `Groot2Publisher::serverLoop`,
+`src/loggers/groot2_publisher.cpp`), so it identifies the *publisher instance*,
+not the XML: a new publisher on the same port carries a new UUID, and its node
+`_uid`s restart from 1. Nav2's `bt_navigator` does exactly this whenever a
+goal names a different BT XML (`BtActionServer::loadBehaviorTree` resets and
+re-adds its Groot2 monitor). klein compares the UUID of every reply with the
+one its layout was fetched under and runs FULLTREE again on a mismatch,
+dropping status and blackboard frames from the other tree meanwhile. An
+all-zero UUID is treated as absent and never compared.
+
 ## Request types
 
 The full vocabulary, from `groot2_protocol.h :: RequestType`:
 
 | type | letter | payload of the reply | klein |
 | --- | --- | --- | --- |
-| FULLTREE | `T` | tree XML (UTF-8) | ✅ once per handshake |
+| FULLTREE | `T` | tree XML (UTF-8) | ✅ at startup, and again whenever the reply UUID changes |
 | STATUS | `S` | packed status records | ✅ polled at 10 Hz |
 | BLACKBOARD | `B` | msgpack board dump | ✅ polled at 2 Hz |
 | HOOK_INSERT / HOOK_REMOVE | `I` / `R` | — | ✖ breakpoint debugging |

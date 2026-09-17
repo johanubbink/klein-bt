@@ -38,6 +38,18 @@ should come alive the moment the robot appears. The XML is parsed once into an
 unrolled tree (below) and cached as a single JSON frame that every connecting
 client receives verbatim.
 
+The layout is bound to the tree UUID in the FULLTREE reply's header. Every
+reply names the publisher instance it came from that way, and a robot can swap
+publishers under klein: Nav2's `bt_navigator` recreates its `Groot2Publisher`,
+node UIDs restarting from 1, whenever a goal names a different BT XML. The
+status poller compares each reply's UUID with the layout's and, on a mismatch,
+runs the handshake again inline and pushes the new layout to every dashboard;
+both pollers drop frames whose UUID does not match the layout, so the canvas is
+never coloured with another tree's records. The dashboard treats every `layout`
+frame as a fresh tree (boards reset, relayout, camera recentred), so nothing on
+the browser side has to know about the switch. A publisher that carries no UUID
+(all zeros) keeps the layout it handshook with.
+
 Two pollers then share the socket:
 
 - **status** at 10 Hz — the packed status records, decoded and broadcast as
@@ -99,5 +111,9 @@ broadcast stream. Frame types on the wire:
 [`klein/mock_robot.py`](../klein/mock_robot.py) (`klein-bt-mock`) is a fake
 publisher that encodes the same protocol module the gateway decodes, driving
 the full pipeline — handshake, unrolling, both pollers, renderers — with no
-C++ in the loop. The unit tests under [`tests/`](../tests) cover the protocol
-encode/decode round-trip, the gateway's parsing, and the mock itself.
+C++ in the loop. `--switch-tree-every SECONDS` makes it recreate its publisher
+with a second, differently shaped tree and a fresh UUID on that cadence, with
+the port briefly unbound in between as on Nav2, so the re-handshake can be
+watched too. The unit tests under [`tests/`](../tests) cover the protocol
+encode/decode round-trip, the gateway's parsing, the tree-change rule, and the
+mock itself.

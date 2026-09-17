@@ -6,6 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Follows the robot when it swaps trees.** Every Groot2 reply names the
+  publisher instance it came from (the tree UUID in the reply header). When a
+  reply carries a UUID other than the one the layout was fetched under — Nav2's
+  `bt_navigator` recreates its publisher, node UIDs restarting from 1, whenever
+  a goal names a different BT XML — klein fetches the new tree and pushes it to
+  every dashboard instead of colouring the old layout with the new tree's
+  status records. Frames from the other tree are dropped while the reload is in
+  flight, the dashboard reads "Tree changed on the robot — reloading…"
+  meanwhile, and a restart of the same tree leaves the dashboard undisturbed.
+- `klein-bt-mock --switch-tree-every SECONDS` recreates the fake publisher with
+  a second, differently shaped tree and a fresh UUID on that cadence — and
+  leaves the port unbound for a moment in between, as Nav2 does — so the
+  relayout can be watched without a real robot.
+
 ## [0.4.0] - 2026-09-16
 
 ### Added

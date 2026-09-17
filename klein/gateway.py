@@ -43,7 +43,10 @@ from websockets.http11 import Response
 
 from .groot2_protocol import (
     HEADER_FORMAT,
+    HEADER_SIZE,
+    NULL_TREE_UUID,
     PROTOCOL_ID,
+    REPLY_HEADER_SIZE,
     REQ_BLACKBOARD,
     REQ_FULLTREE,
     REQ_STATUS,
@@ -99,6 +102,7 @@ class KleinGateway:
         self.all_behavior_trees = {}        # tree_id -> root <element> of that block
         self.tree_structure = None          # unrolled nested dict sent to clients
         self._layout_json = None            # cached layout frame, rebuilt each handshake
+        self._layout_uuid = None            # tree UUID the layout was fetched under; None = unknown
         self.clients = set()
 
         # Blackboards: one per subtree instance, named by the paths in the layout.
@@ -178,6 +182,34 @@ class KleinGateway:
         if uid_str is not None and uid_str.lstrip("-").isdigit():
             return int(uid_str)
         return None
+
+    @staticmethod
+    def reply_uuid(reply):
+        """Return the tree UUID from a reply's header frame, or None if unknown.
+
+        Frame 0 of every reply echoes the request header and appends the 16-byte
+        UUID the Groot2Publisher minted when it started, so the UUID names the
+        publisher instance the reply came from. None is returned when the frame
+        is too short to carry one (an ``error`` reply, or a publisher that
+        predates the field) and when it is all zeros: a zero UUID carries no
+        identity, so it must never be taken as evidence of a change.
+        """
+        if not reply or len(reply[0]) < REPLY_HEADER_SIZE:
+            return None
+        uuid = bytes(reply[0][HEADER_SIZE:REPLY_HEADER_SIZE])
+        return None if uuid == NULL_TREE_UUID else uuid
+
+    def _tree_changed(self, uuid):
+        """True when ``uuid`` names a different publisher than the layout's.
+
+        A new publisher instance means a new tree — Nav2's bt_navigator creates
+        one whenever a goal names a different BT XML — and node UIDs restart from
+        1 in it, so status records keyed to the old layout would colour the wrong
+        nodes. Both sides must be known: with either unknown there is nothing to
+        compare, and a robot that sends no UUID keeps the layout it handshook with.
+        """
+        return (uuid is not None and self._layout_uuid is not None
+                and uuid != self._layout_uuid)
 
     # Structural attributes: klein renders these itself (name, ID) or uses them
     # to wire the tree up (_uid, _fullpath). Everything else the robot stamped
@@ -335,6 +367,13 @@ class KleinGateway:
         klein may be started before the robot; rather than crash we back off and
         keep trying so the dashboard comes alive as soon as the robot appears.
         Any dashboards already connected are pushed the layout once it loads.
+
+        Runs at startup and again, from ``status_poller``, whenever the robot
+        starts replying under another tree UUID. The layout is bound to the UUID
+        of the FULLTREE reply it came from, so later replies can be checked
+        against it. A layout identical to the one already shown — a robot
+        process restarted with the same tree — is not re-broadcast, sparing the
+        dashboards a camera reset and a blackboard wipe.
         """
         attempt = 0
         while True:
@@ -345,13 +384,17 @@ class KleinGateway:
                     raise ValueError("robot replied with an error frame")
                 if len(reply) < 2 or not reply[1]:
                     raise ValueError("reply missing tree payload frame")
+                previous_layout = self._layout_json
                 self._parse_layout(reply[1].decode("utf-8", errors="ignore"))
+                self._layout_uuid = self.reply_uuid(reply)
                 print(
                     f"[klein] tree layout loaded from {self.robot_endpoint} "
                     f"({self._node_seq} nodes unrolled)."
                 )
                 self._set_robot_state(True, f"Connected to robot at {self.robot_endpoint}")
-                if self.clients:  # push to dashboards that connected while we waited
+                if self.clients and self._layout_json != previous_layout:
+                    # push to dashboards that connected while we waited, or that
+                    # are still showing the tree this one replaces
                     websockets.broadcast(self.clients, self._layout_json)
                 return
             except (RobotTimeout, ValueError, ET.ParseError) as exc:
@@ -365,6 +408,21 @@ class KleinGateway:
                     False, f"Waiting for robot at {self.robot_endpoint}…"
                 )
                 await asyncio.sleep(wait)
+
+    async def _reload_layout(self):
+        """Handshake again because the robot replies under a new tree UUID.
+
+        The cached blackboard frame belongs to the old tree and is dropped so a
+        late-joining dashboard is not shown it. The cached layout frame is kept
+        until the new one replaces it, so a dashboard connecting during the
+        reload sees the (frozen) old tree with the detail text rather than a
+        blank canvas. ``fetch_layout`` pushes the new layout to every dashboard
+        when it succeeds.
+        """
+        print("[klein] tree changed on the robot (new publisher UUID); reloading layout.")
+        self._blackboard_json = None
+        self._set_robot_state(True, "Tree changed on the robot — reloading…")
+        await self.fetch_layout()
 
     # ------------------------------------------------------------------ #
     # Telemetry: STATUS poll -> parse -> broadcast
@@ -446,15 +504,23 @@ class KleinGateway:
 
         Robot reachability is deliberately *not* reported here: ``status_poller``
         already owns that at 10 Hz, and a second reporter on a different cadence
-        would make the connection indicator flap.
+        would make the connection indicator flap. Likewise a tree change is only
+        *detected* here, never acted on: ``status_poller`` owns the reload, and
+        this poller drops any reply that does not belong to the current layout.
         """
         while True:
             if not self.clients or not self._blackboard_request:
                 await asyncio.sleep(BLACKBOARD_POLL_INTERVAL)
                 continue
             try:
+                # The request may wait on _req_lock behind a FULLTREE handshake
+                # that replaces the layout; _parse_layout binds a fresh list, so
+                # identity tells whether the names asked for are still current.
+                names = self._blackboard_names
                 reply = await self._request(REQ_BLACKBOARD, self._blackboard_request)
-                if reply and len(reply) >= 2 and reply[0] != b"error":
+                if self._tree_changed(self.reply_uuid(reply)) or names is not self._blackboard_names:
+                    pass    # another tree answered: its boards would mislabel this layout
+                elif reply and len(reply) >= 2 and reply[0] != b"error":
                     boards = self.parse_blackboard(reply[1], self._blackboard_names)
                     # Broadcast even when empty, so the dashboard can say so.
                     self._blackboard_json = json.dumps(
@@ -469,14 +535,22 @@ class KleinGateway:
 
     async def status_poller(self):
         """Poll the robot at 10 Hz (only while clients are watching) and
-        broadcast parsed status frames."""
+        broadcast parsed status frames.
+
+        Also the one place a tree change is acted on: a reply carrying another
+        publisher's UUID triggers the re-handshake inline, so there is a single
+        writer of the layout and status polling pauses while the layout is
+        stale — every record from the new tree would be wrong for the old one.
+        """
         while True:
             if not self.clients:
                 await asyncio.sleep(POLL_INTERVAL)
                 continue
             try:
                 reply = await self._request(REQ_STATUS)
-                if reply and len(reply) >= 2 and reply[0] != b"error":
+                if self._tree_changed(self.reply_uuid(reply)):
+                    await self._reload_layout()
+                elif reply and len(reply) >= 2 and reply[0] != b"error":
                     updates = self.parse_status(reply[1])
                     if updates:
                         if not self._robot_connected:

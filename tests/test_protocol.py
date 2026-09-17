@@ -5,13 +5,17 @@ import unittest
 
 from klein.groot2_protocol import (
     HEADER_FORMAT,
+    HEADER_SIZE,
     IDLE_TRANSITION,
+    NULL_TREE_UUID,
     PROTOCOL_ID,
+    REPLY_HEADER_SIZE,
     REQ_BLACKBOARD,
     REQ_FULLTREE,
     REQ_STATUS,
     STATUS_RECORD_FORMAT,
     STATUS_RECORD_SIZE,
+    TREE_UUID_SIZE,
     NodeStatus,
     decode_status,
 )
@@ -26,8 +30,16 @@ class ConstantsTest(unittest.TestCase):
 
     def test_struct_formats(self):
         self.assertEqual(struct.calcsize(HEADER_FORMAT), 6)         # u8 u8 u32
+        self.assertEqual(HEADER_SIZE, 6)
         self.assertEqual(struct.calcsize(STATUS_RECORD_FORMAT), 3)  # u16 u8
         self.assertEqual(STATUS_RECORD_SIZE, 3)
+
+    def test_reply_header_layout(self):
+        # groot2_protocol.h :: ReplyHeader = RequestHeader + 16-byte TreeUniqueUUID
+        self.assertEqual(TREE_UUID_SIZE, 16)
+        self.assertEqual(REPLY_HEADER_SIZE, 22)
+        self.assertEqual(len(NULL_TREE_UUID), 16)
+        self.assertFalse(any(NULL_TREE_UUID))
 
     def test_node_status_values(self):
         self.assertEqual(

@@ -19,6 +19,15 @@ REQ_BLACKBOARD = ord("B")       # RequestType::BLACKBOARD — returns msgpack {b
 
 # Request header, little-endian: protocol_id (u8) | request_type (u8) | unique_id (u32)
 HEADER_FORMAT = "<BBI"
+HEADER_SIZE = struct.calcsize(HEADER_FORMAT)                  # 6
+
+# Reply header: the request header echoed back, then a 16-byte tree UUID
+# (groot2_protocol.h :: ReplyHeader). The publisher mints the UUID once, when its
+# server thread starts, so it identifies the *publisher instance* rather than
+# the tree XML: a publisher recreated on the same port carries a new one.
+TREE_UUID_SIZE = 16
+REPLY_HEADER_SIZE = HEADER_SIZE + TREE_UUID_SIZE                # 22
+NULL_TREE_UUID = bytes(TREE_UUID_SIZE)   # carries no identity; never compared against
 
 # Status buffer: consecutive fixed records, node_uid (u16) | status_int (u8)
 STATUS_RECORD_FORMAT = "<HB"

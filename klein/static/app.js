@@ -309,6 +309,14 @@ function updateTreeLayout(sourceNode) {
     // existing cards and nothing enters — classing on enter would silently skip
     // repainting them. Safe to write the whole list, because nothing else puts a
     // class on g.node (running/focused/highlight all live on its children).
+    //
+    // A card's *labels* stay on enter, and are safe there because the gateway
+    // generation-prefixes node ids: two trees' ids are disjoint, so a layout for
+    // a different tree retires every card rather than matching it. (The subtree
+    // frame above relies on the same guarantee.) A reconnect does match, but it
+    // replays the identical cached layout, so there is nothing to rewrite — and
+    // this function also runs on every expand/collapse, where re-labelling every
+    // visible card would be pure waste.
     nodeUpdate.attr("class", nodeClasses);
 
     nodeUpdate.transition().duration(250)
@@ -796,6 +804,20 @@ function updateConnectionUI() {
     }
 }
 
+// A transient note along the bottom of the canvas — currently only "the robot
+// swapped its tree". Its own element rather than #robot-banner, because
+// updateConnectionUI owns that one and rewrites its text and class on every
+// connection change, which a tree swap reliably causes.
+const noticeBanner = d3.select("#notice-banner");
+const NOTICE_MS = 4000;
+let noticeTimer = null;
+
+function showNotice(text) {
+    noticeBanner.text(text).attr("class", "visible");
+    clearTimeout(noticeTimer);      // a second notice restarts the clock
+    noticeTimer = setTimeout(() => noticeBanner.attr("class", ""), NOTICE_MS);
+}
+
 // ------------------------------------------------------------------ //
 // Gateway WebSocket connection
 // ------------------------------------------------------------------ //
@@ -842,6 +864,10 @@ function connectGatewayPipeline() {
 
         else if (message.type === "blackboard") {
             renderBlackboards(message.data || {});
+        }
+
+        else if (message.type === "notice") {
+            showNotice(message.text);
         }
 
         else if (message.type === "robot") {

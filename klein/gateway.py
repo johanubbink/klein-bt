@@ -4,7 +4,9 @@ klein connects to a running BehaviorTree.CPP robot node exposing the Groot2
 publisher protocol (a ``ZMQ_REP`` socket, default port 1667), performs the
 FULLTREE handshake, recursively unrolls nested subtrees into a single tree, and
 then streams 10 Hz status telemetry — plus 2 Hz blackboard values, one board per
-subtree — to browser dashboards over WebSockets.
+subtree — to browser dashboards over WebSockets. A robot that loads a
+*different* tree is noticed on the next poll, from the tree UUID every reply
+carries, and the handshake is re-run.
 
 Everything the browser needs is served from a **single port** (``--port``):
 
@@ -54,6 +56,7 @@ from .groot2_protocol import (
     STATUS_RECORD_FORMAT,
     STATUS_RECORD_SIZE,
     decode_status,
+    decode_tree_uuid,
 )
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -111,7 +114,10 @@ class KleinGateway:
         self._blackboard_request = None      # pre-encoded b"name1;name2" request payload
         self._blackboard_json = None         # cached last frame, for late-joining clients
 
-        self._node_seq = 0                  # stable per-node id (uid may be null)
+        self._node_seq = 0                  # per-tree node counter (uid may be null)
+        self._layout_generation = 0         # bumped per handshake; prefixes node ids
+        self._tree_uuid = None              # publisher UUID the loaded layout came from
+        self._layout_xml = None             # raw FULLTREE XML, to spot an unchanged tree
 
         # Robot reachability, mirrored to dashboards so a blank canvas is never
         # ambiguous. Starts "not connected" until the first successful handshake.
@@ -168,8 +174,14 @@ class KleinGateway:
     # Layout: FULLTREE handshake + recursive subtree unrolling
     # ------------------------------------------------------------------ #
     def _next_id(self):
+        """A node id unique across handshakes, not just within one tree.
+
+        ``_node_seq`` restarts at 1 per tree (it doubles as the unrolled node
+        count), so the generation prefix is what keeps two trees' id sets
+        disjoint for the dashboard's keyed join — see docs/architecture.md.
+        """
         self._node_seq += 1
-        return self._node_seq
+        return f"{self._layout_generation}:{self._node_seq}"
 
     @staticmethod
     def extract_uid(element):
@@ -312,6 +324,7 @@ class KleinGateway:
     def _parse_layout(self, xml_str):
         """Parse FULLTREE XML and build the unrolled tree structure."""
         root = ET.fromstring(xml_str)
+        self._layout_xml = xml_str      # what the current layout was built from
 
         # Built before unrolling, because unroll_node stamps each node's
         # category from it. Rebuilt per handshake, so re-handshaking against a
@@ -340,6 +353,7 @@ class KleinGateway:
         if main_tree_id is None or self.all_behavior_trees.get(main_tree_id) is None:
             raise ValueError("layout XML contains no usable <BehaviorTree> block")
 
+        self._layout_generation += 1
         self._node_seq = 0
         self.tree_structure = self.unroll_node(self.all_behavior_trees[main_tree_id])
         self.tree_structure["root_tree_id"] = main_tree_id
@@ -356,6 +370,16 @@ class KleinGateway:
         self._blackboard_request = ";".join(self._blackboard_names).encode("utf-8")
         self._blackboard_json = None    # values from the previous tree are stale
 
+    def _broadcast(self, frame):
+        """Send one pre-serialized frame to every dashboard, if any is watching."""
+        if self.clients:
+            websockets.broadcast(self.clients, frame)
+
+    def _mark_connected(self):
+        """Report the robot reachable. One spelling of the detail string, because
+        ``_set_robot_state`` suppresses re-broadcasts by comparing it."""
+        self._set_robot_state(True, f"Connected to robot at {self.robot_endpoint}")
+
     def _set_robot_state(self, connected, detail):
         """Record robot reachability and push it to dashboards on change.
 
@@ -370,8 +394,40 @@ class KleinGateway:
         self._robot_state_json = json.dumps(
             {"type": "robot", "connected": connected, "detail": detail}
         )
-        if self.clients:
-            websockets.broadcast(self.clients, self._robot_state_json)
+        self._broadcast(self._robot_state_json)
+
+    def _tree_changed(self, header_frame):
+        """True when a reply came from a different tree than the loaded layout.
+
+        Deliberately *pure*: ``fetch_layout`` is the only writer of
+        ``_tree_uuid``, so a re-handshake that fails keeps mismatching instead of
+        leaving the gateway believing a tree it never loaded.
+        """
+        uuid = decode_tree_uuid(header_frame)
+        return (uuid is not None
+                and self._tree_uuid is not None
+                and uuid != self._tree_uuid)
+
+    def _broadcast_notice(self, text):
+        """Push a one-off message to dashboards. Never cached, unlike every other
+        frame type — see the frame table in docs/architecture.md."""
+        self._broadcast(json.dumps({"type": "notice", "text": text}))
+
+    async def _reload_tree(self, why):
+        """Re-run the handshake because the tree on the robot may have changed.
+
+        Only ``status_poller`` calls this, and only after its own ``_request``
+        has released the non-reentrant ``_req_lock``, so two handshakes can never
+        overlap and this cannot deadlock. ``fetch_layout`` owns the retry and
+        backoff; parking here while the robot is away is correct, since every
+        status buffer would have to be discarded until the new layout lands.
+        """
+        print(f"[klein] {why}; re-running the handshake.")
+        if await self.fetch_layout():   # False when the tree came back unchanged
+            # After the layout, so the canvas has already redrawn by the time the
+            # note explains why.
+            self._broadcast_notice(
+                "The robot loaded a new behaviour tree — reloaded.")
 
     async def fetch_layout(self):
         """Handshake with the robot to load the tree, retrying until it works.
@@ -379,6 +435,10 @@ class KleinGateway:
         klein may be started before the robot; rather than crash we back off and
         keep trying so the dashboard comes alive as soon as the robot appears.
         Any dashboards already connected are pushed the layout once it loads.
+
+        Returns True when the tree that came back differs from the one already
+        loaded, so a caller re-handshaking after a UUID change can tell a real
+        swap from a robot that merely restarted with the same tree.
         """
         attempt = 0
         while True:
@@ -389,7 +449,23 @@ class KleinGateway:
                     raise ValueError("robot replied with an error frame")
                 if len(reply) < 2 or not reply[1]:
                     raise ValueError("reply missing tree payload frame")
-                self._parse_layout(reply[1].decode("utf-8", errors="ignore"))
+                xml_str = reply[1].decode("utf-8", errors="ignore")
+                # A restarted robot publishes a fresh UUID even when it is running
+                # the very same tree, and re-parsing then would retire every node
+                # id and rebuild the identical canvas — a flash reporting nothing.
+                changed = xml_str != self._layout_xml
+                if changed:
+                    self._parse_layout(xml_str)
+                # Read from this same reply, so the loaded tree and the UUID the
+                # status poller compares against are always one publisher's. After
+                # _parse_layout, so a parse failure leaves the previous UUID in
+                # place and the mismatch keeps driving the retry.
+                self._tree_uuid = decode_tree_uuid(reply[0])
+                self._mark_connected()
+                if not changed:
+                    print(f"[klein] robot restarted with the same tree "
+                          f"({self._node_seq} nodes); layout kept.")
+                    return False
                 print(
                     f"[klein] tree layout loaded from {self.robot_endpoint} "
                     f"({self._node_seq} nodes unrolled)."
@@ -401,10 +477,8 @@ class KleinGateway:
                         "fall back to the BehaviorTree.CPP builtin table.",
                         file=sys.stderr,
                     )
-                self._set_robot_state(True, f"Connected to robot at {self.robot_endpoint}")
-                if self.clients:  # push to dashboards that connected while we waited
-                    websockets.broadcast(self.clients, self._layout_json)
-                return
+                self._broadcast(self._layout_json)  # dashboards that connected while we waited
+                return True
             except (RobotTimeout, ValueError, ET.ParseError) as exc:
                 wait = min(float(attempt), LAYOUT_RETRY_MAX)
                 print(
@@ -497,30 +571,53 @@ class KleinGateway:
 
         Robot reachability is deliberately *not* reported here: ``status_poller``
         already owns that at 10 Hz, and a second reporter on a different cadence
-        would make the connection indicator flap.
+        would make the connection indicator flap. Tree-change detection is the
+        status poller's alone for the same reason, plus one more: a single owner
+        means two handshakes can never overlap.
         """
         while True:
             if not self.clients or not self._blackboard_request:
                 await asyncio.sleep(BLACKBOARD_POLL_INTERVAL)
                 continue
             try:
+                # Captured before the await: a swap can land while this request
+                # is in flight, and a reply for the retired tree must be dropped —
+                # caching it would undo the _blackboard_json = None that
+                # _parse_layout just wrote, leaving the next dashboard to connect
+                # a list of dead boards that no later frame would ever clear.
+                names = self._blackboard_names
+                generation = self._layout_generation
                 reply = await self._request(REQ_BLACKBOARD, self._blackboard_request)
-                if reply and len(reply) >= 2 and reply[0] != b"error":
-                    boards = self.parse_blackboard(reply[1], self._blackboard_names)
+                if (self._layout_generation == generation
+                        and reply and len(reply) >= 2 and reply[0] != b"error"):
+                    boards = self.parse_blackboard(reply[1], names)
                     # Broadcast even when empty, so the dashboard can say so.
                     self._blackboard_json = json.dumps(
                         {"type": "blackboard", "data": boards}
                     )
-                    websockets.broadcast(self.clients, self._blackboard_json)
+                    self._broadcast(self._blackboard_json)
             except RobotTimeout:
                 pass  # status_poller reports the outage; values just stop updating
             except Exception as exc:  # never let the poller die
                 print(f"[klein] blackboard poller error: {exc}", file=sys.stderr)
             await asyncio.sleep(BLACKBOARD_POLL_INTERVAL)
 
+    def _broadcast_status(self, buffer):
+        """Decode one status buffer and push it to dashboards."""
+        updates = self.parse_status(buffer)
+        if updates:
+            self._broadcast(json.dumps({"type": "status", "data": updates}))
+
     async def status_poller(self):
         """Poll the robot at 10 Hz (only while clients are watching) and
-        broadcast parsed status frames."""
+        broadcast parsed status frames.
+
+        Also the sole owner of tree-change detection: the handshake is re-run,
+        before any further status is believed, when a reply's tree UUID no longer
+        matches the loaded layout, and again whenever telemetry resumes after an
+        outage — a robot that went away and came back may be a different process
+        running a different tree.
+        """
         while True:
             if not self.clients:
                 await asyncio.sleep(POLL_INTERVAL)
@@ -528,17 +625,24 @@ class KleinGateway:
             try:
                 reply = await self._request(REQ_STATUS)
                 if reply and len(reply) >= 2 and reply[0] != b"error":
-                    updates = self.parse_status(reply[1])
-                    if updates:
-                        if not self._robot_connected:
-                            print("[klein] robot telemetry resumed.")
-                        self._set_robot_state(
-                            True, f"Connected to robot at {self.robot_endpoint}"
-                        )
-                        websockets.broadcast(
-                            self.clients,
-                            json.dumps({"type": "status", "data": updates}),
-                        )
+                    # Either way the buffer is dropped rather than broadcast: its
+                    # UIDs index a tree the dashboard may not have been sent, so
+                    # they could land on the previous tree's cards.
+                    if self._tree_changed(reply[0]):
+                        await self._reload_tree("robot published a different tree")
+                    elif not self._robot_connected:
+                        # Telemetry resumed after an outage, which is what killing
+                        # a robot and starting another looks like from here. The
+                        # UUID check above should already have caught a swap, but
+                        # it trusts the robot to draw a fresh UUID per process;
+                        # an outage is evidence klein owns, so re-handshake on it
+                        # too rather than let one implementation detail decide
+                        # whether the dashboard is showing the right tree. Costs
+                        # one FULLTREE, and fetch_layout keeps the layout — no
+                        # re-render, no notice — when the XML comes back the same.
+                        await self._reload_tree("robot telemetry resumed")
+                    else:
+                        self._broadcast_status(reply[1])
             except RobotTimeout:
                 if self._robot_connected:
                     print("[klein] robot status poll timed out; retrying...",

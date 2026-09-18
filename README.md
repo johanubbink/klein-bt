@@ -49,6 +49,11 @@ access.
 The side pane collapses with the `«` button when you want the canvas to itself,
 and comes back with the handle it leaves behind.
 
+If the robot loads a *different* behaviour tree while you are watching — a new
+mission, or a restart onto another tree — klein notices within a tenth of a
+second, redraws the dashboard on the new tree and says so with a brief note in
+the banner. No page reload, and no stale canvas quietly showing the wrong tree.
+
 ### Blackboards
 
 The pane's **Blackboards** section lists every subtree's board, refreshed at 2 Hz
@@ -75,6 +80,15 @@ protocol to drive the dashboard with no real robot (it ships with the package):
 ```bash
 klein-bt-mock --port 1777             # in one shell
 klein-bt --robot-port 1777            # in another
+```
+
+It carries two quite different trees and can swap between them mid-run,
+publishing a fresh tree UUID each time exactly as a robot loading a new tree
+does — so the automatic reload can be watched without a robot either:
+
+```bash
+klein-bt-mock --port 1777 --switch-every 200   # swap trees roughly every 20s
+klein-bt-mock --port 1777 --tree patrol        # or just publish the other one
 ```
 
 Run the unit tests (no extra dependencies — stdlib `unittest`):

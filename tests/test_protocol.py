@@ -13,10 +13,15 @@ from klein.groot2_protocol import (
     REQ_BLACKBOARD,
     REQ_FULLTREE,
     REQ_STATUS,
+    REPLY_HEADER_SIZE,
+    REQUEST_HEADER_SIZE,
     STATUS_RECORD_FORMAT,
     STATUS_RECORD_SIZE,
+    TREE_UUID_OFFSET,
+    TREE_UUID_SIZE,
     NodeStatus,
     decode_status,
+    decode_tree_uuid,
 )
 
 
@@ -60,6 +65,43 @@ class DecodeStatusTest(unittest.TestCase):
         self.assertEqual(decode_status(7), ("UNKNOWN", None))     # 5..9 gap
         self.assertEqual(decode_status(99), ("UNKNOWN", None))    # transition of a non-status
         self.assertEqual(decode_status(255), ("UNKNOWN", None))
+
+
+class ReplyHeaderTest(unittest.TestCase):
+    """The 16-byte tree UUID — the only signal that the robot swapped trees."""
+
+    UUID = bytes(range(16))
+
+    def header(self, uuid=None):
+        return (struct.pack(HEADER_FORMAT, PROTOCOL_ID, REQ_STATUS, 7)
+                + (self.UUID if uuid is None else uuid))
+
+    def test_sizes_match_btcpp(self):
+        # Literals on purpose: these pin the wire format against
+        # groot2_protocol.h, so deriving them here would assert nothing.
+        self.assertEqual(REQUEST_HEADER_SIZE, 6)
+        self.assertEqual(TREE_UUID_OFFSET, 6)
+        self.assertEqual(TREE_UUID_SIZE, 16)
+        self.assertEqual(REPLY_HEADER_SIZE, 22)
+
+    def test_round_trips_the_uuid(self):
+        self.assertEqual(decode_tree_uuid(self.header()), self.UUID)
+        other = b"\xaa" * 16
+        self.assertEqual(decode_tree_uuid(self.header(other)), other)
+
+    def test_a_memoryview_frame_decodes_to_comparable_bytes(self):
+        # zmq hands frames over as buffers; the result is compared against a
+        # stored bytes object, so it must not come back as a memoryview.
+        decoded = decode_tree_uuid(memoryview(self.header()))
+        self.assertIsInstance(decoded, bytes)
+        self.assertEqual(decoded, self.UUID)
+
+    def test_frames_with_no_uuid_decode_to_none(self):
+        # An error reply's frame 0 is b"error", and a truncated header has
+        # nothing to read. Neither is a tree change; both must say so.
+        for frame in (None, b"", b"error", self.header()[:REPLY_HEADER_SIZE - 1]):
+            with self.subTest(frame=frame):
+                self.assertIsNone(decode_tree_uuid(frame))
 
 
 if __name__ == "__main__":

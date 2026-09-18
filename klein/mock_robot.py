@@ -9,16 +9,24 @@ Watch RUNNING (pulsing amber), SUCCESS (green), FAILURE (red), and
 IDLE-transition ("was …") states live, plus blackboard values that evolve with
 the mission.
 
+It can also publish a *second*, quite different tree, and swap between the two
+mid-run the way a robot loading a new mission does — a fresh publisher UUID and
+all — so klein's re-handshake can be watched with no C++ in the loop.
+
 Usage:
     klein-bt-mock                       # bind tcp://*:1667 (BT.CPP's default)
     klein-bt-mock --port 1777           # use another port (e.g. real robot on 1667)
+    klein-bt-mock --tree patrol         # publish the other tree instead
+    klein-bt-mock --switch-every 200    # swap trees every 200 status polls (~20s)
     python -m klein.mock_robot          # equivalent, without the console script
 
 Then, in another shell:
     klein-bt --robot-port <same-port>
 """
 import argparse
+import collections
 import math
+import os
 import struct
 import sys
 
@@ -32,7 +40,9 @@ from .groot2_protocol import (
     REQ_BLACKBOARD,
     REQ_FULLTREE,
     REQ_STATUS,
+    REQUEST_HEADER_SIZE,
     STATUS_RECORD_FORMAT,
+    TREE_UUID_SIZE,
     NodeStatus,
 )
 
@@ -64,7 +74,7 @@ from .groot2_protocol import (
 # Condition while the equally childless OpenDoor is an Action, which is why a
 # category cannot be inferred from the tree's shape. All five categories appear,
 # so a robot-free run exercises every style the dashboard draws.
-TREE_XML = """<root BTCPP_format="4" main_tree_to_execute="MainTree">
+CROSSDOOR_XML = """<root BTCPP_format="4" main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree" _fullpath="MainTree">
     <Sequence name="Sequence" _uid="1">
       <Script name="Script" code="door_open:=false" _uid="2"/>
@@ -117,11 +127,11 @@ TREE_XML = """<root BTCPP_format="4" main_tree_to_execute="MainTree">
 
 # Blackboard names the mock serves, in FULLTREE order (what klein derives from
 # the _fullpath attributes above).
-BLACKBOARD_NAMES = ["MainTree", "DoorClosed::7"]
+CROSSDOOR_BLACKBOARD_NAMES = ["MainTree", "DoorClosed::7"]
 
 # Every UID in the tree, in order (the publisher reports status for all of them).
 # SmashDoor (12) is the never-taken branch: PickLock always cracks it first.
-ALL_UIDS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+CROSSDOOR_UIDS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
 
 # Status values used by the animation, derived from the shared protocol enum.
 IDLE = NodeStatus.IDLE
@@ -132,7 +142,7 @@ WAS_SUCCESS = IDLE_TRANSITION + NodeStatus.SUCCESS   # 12: "now IDLE, previously
 WAS_FAILURE = IDLE_TRANSITION + NodeStatus.FAILURE   # 13: "now IDLE, previously FAILURE"
 
 
-def _build_timeline():
+def _build_crossdoor_timeline():
     """Build the mission as ``(duration_ticks, {uid: status}, {bb_key: value})``.
 
     Nodes absent from a frame are IDLE. This mirrors the deterministic CrossDoor
@@ -202,34 +212,25 @@ def _build_timeline():
     return frames
 
 
-TIMELINE = _build_timeline()
-CYCLE_TICKS = sum(dur for dur, _, _ in TIMELINE)
+def _cycle_ticks(timeline):
+    return sum(dur for dur, _, _ in timeline)
 
 
-def _frame_at(tick):
+CROSSDOOR_TIMELINE = _build_crossdoor_timeline()
+
+
+def _frame_at(tick, tree):
     """Return the ``({uid: status}, {bb_key: value})`` frame for a given tick.
 
-    Walks the looping mission TIMELINE. Shared by the status and blackboard
-    builders so the two can never disagree about where the mission is.
+    Walks the tree's looping mission timeline. Shared by the status and
+    blackboard builders so the two can never disagree about where the mission is.
     """
-    t = tick % CYCLE_TICKS
-    for dur, status, bb in TIMELINE:
+    t = tick % tree.cycle_ticks
+    for dur, status, bb in tree.timeline:
         if t < dur:
             return status, bb
         t -= dur
-    return TIMELINE[-1][1], TIMELINE[-1][2]     # unreachable: the durations sum to CYCLE_TICKS
-
-
-def build_status_buffer(tick):
-    """Return the 3-byte-per-node status buffer for the current tick.
-
-    Nodes not named in the current frame are reported IDLE.
-    """
-    status, _bb = _frame_at(tick)
-    buf = bytearray()
-    for uid in ALL_UIDS:
-        buf += struct.pack(STATUS_RECORD_FORMAT, uid, status.get(uid, IDLE))
-    return bytes(buf)
+    return tree.timeline[-1][1], tree.timeline[-1][2]   # unreachable: durations sum to cycle_ticks
 
 
 # --------------------------------------------------------------------------- #
@@ -298,7 +299,7 @@ def _accumulated(step, times):
     return total
 
 
-def build_blackboard(tick):
+def _crossdoor_blackboard(tick):
     """Return ``{blackboard_name: {key: value}}`` for the current tick.
 
     Covers the value shapes a real robot can send, so the dashboard's rendering
@@ -312,8 +313,8 @@ def build_blackboard(tick):
     two float cases that are unreadable raw: accumulated noise, and the DBL_MAX
     sentinel BT.CPP ports use for "no limit".
     """
-    _status, bb = _frame_at(tick)
-    t = tick % CYCLE_TICKS
+    _status, bb = _frame_at(tick, CROSSDOOR)
+    t = tick % CROSSDOOR.cycle_ticks
     seconds = MOCK_EPOCH_SEC + t * 0.1
     # The robot creeps toward the door, so the path ahead of it shortens and the
     # distance-to-goal ticks down — both visibly live in the panel.
@@ -353,7 +354,143 @@ def build_blackboard(tick):
     }
 
 
-def build_blackboard_reply(request_frames, tick):
+# --------------------------------------------------------------------------- #
+# A second tree, so a tree *swap* can be watched without a real robot
+# --------------------------------------------------------------------------- #
+# Deliberately small — its job is to prove the reload works, not to be a second
+# showpiece mission. What matters is that it is unmistakably *not* CrossDoor:
+# different node names, types and count, different board names, and a different
+# root. It reuses UIDs 1-6, which is the point: before klein learned to watch
+# the tree UUID, these UIDs' statuses landed on CrossDoor's cards, so Script and
+# UpdatePosition lit up with a patrol robot's telemetry. It keeps one <SubTree>
+# so nested boards and the subtree region rendering stay exercised.
+PATROL_XML = """<root BTCPP_format="4" main_tree_to_execute="PatrolTree">
+  <BehaviorTree ID="PatrolTree" _fullpath="PatrolTree">
+    <ReactiveSequence name="ReactiveSequence" _uid="1">
+      <BatteryOk name="BatteryOk" min_percent="20" _uid="2"/>
+      <SubTree ID="VisitWaypoints" waypoint="{next_waypoint}" _uid="3" _fullpath="VisitWaypoints::3"/>
+    </ReactiveSequence>
+  </BehaviorTree>
+  <BehaviorTree ID="VisitWaypoints" _fullpath="VisitWaypoints::3">
+    <SequenceWithMemory name="visitAll" _uid="4">
+      <MoveTo name="MoveTo" goal="{waypoint}" speed="0.4" _uid="5"/>
+      <Wait name="Dwell" msec="1500" _uid="6"/>
+    </SequenceWithMemory>
+  </BehaviorTree>
+  <TreeNodesModel>
+    <Control ID="ReactiveSequence"/>
+    <Control ID="SequenceWithMemory"/>
+    <Condition ID="BatteryOk">
+      <input_port name="min_percent" type="int">Fail below this charge</input_port>
+    </Condition>
+    <Action ID="MoveTo">
+      <input_port name="goal" type="Position2D"/>
+      <input_port name="speed" type="double"/>
+    </Action>
+    <Action ID="Wait">
+      <input_port name="msec" type="unsigned int"/>
+    </Action>
+    <SubTree ID="SubTree">
+      <input_port name="_autoremap" type="bool" default="false">If true, all the ports with the same name will be remapped</input_port>
+    </SubTree>
+  </TreeNodesModel>
+</root>"""
+
+PATROL_UIDS = [1, 2, 3, 4, 5, 6]
+PATROL_BLACKBOARD_NAMES = ["PatrolTree", "VisitWaypoints::3"]
+PATROL_WAYPOINTS = ["dock", "corridor", "lab", "atrium"]
+
+
+def _build_patrol_timeline():
+    """One lap of the patrol: check the battery, then drive-and-dwell per waypoint.
+
+    Generated rather than hand-choreographed like CrossDoor's — this tree exists
+    to be visibly different, not to be a second tutorial.
+    """
+    frames = []
+    for leg, waypoint in enumerate(PATROL_WAYPOINTS):
+        bb = {"patrol_leg": leg, "next_waypoint": waypoint,
+              "battery_pct": 95 - leg * 7}
+        checking = {1: RUNNING, 2: RUNNING}
+        driving = {1: RUNNING, 2: SUCCESS, 3: RUNNING, 4: RUNNING, 5: RUNNING}
+        dwelling = {1: RUNNING, 2: SUCCESS, 3: RUNNING, 4: RUNNING,
+                    5: SUCCESS, 6: RUNNING}
+        frames.append((2, checking, dict(bb)))
+        frames.append((6, driving, dict(bb)))
+        frames.append((3, dwelling, dict(bb)))
+    # The lap completes, then the whole tree drops back to IDLE flagged with its
+    # last result — the same "was …" reset CrossDoor ends on.
+    done = {uid: SUCCESS for uid in PATROL_UIDS}
+    finished = {"patrol_leg": len(PATROL_WAYPOINTS), "next_waypoint": "dock",
+                "battery_pct": 95 - len(PATROL_WAYPOINTS) * 7}
+    frames.append((6, done, dict(finished)))
+    frames.append((4, {uid: WAS_SUCCESS for uid in PATROL_UIDS}, dict(finished)))
+    return frames
+
+
+PATROL_TIMELINE = _build_patrol_timeline()
+
+
+def _patrol_blackboard(tick):
+    """The patrol's two boards. Small on purpose — the ROS-shaped value zoo
+    above belongs to CrossDoor, which is still the tree that exercises it."""
+    _status, bb = _frame_at(tick, PATROL)
+    return {
+        "PatrolTree": {
+            "battery_pct": bb["battery_pct"],
+            "patrol_leg": bb["patrol_leg"],
+            "waypoints": list(PATROL_WAYPOINTS),
+            "_debug_internal": "must never reach the dashboard",
+        },
+        "VisitWaypoints::3": {
+            "next_waypoint": bb["next_waypoint"],
+            "dwell_msec": 1500,
+        },
+    }
+
+
+# --------------------------------------------------------------------------- #
+# The trees the mock can publish
+# --------------------------------------------------------------------------- #
+MockTree = collections.namedtuple(
+    "MockTree", "name xml uids blackboard_names timeline cycle_ticks blackboard")
+
+
+def _tree(name, xml, uids, blackboard_names, timeline, blackboard):
+    """Bundle one tree's mission state. ``cycle_ticks`` is derived rather than
+    passed, so it can never drift from the timeline it counts."""
+    return MockTree(name, xml, uids, blackboard_names, timeline,
+                    _cycle_ticks(timeline), blackboard)
+
+
+CROSSDOOR = _tree("crossdoor", CROSSDOOR_XML, CROSSDOOR_UIDS,
+                  CROSSDOOR_BLACKBOARD_NAMES, CROSSDOOR_TIMELINE,
+                  _crossdoor_blackboard)
+PATROL = _tree("patrol", PATROL_XML, PATROL_UIDS,
+               PATROL_BLACKBOARD_NAMES, PATROL_TIMELINE, _patrol_blackboard)
+
+TREES = {tree.name: tree for tree in (CROSSDOOR, PATROL)}
+
+
+def _next_tree(tree):
+    """The tree ``--switch-every`` moves to next, cycling."""
+    order = list(TREES.values())
+    return order[(order.index(tree) + 1) % len(order)]
+
+
+def build_status_buffer(tick, tree):
+    """Return the 3-byte-per-node status buffer for the current tick.
+
+    Nodes not named in the current frame are reported IDLE.
+    """
+    status, _bb = _frame_at(tick, tree)
+    buf = bytearray()
+    for uid in tree.uids:
+        buf += struct.pack(STATUS_RECORD_FORMAT, uid, status.get(uid, IDLE))
+    return bytes(buf)
+
+
+def build_blackboard_reply(request_frames, tick, tree):
     """Encode the msgpack payload for a BLACKBOARD request.
 
     The request's second frame is a ``;``-separated list of blackboard names.
@@ -362,19 +499,30 @@ def build_blackboard_reply(request_frames, tick):
     """
     raw_names = request_frames[1].decode("utf-8", errors="replace") if len(request_frames) >= 2 else ""
     names = [name for name in raw_names.split(";") if name]
-    boards = build_blackboard(tick)
+    boards = tree.blackboard(tick)
     payload = {name: boards[name] for name in names if name in boards}
     return msgpack.packb(payload or None, use_bin_type=True)
 
 
-def reply_header(request_first_frame):
-    """Build the 22-byte reply header (echo request + 16-byte tree UUID)."""
+# A fixed UUID for the unit tests, which want reply framing to be reproducible.
+# A *running* mock never uses it — see main(), which draws a random one per
+# process exactly as Groot2Publisher::serverLoop does.
+DEFAULT_TREE_UUID = bytes(range(TREE_UUID_SIZE))
+
+
+def reply_header(request_first_frame, tree_uuid=DEFAULT_TREE_UUID):
+    """Build the reply header: the request's header echoed back, then the tree UUID.
+
+    ``main()`` draws a *fresh random* UUID on every switch rather than keeping
+    one per tree — swapping back to the first tree is a new publisher too, and
+    klein must still detect it. See docs/protocol.md for why that is the signal.
+    """
     # request frame is protocol(u8) type(u8) unique_id(u32); echo it back.
-    if len(request_first_frame) >= 6:
-        _proto, req_type, unique_id = struct.unpack(HEADER_FORMAT, request_first_frame[:6])
+    if len(request_first_frame) >= REQUEST_HEADER_SIZE:
+        _proto, req_type, unique_id = struct.unpack(
+            HEADER_FORMAT, request_first_frame[:REQUEST_HEADER_SIZE])
     else:
         req_type, unique_id = 0, 0
-    tree_uuid = bytes(range(16))  # any stable 16-byte id
     return struct.pack(HEADER_FORMAT, PROTOCOL_ID, req_type, unique_id) + tree_uuid
 
 
@@ -382,14 +530,33 @@ def main():
     ap = argparse.ArgumentParser(description="Fake BehaviorTree.CPP publisher for testing klein.")
     ap.add_argument("--host", default="*", help="bind address (default: * = all interfaces)")
     ap.add_argument("--port", type=int, default=1667, help="ZeroMQ REP port (default: 1667)")
+    ap.add_argument("--tree", choices=sorted(TREES), default="crossdoor",
+                    help="which tree to publish (default: crossdoor)")
+    ap.add_argument("--switch-every", type=int, default=0, metavar="TICKS",
+                    help="swap to the other tree every N status polls, publishing "
+                         "a fresh tree UUID — what a robot loading a different "
+                         "tree looks like on the wire. A tick is one STATUS "
+                         "request, so at klein's 10 Hz poll N=200 is about 20s. "
+                         "Ticks only advance while a dashboard is connected, "
+                         "since klein idles its pollers otherwise. 0 = never "
+                         "(default).")
     args = ap.parse_args()
 
     ctx = zmq.Context()
     sock = ctx.socket(zmq.REP)
     endpoint = f"tcp://{args.host}:{args.port}"
     sock.bind(endpoint)
+    tree = TREES[args.tree]
+    # Drawn per process, like the CreateRandomUUID() at the top of
+    # Groot2Publisher::serverLoop. A constant here would make two runs of the
+    # mock indistinguishable on the wire, so restarting it onto a different
+    # tree would look to a client exactly like the tree never changing — which
+    # is the one thing this mock exists to let you test.
+    tree_uuid = os.urandom(TREE_UUID_SIZE)
     print(f"[mock_robot] publisher listening on {endpoint}")
-    print(f"[mock_robot] tree: CrossDoor ({len(ALL_UIDS)} nodes, 1 subtree)")
+    print(f"[mock_robot] tree: {tree.name} ({len(tree.uids)} nodes, 1 subtree)")
+    if args.switch_every > 0:
+        print(f"[mock_robot] swapping trees every {args.switch_every} status polls")
     print(f"[mock_robot] run:  klein-bt --robot-port {args.port}")
 
     tick = 0
@@ -400,12 +567,24 @@ def main():
             req_type = header[1] if len(header) >= 2 else 0
 
             if req_type == REQ_FULLTREE:
-                sock.send_multipart([reply_header(header), TREE_XML.encode("utf-8")])
+                sock.send_multipart([reply_header(header, tree_uuid),
+                                     tree.xml.encode("utf-8")])
             elif req_type == REQ_STATUS:
-                sock.send_multipart([reply_header(header), build_status_buffer(tick)])
+                sock.send_multipart([reply_header(header, tree_uuid),
+                                     build_status_buffer(tick, tree)])
                 tick += 1
+                if args.switch_every and tick % args.switch_every == 0:
+                    # Swapped *after* the reply, so the next reply of any type is
+                    # the first to carry the new UUID — exactly what a restarted
+                    # publisher looks like from the client's side.
+                    tree = _next_tree(tree)
+                    tree_uuid = os.urandom(TREE_UUID_SIZE)
+                    tick = 0            # the new mission starts at its beginning
+                    print(f"[mock_robot] swapped to the {tree.name} tree "
+                          f"({len(tree.uids)} nodes, new publisher UUID)")
             elif req_type == REQ_BLACKBOARD:
-                sock.send_multipart([reply_header(header), build_blackboard_reply(frames, tick)])
+                sock.send_multipart([reply_header(header, tree_uuid),
+                                     build_blackboard_reply(frames, tick, tree)])
             else:
                 sock.send_multipart([b"error", b"unsupported request"])
     except KeyboardInterrupt:

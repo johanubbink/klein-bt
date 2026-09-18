@@ -19,6 +19,14 @@ REQ_BLACKBOARD = ord("B")       # RequestType::BLACKBOARD — returns msgpack {b
 
 # Request header, little-endian: protocol_id (u8) | request_type (u8) | unique_id (u32)
 HEADER_FORMAT = "<BBI"
+REQUEST_HEADER_SIZE = struct.calcsize(HEADER_FORMAT)         # 6
+
+# Reply header (groot2_protocol.h :: ReplyHeader): the request's 6-byte header
+# echoed back, then the tree UUID as 16 raw bytes — SerializeHeader() memcpys
+# the array in, so it is not a hex string and must not be decoded as one.
+TREE_UUID_OFFSET = REQUEST_HEADER_SIZE                       # 6
+TREE_UUID_SIZE = 16
+REPLY_HEADER_SIZE = REQUEST_HEADER_SIZE + TREE_UUID_SIZE     # 22
 
 # Status buffer: consecutive fixed records, node_uid (u16) | status_int (u8)
 STATUS_RECORD_FORMAT = "<HB"
@@ -59,6 +67,22 @@ def decode_status(value):
             return NodeStatus.IDLE.name, _STATUS_NAMES[previous]
         return "UNKNOWN", None
     return _STATUS_NAMES.get(value, "UNKNOWN"), None
+
+
+def decode_tree_uuid(header_frame):
+    """Return the 16-byte tree UUID from a reply's frame 0, or ``None``.
+
+    A different UUID means a different published tree — see docs/protocol.md.
+
+    ``None`` means the frame carries no UUID to read: an error reply (whose
+    frame 0 is ``b"error"``) or a header too short to hold one. Absence of
+    information must never be reported as a change.
+    """
+    if header_frame is None or len(header_frame) < REPLY_HEADER_SIZE:
+        return None
+    # bytes(), not a bare slice: frames can arrive as memoryview/bytearray, and
+    # the result is compared against a stored bytes object.
+    return bytes(header_frame[TREE_UUID_OFFSET:REPLY_HEADER_SIZE])
 
 
 # --------------------------------------------------------------------------- #

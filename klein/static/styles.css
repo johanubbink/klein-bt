@@ -493,14 +493,12 @@ h1 {
     #sidebar { transition: none; }
     .node-rect { transition: none; }
     .node-rect.focused { animation: none; stroke: var(--accent) !important; }
+    #notice-banner { transition: none; }
 }
 
-/* Hard-to-miss banner shown when klein cannot reach the robot (or the
-   gateway itself drops). Hidden until something is actually wrong. */
-#robot-banner {
-    display: none;
+/* Chrome shared by the two floating messages. */
+#robot-banner, #notice-banner {
     position: absolute;
-    top: 20px;
     left: 50%;
     transform: translateX(-50%);
     z-index: 20;
@@ -510,12 +508,45 @@ h1 {
     text-align: center;
     font-size: 0.95rem;
     font-weight: 600;
-    color: #ffffff;
-    background: var(--color-RUNNING);
     border: 1px solid rgba(255, 255, 255, 0.15);
     box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.6);
+    pointer-events: none;       /* the canvas keeps its full drag area */
+}
+
+/* Hard-to-miss banner shown when klein cannot reach the robot (or the
+   gateway itself drops). Hidden until something is actually wrong. */
+#robot-banner {
+    display: none;
+    top: 20px;
+    color: #ffffff;
+    background: var(--color-RUNNING);
 }
 #robot-banner.visible { display: block; }
+
+/* News, not an alarm: --accent rather than the robot banner's amber, and it
+   fades itself out after a few seconds.
+
+   Along the bottom rather than up beside the robot banner, because this one
+   appears while everything is *working*. The tree's root card sits at
+   top-centre in the default vertical layout, and a message explaining that the
+   tree just changed should not be covering the first node of it. Clear of the
+   bottom-right watermark, and of the robot banner, so the two can be up at once.
+
+   visibility rides the transition so a faded-out notice can be neither read by
+   assistive tech nor sit invisibly over the canvas. */
+#notice-banner {
+    bottom: 68px;
+    color: var(--bg-color);
+    background: var(--accent);
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.45s ease, visibility 0s linear 0.45s;
+}
+#notice-banner.visible {
+    opacity: 1;
+    visibility: visible;
+    transition: opacity 0.2s ease;
+}
 
 /* SVG Graph Component Styling */
 svg {

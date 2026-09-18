@@ -52,13 +52,31 @@ Replies are two frames. Frame 0 is a 22-byte reply header — the request's
 (`groot2_protocol.h :: ReplyHeader`). Frame 1 is the payload. On a malformed
 request the publisher replies `[b"error", <message>]` instead.
 
+#### The tree UUID
+
+The UUID is raw bytes, not a hex string — `SerializeHeader` memcpys the array
+in. `Groot2Publisher` draws it once, at the top of `serverLoop()`
+(`src/loggers/groot2_publisher.cpp`), and stamps that same value on every reply
+it sends; the tree XML is snapshotted in the publisher's *constructor*. A
+published tree therefore cannot outlive its UUID: **a different UUID means a
+different publisher, and so a different tree**. It is the only signal a
+request/reply client gets that the robot swapped trees underneath it — a ZeroMQ
+`REQ` socket reconnects by itself, so a robot restarting on the same port need
+not even cause a timeout.
+
+Two caveats for a client acting on it. The UUID identifies the *publisher*, not
+the tree's content, so a robot restarted on an unchanged tree also reports a
+change. And it is stable for that publisher's whole life, so it says a tree
+differs, never how. What klein does with it is in
+[architecture.md](architecture.md#tree-swaps).
+
 ## Request types
 
 The full vocabulary, from `groot2_protocol.h :: RequestType`:
 
 | type | letter | payload of the reply | klein |
 | --- | --- | --- | --- |
-| FULLTREE | `T` | tree XML (UTF-8) | ✅ once per handshake |
+| FULLTREE | `T` | tree XML (UTF-8) | ✅ on connect, and again whenever the tree UUID changes |
 | STATUS | `S` | packed status records | ✅ polled at 10 Hz |
 | BLACKBOARD | `B` | msgpack board dump | ✅ polled at 2 Hz |
 | HOOK_INSERT / HOOK_REMOVE | `I` / `R` | — | ✖ breakpoint debugging |
@@ -176,7 +194,8 @@ Semantics to know:
 
 klein encodes all of this once, in
 [`klein/groot2_protocol.py`](../klein/groot2_protocol.py) — the request framing,
-the `NodeStatus` decode rule, the `NodeType` category names and the
+the reply header's size and tree-UUID offset (with `decode_tree_uuid` to read
+it), the `NodeStatus` decode rule, the `NodeType` category names and the
 builtin-category fallback table. The gateway decodes with it and the mock robot
 ([`klein/mock_robot.py`](../klein/mock_robot.py)) encodes with it, so the two
 halves cannot drift. The C++ side is

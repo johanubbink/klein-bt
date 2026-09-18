@@ -7,6 +7,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **klein follows the robot to a new tree.** A robot that loaded a different
+  behaviour tree used to leave the dashboard showing the old one indefinitely —
+  and worse, the new tree's status UIDs painted the old tree's cards, so nodes
+  lit up with statuses belonging to entirely different nodes. klein now watches
+  the tree UUID every reply carries, re-runs the handshake when it changes —
+  and again whenever telemetry resumes after an outage, so stopping one robot
+  and starting another on the same port is caught whether or not that robot
+  gave itself a fresh UUID. It says so with a brief note along the bottom of
+  the canvas that fades on its own. A robot that comes back on the *same* tree
+  is absorbed quietly, with no redraw.
 - **Node categories on the layout.** Every node now reports whether it is a
   `Control`, `Decorator`, `Condition`, `Action` or `SubTree`, read from the
   `<TreeNodesModel>` section the robot publishes alongside its tree.
@@ -21,6 +31,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   nothing in the UI had ever explained.
 
 ### Changed
+- **Node ids are unique across handshakes.** They used to restart at 1 for every
+  tree, so the dashboard's keyed join matched a new tree's nodes onto the old
+  tree's cards and they kept their former labels, types and UIDs. Ids now carry
+  a per-handshake generation, which retires every card when the tree changes.
 - **A card names its type once.** BehaviorTree.CPP writes `name="Inverter"` on an
   `<Inverter>` the author never named, so cards used to read "INVERTER" and
   "Inverter" one above the other. An unnamed node now shows its type as the
@@ -29,6 +43,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   which left the control and decorator nodes.
 - `klein-bt-mock` publishes a `<TreeNodesModel>` matching the real CrossDoor
   example's registrations, so a robot-free run exercises all five categories.
+- `klein-bt-mock` carries a second tree and swaps between the two on
+  `--switch-every`, drawing a fresh publisher UUID each time the way a restarted
+  robot does, so the reload can be watched with no C++ in the loop. `--tree`
+  picks which one it publishes.
 
 ## [0.4.0] - 2026-09-16
 

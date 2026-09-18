@@ -34,9 +34,10 @@ than reused.
 
 On startup the gateway performs the FULLTREE handshake, retrying with backoff
 forever — klein may legitimately start before the robot, and the dashboard
-should come alive the moment the robot appears. The XML is parsed once into an
-unrolled tree (below) and cached as a single JSON frame that every connecting
-client receives verbatim.
+should come alive the moment the robot appears. It runs again whenever the
+robot's tree changes (below). Each handshake parses the XML into an unrolled
+tree and replaces the single cached JSON frame that every connecting client
+receives verbatim.
 
 Two pollers then share the socket:
 
@@ -50,6 +51,50 @@ Both pollers idle when no dashboard is connected, so an unattended klein costs
 the robot nothing. Robot reachability is owned by the status poller alone (a
 second reporter on a different cadence would make the indicator flap) and is
 pushed to dashboards only on change.
+
+## Tree swaps
+
+A robot can load a different behaviour tree while klein is watching. Nothing in
+the status stream says so — the UIDs simply start meaning other nodes — so
+without detection the dashboard paints the new tree's telemetry onto the old
+tree's cards.
+
+The status poller re-runs the FULLTREE handshake on two triggers, and discards
+the status buffer that raised either — its UIDs may index a tree the dashboard
+has not been sent, so broadcasting it would land them on the previous tree's
+cards. When the handshake returns a tree that really is different, the new layout
+goes out followed by a one-off `notice` frame.
+
+1. **The reply's tree UUID no longer matches the loaded layout.** A new UUID
+   means a new tree (see [protocol.md](protocol.md#the-tree-uuid)).
+2. **Telemetry resumed after an outage.** Stopping a robot and starting another
+   on the same port is the ordinary way a tree changes, and it is what the first
+   trigger would miss if a publisher failed to draw a fresh UUID per process.
+   klein does not stake the dashboard's correctness on that: an outage is
+   evidence it owns, so it re-handshakes on that too. (A ZeroMQ `REQ` socket
+   reconnects by itself, so the outage is visible only as a timed-out poll —
+   which is exactly what this trigger watches for.)
+
+The second trigger is affordable only because of the third rule below: a
+reconnect to an unchanged tree costs one FULLTREE and changes nothing on screen.
+
+Three rules make that safe:
+
+- **Only a successful FULLTREE reply records the UUID**, taken from the reply
+  that carried the XML; the comparison never records. A failed re-handshake
+  therefore keeps mismatching instead of leaving the gateway believing a tree it
+  never loaded.
+- **The status poller alone detects**, for the same single-owner reason as
+  reachability, and because one owner means two handshakes cannot overlap. The
+  blackboard poller has a different hazard — the board *names* it asked for go
+  stale, which no UUID check would catch — so it captures the layout generation
+  before its request and drops a reply that arrives after a swap.
+- **An unchanged tree is absorbed quietly.** Both triggers fire on a plain
+  restart, and the UUID identifies the publisher rather than the tree's content,
+  so "changed" is over-reported by design. The gateway compares the XML it gets
+  back and keeps the layout when it is identical, rather than flashing the canvas
+  through a rebuild of the same picture. That is what makes it safe to
+  re-handshake on weak evidence.
 
 ## Subtree unrolling
 
@@ -73,6 +118,14 @@ ID). The gateway collects these names in tree order at handshake time; that
 order restores meaning to the robot's unordered reply, and each board is
 attached to the subtree node that owns it so the panel and the canvas stay
 linked.
+
+Each node's `id` carries a per-handshake generation counter, so the ids of two
+different trees are disjoint. The dashboard keys its d3 join on that id, and a
+card's contents are written when it enters; without the generation, ids
+restarting at 1 per tree would match a new tree's nodes onto the old tree's
+cards and leave them showing the previous tree's labels. A *reconnect* replays
+the cached layout with the same ids, so d3 still matches there and nothing
+needlessly re-enters.
 
 ## Node categories
 
@@ -117,6 +170,12 @@ broadcast stream. Frame types on the wire:
 | `status` | 10 Hz | `{uid: {status, from}}` |
 | `blackboard` | 2 Hz | `{board: {key: value}}`, tree order |
 | `robot` | on change | `{connected, detail}` |
+| `notice` | on a tree swap | `{text}` — transient |
+
+Every frame but `notice` is cached, which is what lets a connecting dashboard be
+brought up to date in one go. A notice reports something that just happened on
+screen, so it is never cached and never replayed — a client connecting a minute
+later did not witness the reload.
 
 A node card encodes three separate questions on three separate channels, so no
 two can be confused for each other:
@@ -151,5 +210,9 @@ a subtree still shows whether it succeeded or failed.
 [`klein/mock_robot.py`](../klein/mock_robot.py) (`klein-bt-mock`) is a fake
 publisher that encodes the same protocol module the gateway decodes, driving
 the full pipeline — handshake, unrolling, both pollers, renderers — with no
-C++ in the loop. The unit tests under [`tests/`](../tests) cover the protocol
-encode/decode round-trip, the gateway's parsing, and the mock itself.
+C++ in the loop. It carries two quite different trees and can swap between them
+mid-run (`--switch-every`), publishing a fresh tree UUID each time exactly as a
+restarted publisher does, so the re-handshake above can be watched too.
+
+The unit tests under [`tests/`](../tests) cover the protocol encode/decode
+round-trip, the gateway's parsing, and the mock itself.

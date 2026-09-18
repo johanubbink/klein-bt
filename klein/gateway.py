@@ -550,7 +550,13 @@ class KleinGateway:
 
         The robot walks an unordered map, so its reply order is arbitrary.
         ``order`` (the names we asked for, in tree order) restores a stable,
-        meaningful order — root tree first — that the dashboard renders as-is.
+        meaningful order — root tree first — that the dashboard renders as-is,
+        and it is also the guest list: a board the robot volunteers that klein
+        never asked for belongs to no node in the layout, so the panel could
+        only show it adrift. Seen in the wild — some publishers append the root
+        board to every subtree dump under the name ``ROOT``, which then listed
+        the mission's own board a second time. Without an ``order`` there is
+        nothing to check against, and everything is kept.
 
         A subtree whose every port is remapped to its parent holds nothing of
         its own, and the publisher sends nil for it rather than an empty map.
@@ -561,8 +567,8 @@ class KleinGateway:
         if not isinstance(boards, dict):
             return {}
         boards = {str(name): entries for name, entries in boards.items()}
-        names = [name for name in (order or ()) if name in boards]
-        names += [name for name in boards if name not in names]   # anything extra
+        names = (list(boards) if order is None
+                 else [name for name in order if name in boards])
         parsed = {}
         for name in names:
             entries = boards[name]

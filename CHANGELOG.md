@@ -53,6 +53,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   robot does, so the reload can be watched with no C++ in the loop. `--tree`
   picks which one it publishes.
 
+### Fixed
+- **The mission's blackboard is listed once.** Some robots answer a subtree
+  dump with the root board attached under the name `ROOT`, so the panel showed
+  the mission's own board a second time — the same values, under a name matching
+  no node on the canvas. klein now holds the reply to the boards it asked for.
+
 ## [0.4.0] - 2026-09-16
 
 ### Added

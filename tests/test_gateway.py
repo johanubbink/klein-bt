@@ -559,10 +559,19 @@ class BlackboardTest(unittest.TestCase):
         order = ["MainTree", "DoorClosed::7"]
         self.assertEqual(list(KleinGateway.parse_blackboard(raw, order)), order)
 
-    def test_unrequested_boards_are_kept_after_the_known_ones(self):
-        raw = msgpack.packb({"Surprise": {"a": 1}, "MainTree": {"b": 2}})
+    def test_unrequested_boards_are_dropped(self):
+        # Some publishers answer a subtree dump with the root board attached
+        # under the name "ROOT", which duplicates the board klein already lists
+        # under the tree ID. A board klein never asked for matches no node in
+        # the layout, so there is nowhere on the canvas to put it.
+        raw = msgpack.packb({"ROOT": {"b": 2}, "MainTree": {"b": 2}})
         parsed = KleinGateway.parse_blackboard(raw, ["MainTree", "Absent"])
-        self.assertEqual(list(parsed), ["MainTree", "Surprise"])
+        self.assertEqual(list(parsed), ["MainTree"])
+
+    def test_every_board_is_kept_when_nothing_was_requested(self):
+        raw = msgpack.packb({"Surprise": {"a": 1}, "MainTree": {"b": 2}})
+        self.assertEqual(set(KleinGateway.parse_blackboard(raw)),
+                         {"Surprise", "MainTree"})
 
     def test_nil_board_is_reported_empty_not_dropped(self):
         # Real behaviour: a subtree whose only port is remapped to its parent

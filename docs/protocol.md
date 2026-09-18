@@ -189,6 +189,14 @@ Semantics to know:
   (`BT::RegisterJsonDefinition<T>()`); a type without one is silently absent,
   indistinguishable from "never written".
 - The robot walks an unordered map, so reply order is arbitrary.
+- **The reply may carry boards you did not ask for.** Upstream's
+  `generateBlackboardsDump` answers requested names only, but the protocol is
+  what robots actually send: a real BT.CPP robot was observed attaching the root
+  board to *every* subtree dump under the literal name `ROOT` — the same entries
+  it returns under the tree ID, so a client that lists whatever arrives shows the
+  mission's board twice. (Asking for `ROOT` by itself matches nothing, so it is
+  not a board name you can request.) klein keeps only the names it asked for;
+  see [architecture.md](architecture.md#subtree-unrolling).
 
 ## Where the constants live
 

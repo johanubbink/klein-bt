@@ -117,7 +117,10 @@ that BehaviorTree.CPP stamps as `_fullpath` (the root registers under its tree
 ID). The gateway collects these names in tree order at handshake time; that
 order restores meaning to the robot's unordered reply, and each board is
 attached to the subtree node that owns it so the panel and the canvas stay
-linked.
+linked. It is the reply's guest list too — a board klein did not ask for is
+dropped, because it owns no node on the canvas and so can only be shown adrift
+(some publishers append the root board to every subtree dump; see
+[protocol.md](protocol.md#blackboard-b)).
 
 Each node's `id` carries a per-handshake generation counter, so the ids of two
 different trees are disjoint. The dashboard keys its d3 join on that id, and a

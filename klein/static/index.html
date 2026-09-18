@@ -87,10 +87,9 @@
         <span aria-hidden="true">»</span><span class="sr-only">Show panel</span>
     </button>
 
-    <div id="robot-banner"></div>
-
-    <!-- Transient and self-clearing; see showNotice() in app.js. -->
-    <div id="notice-banner" role="status" aria-live="polite"></div>
+    <!-- Filled by showBanner() in app.js; aria-live sits on the stack so every
+         banner inserted into it is announced. -->
+    <div id="banner-stack" role="status" aria-live="polite"></div>
 
     <div id="watermark">🖱️ Scroll to Zoom | Drag canvas to Pan | Click nodes to Expand/Collapse</div>
 

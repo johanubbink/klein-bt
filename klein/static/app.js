@@ -780,42 +780,71 @@ for (const input of document.querySelectorAll('input[name="layout"]')) {
     });
 }
 
+// ------------------------------------------------------------------ //
+// Banners — the floating messages along the bottom of the canvas
+// ------------------------------------------------------------------ //
+// A banner is addressed by a stable `key`, so repeated news about the same
+// thing replaces it instead of piling up, and any caller can take its own
+// message down without knowing what else is on screen. `kind` picks the dot
+// colour and the sort order (see .banner.* in styles.css); `timeout` makes it
+// clear itself. A new kind of message costs one showBanner() call.
+const bannerStack = document.getElementById("banner-stack");
+const BANNER_FADE_MS = 450;     // must match the .banner.leaving transition
+const banners = new Map();      // key -> { el, timers }
+
+function showBanner(key, text, { kind = "info", timeout = 0 } = {}) {
+    let entry = banners.get(key);
+    if (!entry) {
+        entry = { el: bannerStack.appendChild(document.createElement("div")), timers: [] };
+        banners.set(key, entry);
+    }
+    entry.timers.forEach(clearTimeout);     // a repeat restarts the clock
+    entry.timers = [];
+    // Assigning the same className is a no-op, so a banner that is merely
+    // re-asserted does not replay its entry animation.
+    const className = `banner ${kind}`;
+    if (entry.el.className !== className) entry.el.className = className;
+    if (entry.el.textContent !== text) entry.el.textContent = text;
+    if (timeout > 0) {
+        // Removed in two steps: the element has to leave the flex stack to
+        // avoid holding a gap open, and that cannot be transitioned — so it
+        // fades under .leaving first, then goes.
+        entry.timers.push(setTimeout(() => {
+            entry.el.classList.add("leaving");
+            entry.timers.push(setTimeout(() => hideBanner(key), BANNER_FADE_MS));
+        }, timeout));
+    }
+}
+
+function hideBanner(key) {
+    const entry = banners.get(key);
+    if (!entry) return;
+    entry.timers.forEach(clearTimeout);
+    entry.el.remove();
+    banners.delete(key);
+}
+
 // Reflect both links: green when the robot is streaming, amber (plus a
 // banner) when klein is up but the robot is unreachable, red when klein
 // itself can't be reached.
 function updateConnectionUI() {
     const dot = d3.select("#conn-dot");
     const txt = d3.select("#conn-text");
-    const banner = d3.select("#robot-banner");
 
     if (!gatewayConnected) {
         dot.attr("class", "dot");
         txt.text("klein gateway offline — reconnecting…");
-        banner.text("⚠  Lost connection to the klein gateway — reconnecting…")
-              .attr("class", "visible");
+        showBanner("connection", "Lost connection to the klein gateway — reconnecting…",
+                   { kind: "warn" });
     } else if (!robotConnected) {
         dot.attr("class", "dot warn");
         txt.text(robotDetail);
-        banner.text("⚠  " + robotDetail).attr("class", "visible");
+        showBanner("connection", robotDetail, { kind: "warn" });
     } else {
         dot.attr("class", "dot online");
         txt.text(robotDetail);
-        banner.attr("class", "");   // robot is streaming: hide the banner
+        hideBanner("connection");   // robot is streaming: nothing to report
     }
-}
-
-// A transient note along the bottom of the canvas — currently only "the robot
-// swapped its tree". Its own element rather than #robot-banner, because
-// updateConnectionUI owns that one and rewrites its text and class on every
-// connection change, which a tree swap reliably causes.
-const noticeBanner = d3.select("#notice-banner");
-const NOTICE_MS = 4000;
-let noticeTimer = null;
-
-function showNotice(text) {
-    noticeBanner.text(text).attr("class", "visible");
-    clearTimeout(noticeTimer);      // a second notice restarts the clock
-    noticeTimer = setTimeout(() => noticeBanner.attr("class", ""), NOTICE_MS);
 }
 
 // ------------------------------------------------------------------ //
@@ -867,7 +896,7 @@ function connectGatewayPipeline() {
         }
 
         else if (message.type === "notice") {
-            showNotice(message.text);
+            showBanner("notice", message.text, { kind: "info", timeout: 4000 });
         }
 
         else if (message.type === "robot") {

@@ -731,6 +731,21 @@ class PortAvailableTest(unittest.TestCase):
         self.assertTrue(_port_available(port))        # freed (never connected -> no TIME_WAIT)
 
 
+class ConstructionTest(unittest.TestCase):
+    def test_no_event_loop_required(self):
+        # Every sync test in this suite builds a gateway, and unittest runs them
+        # after IsolatedAsyncioTestCase has closed its loop. On Python 3.9 an
+        # asyncio.Lock() built here would reach for get_event_loop() and raise,
+        # so nothing in __init__ may touch the loop.
+        asyncio.set_event_loop(None)
+        try:
+            gw = KleinGateway("127.0.0.1", 1667, 8080)
+        finally:
+            asyncio.set_event_loop(asyncio.new_event_loop())
+        self.assertIsNone(gw._req_lock)     # made on first use, inside the loop
+        gw.ctx.destroy(linger=0)
+
+
 class TreeIdentityTest(unittest.TestCase):
     """Deciding, from a reply header alone, whether the robot swapped trees."""
 

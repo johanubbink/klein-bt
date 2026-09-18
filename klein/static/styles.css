@@ -493,59 +493,70 @@ h1 {
     #sidebar { transition: none; }
     .node-rect { transition: none; }
     .node-rect.focused { animation: none; stroke: var(--accent) !important; }
-    #notice-banner { transition: none; }
+    .banner { animation: none; }
+    .banner.leaving { transition: none; }
 }
 
-/* Chrome shared by the two floating messages. */
-#robot-banner, #notice-banner {
+/* Banners — the floating messages along the bottom of the canvas.
+   ------------------------------------------------------------------
+   One stack, one look, addressed from app.js by key rather than by id, so a new
+   kind of message needs no markup. Bottom, not top: in the default vertical
+   layout the tree's root card sits at top-centre, and no passing message is
+   worth covering the first node of it. */
+#banner-stack {
     position: absolute;
+    bottom: 24px;
     left: 50%;
     transform: translateX(-50%);
     z-index: 20;
     max-width: 80%;
-    padding: 12px 22px;
-    border-radius: 8px;
-    text-align: center;
-    font-size: 0.95rem;
-    font-weight: 600;
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.6);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
     pointer-events: none;       /* the canvas keeps its full drag area */
 }
 
-/* Hard-to-miss banner shown when klein cannot reach the robot (or the
-   gateway itself drops). Hidden until something is actually wrong. */
-#robot-banner {
-    display: none;
-    top: 20px;
-    color: #ffffff;
-    background: var(--color-RUNNING);
+/* A quiet panel-coloured pill. These float over the tree and are read in
+   passing, so the state rides on a small coloured dot — the same language as
+   the sidebar's connection indicator — rather than on a saturated fill. */
+.banner {
+    padding: 7px 14px 7px 12px;
+    border-radius: 6px;
+    text-align: center;
+    font-size: 0.82rem;
+    font-weight: 500;
+    color: var(--text-main);
+    background: var(--panel-bg);
+    border: 1px solid var(--border-color);
+    box-shadow: 0 2px 10px -4px rgba(0, 0, 0, 0.55);
+    animation: banner-in 0.18s ease-out;
 }
-#robot-banner.visible { display: block; }
-
-/* News, not an alarm: --accent rather than the robot banner's amber, and it
-   fades itself out after a few seconds.
-
-   Along the bottom rather than up beside the robot banner, because this one
-   appears while everything is *working*. The tree's root card sits at
-   top-centre in the default vertical layout, and a message explaining that the
-   tree just changed should not be covering the first node of it. Clear of the
-   bottom-right watermark, and of the robot banner, so the two can be up at once.
-
-   visibility rides the transition so a faded-out notice can be neither read by
-   assistive tech nor sit invisibly over the canvas. */
-#notice-banner {
-    bottom: 68px;
-    color: var(--bg-color);
-    background: var(--accent);
+.banner::before {
+    content: "";
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    margin-right: 8px;
+    vertical-align: 1px;
+    background-color: var(--banner-dot, var(--text-muted));
+}
+/* Set by showBanner() before the element is removed, so a self-clearing banner
+   fades rather than vanishing. */
+.banner.leaving {
     opacity: 0;
-    visibility: hidden;
-    transition: opacity 0.45s ease, visibility 0s linear 0.45s;
+    transition: opacity 0.45s ease;
 }
-#notice-banner.visible {
-    opacity: 1;
-    visibility: visible;
-    transition: opacity 0.2s ease;
+
+/* The kinds. A new one is two declarations: a dot colour, and where it sorts —
+   `order` keeps problems above passing notes however they happened to arrive. */
+.banner.warn { --banner-dot: var(--color-RUNNING); order: 0; }
+.banner.info { --banner-dot: var(--accent);        order: 1; }
+
+@keyframes banner-in {
+    from { opacity: 0; transform: translateY(4px); }
+    to   { opacity: 1; transform: none; }
 }
 
 /* SVG Graph Component Styling */

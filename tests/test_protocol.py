@@ -1,11 +1,14 @@
-"""Unit tests for klein.groot2_protocol — the shared wire-protocol constants
-and the NodeStatus decode rule."""
+"""Unit tests for klein.groot2_protocol — the shared wire-protocol constants,
+the NodeStatus decode rule and the node-category vocabulary."""
 import struct
 import unittest
 
 from klein.groot2_protocol import (
+    BUILTIN_CATEGORIES,
+    CATEGORY_UNDEFINED,
     HEADER_FORMAT,
     IDLE_TRANSITION,
+    NODE_CATEGORIES,
     PROTOCOL_ID,
     REQ_BLACKBOARD,
     REQ_FULLTREE,
@@ -61,3 +64,35 @@ class DecodeStatusTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NodeCategoryTest(unittest.TestCase):
+    """The category vocabulary and the builtin fallback table."""
+
+    def test_vocabulary_matches_btcpp_spelling(self):
+        # toStr<NodeType>() in basic_types.cpp — these are the <TreeNodesModel>
+        # element tags, so a typo here silently stops matching real robots.
+        self.assertEqual(
+            NODE_CATEGORIES,
+            frozenset({"Action", "Condition", "Control", "Decorator", "SubTree"}),
+        )
+        self.assertEqual(CATEGORY_UNDEFINED, "Undefined")
+        self.assertNotIn(CATEGORY_UNDEFINED, NODE_CATEGORIES)
+
+    def test_builtin_table_values_are_all_real_categories(self):
+        self.assertTrue(set(BUILTIN_CATEGORIES.values()) <= NODE_CATEGORIES)
+
+    def test_every_builtin_control_and_decorator_is_covered(self):
+        # A robot too old to publish <TreeNodesModel> must still get its whole
+        # control skeleton right — every Control and Decorator in BT.CPP is builtin.
+        for name in ("Sequence", "ReactiveFallback", "Switch3", "IfThenElse",
+                     "Parallel", "TryCatch", "SequenceWithMemory"):
+            self.assertEqual(BUILTIN_CATEGORIES[name], "Control", name)
+        for name in ("Inverter", "RetryUntilSuccessful", "Timeout", "Precondition",
+                     "LoopString", "ForceSuccess", "SkipUnlessUpdated"):
+            self.assertEqual(BUILTIN_CATEGORIES[name], "Decorator", name)
+
+    def test_the_leaf_categories_are_distinguished(self):
+        self.assertEqual(BUILTIN_CATEGORIES["Script"], "Action")
+        self.assertEqual(BUILTIN_CATEGORIES["ScriptCondition"], "Condition")
+        self.assertEqual(BUILTIN_CATEGORIES["SubTree"], "SubTree")

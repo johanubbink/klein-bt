@@ -14,6 +14,14 @@ const nodeWidth = 220;
 const nodeHeight = 56;
 const cardPadX = 12;            // left/right text inset, shared by every row
 
+const textX = -nodeWidth / 2 + cardPadX;    // left rail every text row starts on
+
+// The glyph sits immediately before the card's primary label, indenting that
+// row only; the type caption above and the ports below keep the card's width.
+const glyphGutter = 14;
+const glyphX = textX + glyphGutter / 2 - 2;   // .node-glyph is anchored middle
+const labelX = textX + glyphGutter;
+
 // Text row baselines, measured from the card's centre. Spaced so the whitespace
 // above the type, between type and name, between name and ports, and below the
 // ports is the same ~7px — uppercase type has no descenders and the 13px name
@@ -28,6 +36,18 @@ const rowPorts = 19;            // 9px monospace
 // font size and the limit follows instead of overflowing the card.
 const maxPortChars = Math.floor((nodeWidth - cardPadX * 2) / (9 * 0.6));
 
+// The type caption runs only as far as the UID label, less a 12px gap so the
+// two never read as one word. 10px bold uppercase measures ~0.72em an advance
+// including its tracking. Derived like maxPortChars so the limit follows the
+// card: without it RETRYUNTILSUCCESSFUL runs straight through "UID 010".
+const uidX = nodeWidth / 2 - 55;
+const maxTypeChars = Math.floor((uidX - textX - 12) / (10 * 0.72));
+
+// The primary label shares its row with the status pill, and starts after the
+// glyph. 13px at ~0.51em an advance.
+const pillX = nodeWidth / 2 - 75;
+const maxLabelChars = Math.floor((pillX - labelX - 8) / (13 * 0.51));
+
 // "vertical" is the standard BT convention: root at the top, children below,
 // siblings ticked left-to-right. "horizontal" grows the tree rightward.
 let orientation = "vertical";
@@ -40,17 +60,81 @@ function portSummary(ports) {
     return Object.entries(ports).map(([key, value]) => `${key}=${value}`).join("  ");
 }
 
+// BehaviorTree.CPP writes name="Inverter" on an unnamed <Inverter>, so a card
+// with no name of its own shows its type in the big row and drops the caption
+// above it, rather than saying Inverter twice.
+function hasOwnName(node) {
+    return node.name !== node.type;
+}
+
+function primaryLabel(node) {
+    return truncate(hasOwnName(node) ? node.name : node.type, maxLabelChars);
+}
+
+function typeCaption(node) {
+    return hasOwnName(node) ? truncate(node.type, maxTypeChars) : "";
+}
+
 function truncate(text, limit) {
     return text.length > limit ? text.slice(0, limit - 1) + "\u2026" : text;
 }
 
-// One port per line, under the node's own name, for the hover tooltip. A node
-// with no ports gets no title at all rather than an empty box.
-function portTitle(node) {
+// The node's category, as the robot declared it. The gateway stamps exactly one
+// on every node; "Undefined" is its "the robot never said", which paints as the
+// undifferentiated cyan caption the dashboard has always drawn.
+function categoryOf(node) {
+    return node.category && node.category !== "Undefined" ? node.category : null;
+}
+
+// One monochrome mark per category — the notation from Colledanchise & Ogren
+// (Table 1), which Groot2 draws too, so these cards read unchanged to anyone
+// who already knows that notation.
+const CATEGORY_GLYPHS = {
+    Control: "\u2192",       // -> ticks its children in order
+    Decorator: "\u25C7",     // hollow diamond: an inner node, exactly one child
+    Condition: "\u25C6",     // filled diamond: a leaf that answers a question
+    Action: "\u25B8",        // filled triangle: a leaf that does work
+    SubTree: "\u29C9",       // boxes within boxes
+};
+
+// Control covers Sequence, Fallback and Parallel, which the notation draws
+// differently and which readers genuinely confuse. The registration name is
+// already on the card, so refine whenever it is one we recognise.
+const TYPE_GLYPHS = {
+    Fallback: "?", ReactiveFallback: "?", AsyncFallback: "?",
+    Parallel: "\u21C9", ParallelAll: "\u21C9",
+};
+
+function glyphFor(node) {
+    const category = categoryOf(node);
+    if (!category) return "";
+    return TYPE_GLYPHS[node.type] || CATEGORY_GLYPHS[category];
+}
+
+// The card's class list: category and subtree nesting depth, the two things CSS
+// paints. "node" stays first so every existing selectAll("g.node") still matches.
+function nodeClasses(d) {
+    const category = categoryOf(d.data);
+    const depth = Math.min(d.subtreeDepth || 0, 3);
+    return "node"
+        + (category ? ` cat-${category}` : "")
+        + (depth ? ` sub-${depth}` : "")
+        // "unnamed": the primary label is the type, so it takes the type's ink.
+        + (hasOwnName(d.data) ? "" : " unnamed");
+}
+
+// Everything the card had to abbreviate: type and name in full, what kind of
+// node it is, the blackboard it opens, and every port one per line. Every node
+// gets one — a control node has no ports, but it does have a category worth
+// naming, and those are exactly the cards that had no tooltip at all before.
+function nodeTitle(node) {
+    const lines = [`${node.type} "${node.name}"`];
+    const category = categoryOf(node);
+    if (category) lines.push(`${category} node`);
+    if (node.board) lines.push(`blackboard: ${node.board}`);
     const entries = Object.entries(node.ports || {});
-    if (!entries.length) return "";
-    const lines = entries.map(([key, value]) => `  ${key} = ${value}`);
-    return [`${node.type} "${node.name}"`, ...lines].join("\n");
+    if (entries.length) lines.push("", ...entries.map(([key, value]) => `  ${key} = ${value}`));
+    return lines.join("\n");
 }
 
 // Setup scalable D3 viewport selections
@@ -68,8 +152,8 @@ svg.call(zoomBehavior);
 // Layout spacing per orientation. d3.tree() lays siblings along x and depth
 // along y; nodeSize is [sibling spacing, depth spacing] in those layout coords.
 const layoutConfig = {
-    vertical:   { nodeSize: [240, 130], depthStep: 130 },
-    horizontal: { nodeSize: [76, 300],  depthStep: 280 },   // sibling spacing = card height + 20
+    vertical:   { nodeSize: [246, 130], depthStep: 130 },   // card width + subtree frame + 20
+    horizontal: { nodeSize: [82, 300],  depthStep: 280 },   // card height + subtree frame + 20
 };
 const treeLayout = d3.tree();
 
@@ -113,7 +197,6 @@ function updateTreeLayout(sourceNode) {
         .data(nodesList, d => d.data.id);
 
     const nodeEnter = nodeSelection.enter().append("g")
-        .attr("class", "node")
         .each(d => { d._statusKey = null; })   // (re)appeared: force next status frame to repaint it
         .attr("transform", nodeTransform(sourceNode.x0 || 0, sourceNode.y0 || 0))
         .on("click", (event, d) => {
@@ -128,6 +211,28 @@ function updateTreeLayout(sourceNode) {
             updateTreeLayout(d);
         });
 
+    // Native tooltip. First child, as SVG wants <title> to be, and on every
+    // node: the cards with no ports are the control and decorator nodes whose
+    // category the tooltip is now the place to spell out.
+    nodeEnter.append("title")
+        .text(d => nodeTitle(d.data));
+
+    // Membership of a subtree: a hairline ring 3px outside the card, on every
+    // card in the region rather than only the one that opens it. Kept a separate
+    // element from the card's own stroke, because that stroke is the status
+    // channel — this way a node inside a subtree still shows whether it
+    // succeeded or failed. Appended before the card so it paints behind it and
+    // can never overdraw that stroke.
+    nodeEnter.filter(d => (d.subtreeDepth || 0) > 0)
+        .append("rect")
+        .attr("class", "node-subtree-frame")
+        .attr("x", -nodeWidth / 2 - 3)
+        .attr("y", -nodeHeight / 2 - 3)
+        .attr("width", nodeWidth + 6)
+        .attr("height", nodeHeight + 6)
+        .attr("rx", 9)
+        .attr("ry", 9);
+
     // Node card background, centered on the node's layout point so the card
     // needs no per-orientation adjustments
     nodeEnter.append("rect")
@@ -140,47 +245,48 @@ function updateTreeLayout(sourceNode) {
         .attr("y", -nodeHeight / 2)
         .style("stroke", "var(--color-IDLE)");
 
-    // Type tag
+    // Type tag — the qualifier above the name, when there is a name to qualify.
     nodeEnter.append("text")
         .attr("class", "node-type")
-        .attr("x", -nodeWidth / 2 + cardPadX)
+        .attr("x", textX)
         .attr("y", rowType)
-        .text(d => d.data.type);
+        .text(d => typeCaption(d.data));
 
-    // Display name (truncated)
+    // What kind of node this is, as a mark rather than a word — the cue that
+    // stays legible once the words beside it are too small to read.
+    nodeEnter.append("text")
+        .attr("class", "node-glyph")
+        .attr("x", glyphX)
+        .attr("y", rowName)
+        .text(d => glyphFor(d.data));
+
+    // The card's primary label, beside the glyph.
     nodeEnter.append("text")
         .attr("class", "node-name")
-        .attr("x", -nodeWidth / 2 + cardPadX)
+        .attr("x", labelX)
         .attr("y", rowName)
-        .text(d => d.data.name.length > 20 ? d.data.name.substring(0, 18) + "..." : d.data.name);
+        .text(d => primaryLabel(d.data));
 
     // Ports the tree author wrote on this node, along the card's bottom edge —
     // what a Precondition actually tests, which case a Switch matched. Blank
     // for a node with no ports; the untruncated set is in the hover title.
     nodeEnter.append("text")
         .attr("class", "node-ports")
-        .attr("x", -nodeWidth / 2 + cardPadX)
+        .attr("x", textX)
         .attr("y", rowPorts)
         .text(d => truncate(portSummary(d.data.ports), maxPortChars));
-
-    // Native tooltip: the full port list, one per line, so a truncated summary
-    // is always one hover away from being readable in full. A node with no
-    // ports gets no <title>, and so no empty tooltip.
-    nodeEnter.filter(d => portSummary(d.data.ports) !== "")
-        .append("title")
-        .text(d => portTitle(d.data));
 
     // UID label (blank when this node carries no UID)
     nodeEnter.append("text")
         .attr("class", "node-uid")
-        .attr("x", nodeWidth / 2 - 55)
+        .attr("x", uidX)
         .attr("y", rowType)
         .text(d => d.data.uid == null ? "" : `UID ${String(d.data.uid).padStart(3, '0')}`);
 
     // Status pill background
     nodeEnter.append("rect")
         .attr("class", "status-pill")
-        .attr("x", nodeWidth / 2 - 75)
+        .attr("x", pillX)
         .attr("y", rowName - 12)
         .attr("width", 65)
         .attr("height", 16)
@@ -190,13 +296,22 @@ function updateTreeLayout(sourceNode) {
     // Status text
     nodeEnter.append("text")
         .attr("class", "node-status-text")
-        .attr("x", nodeWidth / 2 - 42)
+        .attr("x", pillX + 33)          // centred on the 65px pill
         .attr("y", rowName)
         .attr("text-anchor", "middle")
         .text("IDLE");
 
     // Merge + animate to final positions
-    nodeEnter.merge(nodeSelection).transition().duration(250)
+    const nodeUpdate = nodeEnter.merge(nodeSelection);
+
+    // Category and subtree depth, set on the merge rather than on enter: a
+    // reconnect re-sends the cached layout with identical ids, so d3 matches the
+    // existing cards and nothing enters — classing on enter would silently skip
+    // repainting them. Safe to write the whole list, because nothing else puts a
+    // class on g.node (running/focused/highlight all live on its children).
+    nodeUpdate.attr("class", nodeClasses);
+
+    nodeUpdate.transition().duration(250)
         .attr("transform", d => nodeTransform(d.x, d.y));
 
     nodeSelection.exit().transition().duration(250)
@@ -315,6 +430,24 @@ function collectBoards(root) {
         }
     })(root, 0);
     return boards;
+}
+
+// How deep in *subtree nesting* each node sits, which is what the card fill
+// encodes. The root's own board is the mission, not a subtree, so it stays
+// level 0; a <SubTree> card and everything under it is level 1, one nested
+// inside that is level 2. A SubTree node takes the level it *opens* rather than
+// its parent's, so the region reads as one slab with its own name at the top.
+//
+// _children included, so a collapsed subtree keeps its level and comes back at
+// the right tint when it is reopened.
+function tagSubtreeDepth(root) {
+    (function walk(node, depth) {
+        const own = depth + (node.data.is_subtree_root ? 1 : 0);
+        node.subtreeDepth = own;
+        for (const child of node.children || node._children || []) {
+            walk(child, own);
+        }
+    })(root, 0);
 }
 
 function createBBGroup(info) {
@@ -695,6 +828,7 @@ function connectGatewayPipeline() {
             rootNodeSnapshot = d3.hierarchy(treeData);
             rootNodeSnapshot.x0 = 0;
             rootNodeSnapshot.y0 = 0;
+            tagSubtreeDepth(rootNodeSnapshot);
 
             bbBoardList = collectBoards(rootNodeSnapshot);
             resetBlackboards();
@@ -718,4 +852,18 @@ function connectGatewayPipeline() {
     };
 }
 
-window.addEventListener("DOMContentLoaded", connectGatewayPipeline);
+// The legend's marks come from the tables above, so the swatches and the canvas
+// cannot drift; its colours come from the same .cat-* rules the cards use.
+function fillLegendGlyphs() {
+    for (const el of document.querySelectorAll("#legend [data-cat]")) {
+        el.textContent = CATEGORY_GLYPHS[el.dataset.cat] || "";
+    }
+    for (const el of document.querySelectorAll("#legend [data-type]")) {
+        el.textContent = TYPE_GLYPHS[el.dataset.type] || "";
+    }
+}
+
+window.addEventListener("DOMContentLoaded", () => {
+    fillLegendGlyphs();
+    connectGatewayPipeline();
+});

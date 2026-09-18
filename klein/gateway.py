@@ -42,7 +42,11 @@ from websockets.datastructures import Headers
 from websockets.http11 import Response
 
 from .groot2_protocol import (
+    BUILTIN_CATEGORIES,
+    CATEGORY_SUBTREE,
+    CATEGORY_UNDEFINED,
     HEADER_FORMAT,
+    NODE_CATEGORIES,
     PROTOCOL_ID,
     REQ_BLACKBOARD,
     REQ_FULLTREE,
@@ -97,6 +101,7 @@ class KleinGateway:
         self._req_lock = asyncio.Lock()     # REQ/REP is strictly send→recv
 
         self.all_behavior_trees = {}        # tree_id -> root <element> of that block
+        self._node_categories = {}          # registration name -> category, from <TreeNodesModel>
         self.tree_structure = None          # unrolled nested dict sent to clients
         self._layout_json = None            # cached layout frame, rebuilt each handshake
         self.clients = set()
@@ -214,6 +219,7 @@ class KleinGateway:
                 "id": self._next_id(),
                 "uid": self.extract_uid(element),
                 "type": "SubTree",
+                "category": CATEGORY_SUBTREE,
                 "name": element.get("name") or subtree_id or "SubTree",
                 "subtree_id": subtree_id,
                 "is_subtree_root": True,
@@ -235,10 +241,43 @@ class KleinGateway:
             "id": self._next_id(),
             "uid": self.extract_uid(element),
             "type": node_type,
+            "category": self._category_for(element),
             "name": element.get("name") or node_type,
             "ports": self.extract_ports(element),
             "children": [self.unroll_node(child, expanding) for child in element],
         }
+
+    @staticmethod
+    def parse_node_categories(root):
+        """Return ``{registration name: category}`` from ``<TreeNodesModel>``.
+
+        An entry's tag is the category and its ``ID`` is the registration name
+        instance elements use as their own tag — see docs/protocol.md. Entries
+        with no ``ID``, and tags that are not categories (``<MetadataFields>``),
+        are skipped rather than trusted.
+        """
+        categories = {}
+        for model in root.findall("TreeNodesModel"):
+            for entry in model:
+                registration_id = entry.get("ID")
+                if registration_id and entry.tag in NODE_CATEGORIES:
+                    categories[registration_id] = entry.tag
+        return categories
+
+    def _category_for(self, element):
+        """Return one instance element's category, most authoritative source first:
+        a tag that is itself a category (the explicit ``<Action ID="OpenDoor"/>``
+        spelling), then the robot's ``<TreeNodesModel>``, then the nodes
+        BehaviorTree.CPP registers on itself, else ``Undefined``.
+
+        Never guessed from the tree's shape — see docs/protocol.md.
+        """
+        tag = element.tag
+        if tag in NODE_CATEGORIES:
+            return tag
+        return (self._node_categories.get(tag)
+                or BUILTIN_CATEGORIES.get(tag)
+                or CATEGORY_UNDEFINED)
 
     @staticmethod
     def extract_blackboard_names(root):
@@ -273,6 +312,11 @@ class KleinGateway:
     def _parse_layout(self, xml_str):
         """Parse FULLTREE XML and build the unrolled tree structure."""
         root = ET.fromstring(xml_str)
+
+        # Built before unrolling, because unroll_node stamps each node's
+        # category from it. Rebuilt per handshake, so re-handshaking against a
+        # different tree never carries the previous tree's node types over.
+        self._node_categories = self.parse_node_categories(root)
 
         self.all_behavior_trees = {}
         block_paths = {}            # tree ID -> that block's _fullpath, for the root's board
@@ -350,6 +394,13 @@ class KleinGateway:
                     f"[klein] tree layout loaded from {self.robot_endpoint} "
                     f"({self._node_seq} nodes unrolled)."
                 )
+                if not self._node_categories:
+                    # Once per handshake: otherwise grey nodes read as a klein bug.
+                    print(
+                        "[klein] robot sent no <TreeNodesModel>; node categories "
+                        "fall back to the BehaviorTree.CPP builtin table.",
+                        file=sys.stderr,
+                    )
                 self._set_robot_state(True, f"Connected to robot at {self.robot_endpoint}")
                 if self.clients:  # push to dashboards that connected while we waited
                     websockets.broadcast(self.clients, self._layout_json)

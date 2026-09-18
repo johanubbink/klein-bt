@@ -83,8 +83,60 @@ Returns the composed tree as XML. Relevant structure:
 - `<BehaviorTree>` blocks and `<SubTree>` references carry `_fullpath`, the
   subtree *instance* path — this is the name its blackboard registers under
   (the root's `_fullpath` is empty; its board registers under the tree ID).
-- A `<TreeNodesModel>` section declares node types; its entries are models,
-  not instances, and must be ignored when walking the tree.
+- A `<TreeNodesModel>` section declares the node types. Its entries are
+  **models, not instances** — the `<SubTree>` entry there is a declaration, not
+  a subtree with a blackboard — so it must be skipped when walking the tree. It
+  is, however, the authoritative source for a node's **category**.
+
+#### Node categories
+
+Each `<TreeNodesModel>` entry's element *tag* is the node's category and its
+`ID` attribute is the registration name — which is the same string instance
+elements use as *their* tag:
+
+```xml
+<TreeNodesModel>
+  <Control ID="Fallback"/>
+  <Condition ID="IsDoorClosed"/>
+  <Decorator ID="RetryUntilSuccessful">
+    <input_port name="num_attempts" type="int">Repeat a failed child up to N times</input_port>
+  </Decorator>
+  <Action ID="OpenDoor"/>
+</TreeNodesModel>
+```
+
+so `{ID -> tag}` is an exact registration-name-to-category lookup, with nothing
+inferred. `Groot2Publisher` builds its reply with
+`WriteTreeToXML(tree, /*add_metadata=*/true, /*add_builtin_models=*/true)`, so
+the section is always present and always covers the builtins.
+
+Categories are `basic_types.h :: NodeType`, spelled as `toStr<NodeType>()`
+writes them:
+
+| tag | what it is |
+| --- | --- |
+| `Control` | many children; sequences, fallbacks, parallels, switches |
+| `Decorator` | exactly one child; retries, timeouts, inverters, preconditions |
+| `Condition` | a leaf that answers a question and never runs long |
+| `Action` | a leaf that does work |
+| `SubTree` | a reference to another `<BehaviorTree>` block |
+
+A publisher always writes an instance with its registration name as the tag
+(`<OpenDoor name="OpenDoor" _uid="9"/>`; a `<SubTree>` gets `ID` instead of
+`name`) — `addTreeToXML` in `src/xml_parsing.cpp` has no other branch. The
+explicit spelling that puts the category in the tag (`<Action ID="OpenDoor"/>`)
+is what the Groot2 *editor* saves to a file, not something FULLTREE returns;
+klein reads it anyway, so a hand-written or exported tree still categorises.
+
+A robot that predates the model section, or one whose reply omits an entry,
+leaves klein without an answer. It then falls back to the table of nodes
+BehaviorTree.CPP registers on itself (`src/bt_factory.cpp`) — which covers every
+builtin Control and Decorator, so the tree's control skeleton still reads
+correctly — and reports anything still unresolved as `Undefined`. Nothing is
+inferred from the tree's shape: a `Sequence` with one child is still a Control,
+and a childless node may be an Action or a Condition (BT.CPP's own CrossDoor
+example registers `SmashDoor` as a Condition and the equally childless
+`OpenDoor` as an Action).
 
 ### STATUS (`S`)
 
@@ -123,8 +175,10 @@ Semantics to know:
 ## Where the constants live
 
 klein encodes all of this once, in
-[`klein/groot2_protocol.py`](../klein/groot2_protocol.py) — the gateway decodes
-with it and the mock robot ([`klein/mock_robot.py`](../klein/mock_robot.py))
-encodes with it, so the two halves cannot drift. The C++ side is
+[`klein/groot2_protocol.py`](../klein/groot2_protocol.py) — the request framing,
+the `NodeStatus` decode rule, the `NodeType` category names and the
+builtin-category fallback table. The gateway decodes with it and the mock robot
+([`klein/mock_robot.py`](../klein/mock_robot.py)) encodes with it, so the two
+halves cannot drift. The C++ side is
 `include/behaviortree_cpp/loggers/groot2_protocol.h` and
 `src/loggers/groot2_publisher.cpp` in BehaviorTree.CPP.

@@ -1,16 +1,16 @@
 """mock_robot.py — a fake BehaviorTree.CPP Groot2 publisher for testing klein.
 
-Implements just enough of the Groot2 wire protocol (FULLTREE + STATUS +
-BLACKBOARD over a ZeroMQ REP socket) to drive the klein dashboard with no real
-robot. It replays the *CrossDoor* mission from BehaviorTree.CPP's
-``examples/t11_groot_howto.cpp`` — the canonical Groot2 tutorial — so the
-dashboard shows the same tree a real robot running that example would publish.
+Implements just enough of that wire protocol (FULLTREE + STATUS + BLACKBOARD
+over a ZeroMQ REP socket) to drive the klein dashboard with no real robot. It
+replays the *CrossDoor* mission from BehaviorTree.CPP's
+``examples/t11_groot_howto.cpp`` — the canonical tutorial — so the dashboard
+shows the same tree a real robot running that example would publish.
 Watch RUNNING (pulsing amber), SUCCESS (green), FAILURE (red), and
 IDLE-transition ("was …") states live, plus blackboard values that evolve with
 the mission.
 
 Usage:
-    klein-bt-mock                       # bind tcp://*:1667 (Groot2 default)
+    klein-bt-mock                       # bind tcp://*:1667 (BT.CPP's default)
     klein-bt-mock --port 1777           # use another port (e.g. real robot on 1667)
     python -m klein.mock_robot          # equivalent, without the console script
 
@@ -56,6 +56,14 @@ from .groot2_protocol import (
 # the DoorClosed board further down does not list it), and a node with more
 # ports than fit on a card (PassThroughDoor), for the truncation and the hover
 # tooltip. Deliberately left bare: the control nodes, OpenDoor and SmashDoor.
+#
+# The <TreeNodesModel> at the end declares each node's category. A real reply
+# lists every registered node, ~45 builtins included; the mock lists only the
+# types this tree uses. These are the real CrossDoor registrations from
+# BehaviorTree.CPP/sample_nodes/crossdoor_nodes.cpp:63-74 — SmashDoor is a
+# Condition while the equally childless OpenDoor is an Action, which is why a
+# category cannot be inferred from the tree's shape. All five categories appear,
+# so a robot-free run exercises every style the dashboard draws.
 TREE_XML = """<root BTCPP_format="4" main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree" _fullpath="MainTree">
     <Sequence name="Sequence" _uid="1">
@@ -79,6 +87,32 @@ TREE_XML = """<root BTCPP_format="4" main_tree_to_execute="MainTree">
       <SmashDoor name="SmashDoor" _uid="12"/>
     </Fallback>
   </BehaviorTree>
+  <TreeNodesModel>
+    <Control ID="Fallback"/>
+    <Condition ID="IsDoorClosed"/>
+    <Decorator ID="Inverter"/>
+    <Action ID="OpenDoor"/>
+    <Action ID="PassThroughDoor">
+      <input_port name="goal" type="geometry_msgs::msg::PoseStamped"/>
+      <input_port name="speed" type="double"/>
+      <input_port name="timeout_ms" type="unsigned int"/>
+    </Action>
+    <Action ID="PickLock"/>
+    <Decorator ID="RetryUntilSuccessful">
+      <input_port name="num_attempts" type="int">Repeat a failed child up to N times</input_port>
+    </Decorator>
+    <Action ID="Script">
+      <input_port name="code" type="std::string">Piece of code that can be parsed</input_port>
+    </Action>
+    <Control ID="Sequence"/>
+    <Condition ID="SmashDoor"/>
+    <SubTree ID="SubTree">
+      <input_port name="_autoremap" type="bool" default="false">If true, all the ports with the same name will be remapped</input_port>
+    </SubTree>
+    <Action ID="UpdatePosition">
+      <output_port name="pos" type="Position2D"/>
+    </Action>
+  </TreeNodesModel>
 </root>"""
 
 # Blackboard names the mock serves, in FULLTREE order (what klein derives from
@@ -334,7 +368,7 @@ def build_blackboard_reply(request_frames, tick):
 
 
 def reply_header(request_first_frame):
-    """Build the 22-byte Groot2 reply header (echo request + 16-byte tree UUID)."""
+    """Build the 22-byte reply header (echo request + 16-byte tree UUID)."""
     # request frame is protocol(u8) type(u8) unique_id(u32); echo it back.
     if len(request_first_frame) >= 6:
         _proto, req_type, unique_id = struct.unpack(HEADER_FORMAT, request_first_frame[:6])
@@ -345,7 +379,7 @@ def reply_header(request_first_frame):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Fake BehaviorTree.CPP Groot2 publisher for testing klein.")
+    ap = argparse.ArgumentParser(description="Fake BehaviorTree.CPP publisher for testing klein.")
     ap.add_argument("--host", default="*", help="bind address (default: * = all interfaces)")
     ap.add_argument("--port", type=int, default=1667, help="ZeroMQ REP port (default: 1667)")
     args = ap.parse_args()
@@ -354,7 +388,7 @@ def main():
     sock = ctx.socket(zmq.REP)
     endpoint = f"tcp://{args.host}:{args.port}"
     sock.bind(endpoint)
-    print(f"[mock_robot] Groot2 publisher listening on {endpoint}")
+    print(f"[mock_robot] publisher listening on {endpoint}")
     print(f"[mock_robot] tree: CrossDoor ({len(ALL_UIDS)} nodes, 1 subtree)")
     print(f"[mock_robot] run:  klein-bt --robot-port {args.port}")
 

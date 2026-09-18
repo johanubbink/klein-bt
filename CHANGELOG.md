@@ -6,6 +6,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Node categories on the layout.** Every node now reports whether it is a
+  `Control`, `Decorator`, `Condition`, `Action` or `SubTree`, read from the
+  `<TreeNodesModel>` section the robot publishes alongside its tree.
+- **Node types are visible on the canvas.** Each card gains a glyph before its
+  label — `→` control, `?` fallback, `⇉` parallel, `◇` decorator, `◆` condition,
+  `▸` action, `⧉` subtree — and the type is tinted to match.
+- **Subtrees read as a region.** A `<SubTree>` card gets a hairline
+  frame, and it and every node under it are drawn a step lighter and tinted
+  toward the subtree's own colour, a second step for a subtree nested inside one.
+- **A legend**, collapsed by default in the sidebar, naming all three channels.
+  It also documents the status colours, including the `"was …"` stroke, which
+  nothing in the UI had ever explained.
+
+### Changed
+- **A card names its type once.** BehaviorTree.CPP writes `name="Inverter"` on an
+  `<Inverter>` the author never named, so cards used to read "INVERTER" and
+  "Inverter" one above the other. An unnamed node now shows its type as the
+  card's primary label and drops the caption.
+- Every node now has a hover tooltip. Previously only nodes with ports had one,
+  which left the control and decorator nodes.
+- `klein-bt-mock` publishes a `<TreeNodesModel>` matching the real CrossDoor
+  example's registrations, so a robot-free run exercises all five categories.
+
 ## [0.4.0] - 2026-09-16
 
 ### Added

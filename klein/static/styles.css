@@ -14,6 +14,32 @@
     --color-SKIPPED: #2563eb;
     --color-TRANSITION: #475569;
 
+    /* Node type ink — the *category* channel. Deliberately pale (L .50-.68)
+       where every status colour above is mid-tone (L .06-.28), so a type colour
+       and a status colour can never be read as each other even side by side.
+       Every one clears 5.7:1 against the deepest card tint below. */
+    --type-Control: #c4b5fd;        /* violet */
+    --type-Decorator: #fcd34d;      /* amber  */
+    --type-Condition: #5eead4;      /* teal   */
+    --type-Action: #cbd5e1;         /* slate — the commonest leaf stays quiet */
+    --type-SubTree: #f9a8d4;        /* pink   */
+
+    /* Subtree nesting — the *region* channel. Each step is both lighter *and*
+       tinted further toward --type-SubTree, because a ~1.13:1 step of lightness
+       alone is too quiet to answer "where does this subtree start?" across a
+       wide tree. Carrying the subtree's own hue also
+       ties the region to the pink glyph, caption and frame on the card that
+       opens it. The lightness component is what survives a colour vision
+       deficiency; the hue is what makes it obvious to everyone else.
+       Three steps is the ceiling — a fourth starts reading as a highlight. */
+    --subtree-fill-0: #23232f;      /* main tree — the card as it has always been */
+    --subtree-fill-1: #35293f;
+    --subtree-fill-2: #46324f;
+    --subtree-fill-3: #573b60;      /* depth 3 and deeper, clamped */
+
+    /* No system stack guarantees symbol coverage; name the symbol fonts. */
+    --font-symbol: "DejaVu Sans", "Noto Sans Symbols 2", "Segoe UI Symbol", sans-serif;
+
     --sidebar-width: 320px;
 }
 
@@ -180,6 +206,82 @@ h1 {
 .segmented input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: -2px; }
 
 /* ------------------------------------------------------------------ */
+/* Legend — the three channels a card uses, named once                  */
+/* ------------------------------------------------------------------ */
+/* The swatches carry the same class names the canvas cards do, and read the
+   same custom properties, so the legend and the tree cannot drift apart. */
+#legend { margin-top: 12px; }
+#legend > summary {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 2px 0;
+    cursor: pointer;
+    list-style: none;
+}
+#legend > summary::-webkit-details-marker { display: none; }
+#legend > summary:hover .control-label { color: var(--text-main); }
+#legend > summary:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+
+.legend-title {
+    margin: 9px 0 3px;
+    font-size: 9px;
+    font-weight: bold;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: #64748b;
+}
+.legend-title em, .legend-list em { font-style: normal; color: #64748b; }
+
+.legend-list { margin: 0; padding: 0; list-style: none; }
+.legend-list li {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.72rem;
+    line-height: 1.75;
+    color: var(--text-muted);
+}
+
+.legend-glyph {
+    flex-shrink: 0;
+    width: 16px;
+    text-align: center;
+    font-size: 12px;
+    font-family: var(--font-symbol);
+    color: var(--cat-ink);      /* the .cat-* rules below the canvas cards share */
+}
+/* The refinement marks named inline in a label, not swatches in the gutter. */
+.legend-mark { font-family: var(--font-symbol); }
+
+/* A card in miniature, so the swatch is literally what the canvas draws. The
+   border stays faint: these three differ by one ~1.13:1 step of fill, and a
+   hard outline on a 16px chip is all the eye would see. */
+.legend-chip {
+    flex-shrink: 0;
+    width: 16px;
+    height: 11px;
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 2px;
+}
+.legend-chip { background: var(--sub-fill, var(--subtree-fill-0)); }
+/* Ringed, because that is what a card in a subtree actually wears. */
+.legend-chip.sub-1, .legend-chip.sub-2 { border-color: var(--type-SubTree); }
+
+.legend-pill {
+    flex-shrink: 0;
+    width: 16px;
+    height: 11px;
+    border-radius: 3px;
+}
+.legend-pill.st-IDLE       { background: var(--color-IDLE); }
+.legend-pill.st-RUNNING    { background: var(--color-RUNNING); }
+.legend-pill.st-SUCCESS    { background: var(--color-SUCCESS); }
+.legend-pill.st-FAILURE    { background: var(--color-FAILURE); }
+.legend-pill.st-SKIPPED    { background: var(--color-SKIPPED); }
+.legend-pill.st-TRANSITION { background: var(--color-TRANSITION); }
+
+/* ------------------------------------------------------------------ */
 /* Blackboards — a heading, then every subtree's board beneath it       */
 /* ------------------------------------------------------------------ */
 /* The heading sits outside the scroll container so it stays put while boards
@@ -247,13 +349,15 @@ h1 {
 .bb-group-toggle:hover:not(:disabled) { background: rgba(255, 255, 255, 0.05); }
 .bb-group-toggle:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 
-/* Cyan because it is the same subtree the canvas paints cyan. */
+/* Pink because it is the colour the canvas gives a subtree: its SubTree card's
+   glyph and caption, and the frame drawn around it. (--accent cyan is no longer
+   a type colour anywhere — it means "the UI is pointing at this".) */
 .bb-group-name {
     flex: 1;
     min-width: 0;
     font-size: 0.78rem;
     font-weight: 500;
-    color: var(--accent);
+    color: var(--type-SubTree);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -295,7 +399,8 @@ h1 {
     color: var(--text-muted);
     transition: transform 0.15s ease;
 }
-.open > .bb-chevron { transform: rotate(90deg) translateX(1px); }
+.open > .bb-chevron,
+#legend[open] > summary .bb-chevron { transform: rotate(90deg) translateX(1px); }
 
 /* A subtree whose ports are all remapped to its parent owns nothing. It keeps
    its row so the list still mirrors the tree, but there is nothing to open —
@@ -386,6 +491,7 @@ h1 {
     .bb-row.bb-changed { animation: none; }
     .bb-chevron, .segmented span { transition: none; }
     #sidebar { transition: none; }
+    .node-rect { transition: none; }
     .node-rect.focused { animation: none; stroke: var(--accent) !important; }
 }
 
@@ -422,7 +528,7 @@ svg:active { cursor: grabbing; }
 .node { cursor: pointer; }
 
 .node-rect {
-    fill: #23232f;
+    fill: var(--sub-fill, var(--subtree-fill-0));
     stroke-width: 2px;
     transition: stroke 0.1s ease, fill 0.2s ease;
 }
@@ -449,12 +555,59 @@ svg:active { cursor: grabbing; }
 
 /* Node Text Elements */
 .node-name { font-size: 13px; font-weight: 500; fill: #ffffff; }
-.node-type { font-size: 10px; font-weight: bold; fill: var(--accent); text-transform: uppercase; letter-spacing: 0.05em; }
-.node-uid { font-size: 9px; font-family: monospace; fill: var(--text-muted); }
+.node-type { font-size: 10px; font-weight: bold; fill: var(--cat-ink, var(--accent)); text-transform: uppercase; letter-spacing: 0.05em; }
+.node-uid { font-size: 9px; font-family: monospace; fill: var(--sub-muted, var(--text-muted)); }
 /* The node's ports, along the bottom of the card. Same muted monospace as
    .node-uid: supporting detail, never competing with the name above it. */
-.node-ports { font-size: 9px; font-family: monospace; fill: var(--text-muted); }
+.node-ports { font-size: 9px; font-family: monospace; fill: var(--sub-muted, var(--text-muted)); }
 .node-status-text { font-size: 10px; font-weight: bold; fill: #ffffff; }
+
+/* ---- Type channel -------------------------------------------------------
+   A glyph in the card's left gutter and the caption beside it share one colour
+   per category. Neither touches the stroke or the pill, so the status channel
+   is untouched — and applyStatus() writes no fill on .node-rect, so these class
+   rules win on specificity alone, with no !important anywhere. */
+.node-glyph {
+    font-size: 13px;            /* sits on the 13px label row, so it matches it */
+    text-anchor: middle;
+    fill: var(--cat-ink, var(--accent));   /* unknown category: as it always looked */
+    font-family: var(--font-symbol);
+}
+
+/* The one category -> colour mapping, read by the canvas cards and the legend
+   alike. A node with no .cat-* class leaves --cat-ink unset, and each reader
+   below falls back to the ink it drew before there were categories. */
+.cat-Control   { --cat-ink: var(--type-Control); }
+.cat-Decorator { --cat-ink: var(--type-Decorator); }
+.cat-Condition { --cat-ink: var(--type-Condition); }
+.cat-Action    { --cat-ink: var(--type-Action); }
+.cat-SubTree   { --cat-ink: var(--type-SubTree); }
+
+/* "unnamed": the author never named this instance, so the big row is showing
+   the type and takes the type's ink. A card with a real name keeps it white. */
+.node.unnamed .node-name { fill: var(--cat-ink, var(--text-main)); }
+
+/* ---- Region channel -----------------------------------------------------
+   How deep in subtree nesting this card sits. The fill is the only cue painted
+   with the card's whole area, so it is the only one still readable zoomed out.
+   The one depth -> fill mapping, read by the cards and the legend chips alike;
+   each level owns its muted ink too, because --text-muted lands at 3.7:1 on the
+   deepest tint, under the 4.5:1 it clears on every shallower card. */
+.sub-1 { --sub-fill: var(--subtree-fill-1); }
+.sub-2 { --sub-fill: var(--subtree-fill-2); }
+.sub-3 { --sub-fill: var(--subtree-fill-3); --sub-muted: #aab6c6; }
+
+/* Subtree membership: a ring 3px outside every card in the region. A separate
+   element rather than a second stroke, because the card's stroke is the status
+   channel — concentric, so a card inside a subtree says "in this region" and
+   "FAILURE" at once. Lighter than the card's own 2px stroke, and solid while a
+   RUNNING card pulses, because a region marker should not blink. */
+.node-subtree-frame {
+    fill: none;
+    stroke: var(--type-SubTree);
+    stroke-width: 1.25px;
+    opacity: 0.75;
+}
 
 /* Links/Edges connecting nodes */
 .link {

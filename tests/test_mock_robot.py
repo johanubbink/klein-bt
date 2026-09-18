@@ -1,4 +1,4 @@
-"""Unit tests for klein.mock_robot — the fake Groot2 publisher used to drive
+"""Unit tests for klein.mock_robot — the fake publisher used to drive
 klein in tests. Verifies the status animation, blackboard content and reply
 framing, and round-trips its output through the real gateway parser."""
 import json
@@ -9,7 +9,13 @@ import xml.etree.ElementTree as ET
 
 from klein import mock_robot
 from klein.gateway import KleinGateway
-from klein.groot2_protocol import HEADER_FORMAT, PROTOCOL_ID, REQ_STATUS, STATUS_RECORD_SIZE
+from klein.groot2_protocol import (
+    HEADER_FORMAT,
+    NODE_CATEGORIES,
+    PROTOCOL_ID,
+    REQ_STATUS,
+    STATUS_RECORD_SIZE,
+)
 
 
 class StatusBufferTest(unittest.TestCase):
@@ -177,6 +183,30 @@ class ReplyHeaderTest(unittest.TestCase):
         self.assertEqual(len(header), 22)
         proto, req_type, unique_id = struct.unpack(HEADER_FORMAT, header[:6])
         self.assertEqual((proto, req_type, unique_id), (PROTOCOL_ID, 0, 0))
+
+
+class NodeCategoryTest(unittest.TestCase):
+    """The mock's <TreeNodesModel>: what a real CrossDoor robot declares."""
+
+    def setUp(self):
+        self.model = KleinGateway.parse_node_categories(
+            ET.fromstring(mock_robot.TREE_XML)
+        )
+
+    def test_categories_use_the_shared_vocabulary(self):
+        self.assertTrue(set(self.model.values()) <= NODE_CATEGORIES)
+        # All five, so a robot-free run exercises every style the dashboard draws.
+        self.assertEqual(set(self.model.values()), NODE_CATEGORIES)
+
+    def test_every_node_type_in_the_tree_is_declared(self):
+        root = ET.fromstring(mock_robot.TREE_XML)
+        used = {
+            node.tag
+            for block in root.findall(".//BehaviorTree")
+            for node in block.iter()
+            if node.tag != "BehaviorTree"
+        }
+        self.assertEqual(used - set(self.model), set())
 
 
 if __name__ == "__main__":

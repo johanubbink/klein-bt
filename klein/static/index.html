@@ -38,6 +38,41 @@
                     </label>
                 </div>
             </div>
+            <!-- The three channels a card uses, named once. Closed by default:
+                 the blackboard panel needs the height. The glyphs are filled in
+                 from app.js's tables so they cannot drift from the canvas. -->
+            <details id="legend">
+                <summary>
+                    <span class="bb-chevron" aria-hidden="true"></span>
+                    <span class="control-label">Legend</span>
+                </summary>
+                <div class="legend-body">
+                    <p class="legend-title">Node type</p>
+                    <ul class="legend-list">
+                        <li><span class="legend-glyph cat-Control" data-cat="Control" aria-hidden="true"></span>Control
+                            <em>(<span class="legend-mark" data-type="Fallback"></span> fallback, <span class="legend-mark" data-type="Parallel"></span> parallel)</em></li>
+                        <li><span class="legend-glyph cat-Decorator" data-cat="Decorator" aria-hidden="true"></span>Decorator</li>
+                        <li><span class="legend-glyph cat-Condition" data-cat="Condition" aria-hidden="true"></span>Condition</li>
+                        <li><span class="legend-glyph cat-Action" data-cat="Action" aria-hidden="true"></span>Action</li>
+                        <li><span class="legend-glyph cat-SubTree" data-cat="SubTree" aria-hidden="true"></span>SubTree <em>(opens a region)</em></li>
+                    </ul>
+                    <p class="legend-title">Subtree nesting <em>(cards ringed in pink)</em></p>
+                    <ul class="legend-list">
+                        <li><span class="legend-chip sub-0" aria-hidden="true"></span>Main tree</li>
+                        <li><span class="legend-chip sub-1" aria-hidden="true"></span>Inside a subtree</li>
+                        <li><span class="legend-chip sub-2" aria-hidden="true"></span>Nested deeper</li>
+                    </ul>
+                    <p class="legend-title">Status <em>(card outline &amp; pill)</em></p>
+                    <ul class="legend-list">
+                        <li><span class="legend-pill st-IDLE" aria-hidden="true"></span>Idle &mdash; not ticked</li>
+                        <li><span class="legend-pill st-RUNNING" aria-hidden="true"></span>Running <em>(pulses)</em></li>
+                        <li><span class="legend-pill st-SUCCESS" aria-hidden="true"></span>Success</li>
+                        <li><span class="legend-pill st-FAILURE" aria-hidden="true"></span>Failure</li>
+                        <li><span class="legend-pill st-SKIPPED" aria-hidden="true"></span>Skipped</li>
+                        <li><span class="legend-pill st-TRANSITION" aria-hidden="true"></span>&ldquo;was &hellip;&rdquo; &mdash; idle again, last result</li>
+                    </ul>
+                </div>
+            </details>
         </header>
 
         <h2 id="bb-heading">Blackboards<span id="bb-count"></span></h2>

@@ -106,6 +106,7 @@ class LayoutTest(unittest.TestCase):
         subtree_ref = _find(self.gw.tree_structure, 7)   # <SubTree ID="DoorClosed" _uid="7"/>
         self.assertTrue(subtree_ref["is_subtree_root"])
         self.assertEqual(subtree_ref["subtree_id"], "DoorClosed")
+        self.assertEqual(subtree_ref["category"], "SubTree")
         # its single child is the DoorClosed definition root (Fallback "tryOpen" _uid="8")
         self.assertEqual(subtree_ref["children"][0]["uid"], 8)
 
@@ -220,6 +221,108 @@ class PortsTest(unittest.TestCase):
         self.assertEqual(is_door_closed["ports"], {"_skipIf": "door_open"})
         pick_lock = _find(self.gw.tree_structure, 11)
         self.assertEqual(pick_lock["ports"], {"_onSuccess": "lock_status:='picked'"})
+
+
+MODEL_LESS_XML = """<root BTCPP_format="4" main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <Sequence _uid="1">
+      <Inverter _uid="2"><Dock _uid="3" pad="1"/></Inverter>
+      <Sequence _uid="4"><Wait _uid="5" msec="500"/></Sequence>
+    </Sequence>
+  </BehaviorTree>
+</root>"""
+
+
+class NodeCategoryTest(unittest.TestCase):
+    """Every node carries the category the robot declared for it, so the
+    dashboard can style Controls, Decorators, Conditions and Actions apart."""
+
+    def setUp(self):
+        self.gw = KleinGateway("127.0.0.1", 1667, 8080)
+
+    def tearDown(self):
+        self.gw.ctx.destroy(linger=0)
+
+    def categories(self, node, acc=None):
+        acc = {} if acc is None else acc
+        acc[node["uid"]] = node["category"]
+        for child in node["children"]:
+            self.categories(child, acc)
+        return acc
+
+    def parse(self, xml):
+        self.gw._parse_layout(xml)
+        return self.categories(self.gw.tree_structure)
+
+    def test_model_section_decides_every_category(self):
+        found = self.parse(mock_robot.TREE_XML)
+        self.assertEqual(found[1], "Control")       # Sequence
+        self.assertEqual(found[5], "Decorator")     # Inverter
+        self.assertEqual(found[6], "Condition")     # IsDoorClosed
+        self.assertEqual(found[9], "Action")        # OpenDoor
+        self.assertEqual(found[7], "SubTree")       # the <SubTree> reference
+        self.assertEqual(found[10], "Decorator")    # Retry, inside the subtree
+
+    def test_all_five_categories_reach_the_dashboard(self):
+        found = set(self.parse(mock_robot.TREE_XML).values())
+        self.assertEqual(
+            found, {"Control", "Decorator", "Condition", "Action", "SubTree"}
+        )
+
+    def test_two_leaves_the_tree_shape_cannot_tell_apart(self):
+        # OpenDoor and SmashDoor are both childless; the robot registers one as
+        # an Action and the other as a Condition. Only the model knows.
+        found = self.parse(mock_robot.TREE_XML)
+        self.assertEqual(found[9], "Action")
+        self.assertEqual(found[12], "Condition")
+
+    def test_builtin_table_covers_a_robot_with_no_model_section(self):
+        found = self.parse(MODEL_LESS_XML)
+        self.assertEqual(found[1], "Control")
+        self.assertEqual(found[2], "Decorator")
+        self.assertEqual(found[4], "Control")   # a one-child Sequence is still Control
+
+    def test_unknown_node_is_undefined_never_guessed(self):
+        found = self.parse(MODEL_LESS_XML)
+        self.assertEqual(found[3], "Undefined")     # custom Dock, 0 children
+        self.assertEqual(found[5], "Undefined")     # custom Wait, 0 children
+
+    def test_explicit_category_tag_is_believed(self):
+        # The editor spelling: the tag IS the category and ID is the
+        # registration name. See docs/protocol.md.
+        self.parse(REAL_SHAPED_XML)
+        self.assertEqual(_find(self.gw.tree_structure, 47)["category"], "Action")
+
+    def test_model_entries_are_not_walked_as_instances(self):
+        self.parse(mock_robot.TREE_XML)
+        self.assertEqual(self.gw._blackboard_names, mock_robot.BLACKBOARD_NAMES)
+        uids = _collect_uids(self.gw.tree_structure)
+        self.assertEqual(sorted(uids), sorted(mock_robot.ALL_UIDS))
+
+    def test_model_map_is_rebuilt_per_handshake(self):
+        self.parse(mock_robot.TREE_XML)
+        found = self.parse(MODEL_LESS_XML)      # a different robot, no model
+        self.assertEqual(self.gw._node_categories, {})
+        self.assertEqual(found[3], "Undefined")
+
+    def test_malformed_model_entries_are_skipped(self):
+        xml = """<root BTCPP_format="4">
+          <BehaviorTree ID="MainTree"><Dock _uid="1"/></BehaviorTree>
+          <TreeNodesModel>
+            <Action/>
+            <NotACategory ID="Dock"/>
+            <MetadataFields><Metadata author="x"/></MetadataFields>
+          </TreeNodesModel>
+        </root>"""
+        self.parse(xml)
+        self.assertEqual(self.gw._node_categories, {})
+        self.assertEqual(self.gw.tree_structure["category"], "Undefined")
+
+    def test_category_rides_in_the_cached_layout_frame(self):
+        self.parse(mock_robot.TREE_XML)
+        data = json.loads(self.gw._layout_json)["data"]
+        self.assertEqual(data["category"], "Control")
+        self.assertEqual(data["type"], "Sequence")   # registration name untouched
 
 
 class StaticAssetsTest(unittest.TestCase):

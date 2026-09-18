@@ -74,6 +74,30 @@ order restores meaning to the robot's unordered reply, and each board is
 attached to the subtree node that owns it so the panel and the canvas stay
 linked.
 
+## Node categories
+
+Every node in the layout carries a `category` — `Control`, `Decorator`,
+`Condition`, `Action` or `SubTree` — alongside the `type` it already carried
+(the registration name the tree author wrote). `type` says *which* node this is;
+`category` says *what kind*, which is what the dashboard styles on, so a reader
+can follow a tree's control flow without knowing the robot's node library.
+
+The categories are not klein's opinion. A FULLTREE reply's `<TreeNodesModel>`
+section is written by the robot from its own registry: each entry's tag is the
+category, its `ID` is the registration name. The gateway builds that
+`{name -> category}` map once per handshake, before unrolling, and stamps each
+node as it goes. When the robot is too old to send the section, klein falls back
+to the nodes BehaviorTree.CPP registers on itself — that alone gets every
+builtin Control and Decorator right — and labels anything left `Undefined`
+rather than guessing from the tree's shape. Inference would be wrong exactly
+where it matters: a `Sequence` with one child is not a decorator, and a
+childless node is as likely a Condition as an Action.
+
+Nothing else about a node moved. `is_subtree_root` still marks the expansion
+boundary, and how deep a node sits inside nested subtrees stays a browser-side
+derivation from the hierarchy the canvas already walks — the gateway would only
+be duplicating a number, and would get it wrong for a collapsed subtree.
+
 ## Browser side: one port for everything
 
 A single `websockets` server owns `--port`. Its `process_request` hook serves
@@ -93,6 +117,34 @@ broadcast stream. Frame types on the wire:
 | `status` | 10 Hz | `{uid: {status, from}}` |
 | `blackboard` | 2 Hz | `{board: {key: value}}`, tree order |
 | `robot` | on change | `{connected, detail}` |
+
+A node card encodes three separate questions on three separate channels, so no
+two can be confused for each other:
+
+| question | channel | fed by |
+| --- | --- | --- |
+| what is it doing? | colour of the card outline and the status pill | `status` frames |
+| what region is it in? | a pink ring around the card, and a fill one step lighter and pinker per nesting level | `is_subtree_root`, walked in the browser |
+| what kind of node is it? | a glyph before the card's label, tinted per category | `category` |
+
+A card shows its type once, not twice. BehaviorTree.CPP writes `name="Inverter"`
+on an `<Inverter>` the author never named, so klein prints the type as the card's
+primary label in that case and drops the small caption above it; only a name that
+says something the type does not — `tryOpen` on a `Fallback` — gets both rows.
+
+Colour is the *secondary* cue for type: the glyph and the registration name
+carry the meaning on their own, so the card still reads under any colour vision
+deficiency.
+
+Subtree membership is marked three ways at once, because it is the question the
+canvas gets asked most. Each step of the fill is both lighter and tinted further
+toward the subtree's own pink: the lightness is what survives a colour vision
+deficiency, the hue is what makes the region obvious to everyone else, and a
+whole-card tint is the only cue still legible when the tree is zoomed out far
+enough that the captions are gone. On top of that, every card in a region wears
+a pink ring. The ring is its own element drawn outside the card, deliberately
+not the card's own border — that border is the status channel, so a node inside
+a subtree still shows whether it succeeded or failed.
 
 ## Testing without a robot
 

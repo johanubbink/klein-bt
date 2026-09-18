@@ -31,6 +31,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   nothing in the UI had ever explained.
 
 ### Changed
+- **A disconnected tree stops pulsing.** The RUNNING pulse claims a node is
+  running *right now*, so it kept insisting that over a dead robot or a dead
+  gateway — the most convincing thing on the canvas and the only untrue one. It
+  now freezes as soon as telemetry stops. Colours are untouched, so where the
+  mission got to is still readable.
 - **Node ids are unique across handshakes.** They used to restart at 1 for every
   tree, so the dashboard's keyed join matched a new tree's nodes onto the old
   tree's cards and they kept their former labels, types and UIDs. Ids now carry

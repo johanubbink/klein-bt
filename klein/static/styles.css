@@ -583,6 +583,16 @@ svg:active { cursor: grabbing; }
 .node-rect.running,
 .status-pill.running { animation: klein-pulse 1.1s ease-in-out infinite; }
 
+/* ...but only while telemetry is actually arriving. The pulse is the canvas
+   saying "this node is running *right now*", and once the robot or the gateway
+   is unreachable there is no "right now" — a tree that keeps pulsing over a
+   dead connection is the most convincing thing on screen and the only untrue
+   one. Colours stay, so the last known state is still readable; the motion
+   stops, because motion is what reads as live. `animation: none` returns the
+   element to full opacity, so nothing is left stranded mid-fade. */
+body.telemetry-stale .node-rect.running,
+body.telemetry-stale .status-pill.running { animation: none; }
+
 /* Picked from the blackboard panel: say which card the camera just flew to,
    without permanently recoloring a node whose status stroke means something. */
 @keyframes klein-focus {

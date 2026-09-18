@@ -831,6 +831,11 @@ function updateConnectionUI() {
     const dot = d3.select("#conn-dot");
     const txt = d3.select("#conn-text");
 
+    // Freeze the RUNNING pulse whenever telemetry has stopped arriving, from
+    // either link. See body.telemetry-stale in styles.css.
+    document.body.classList.toggle("telemetry-stale",
+                                   !gatewayConnected || !robotConnected);
+
     if (!gatewayConnected) {
         dot.attr("class", "dot");
         txt.text("klein gateway offline — reconnecting…");

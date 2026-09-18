@@ -183,8 +183,15 @@ two can be confused for each other:
 | question | channel | fed by |
 | --- | --- | --- |
 | what is it doing? | colour of the card outline and the status pill | `status` frames |
+| is that still true? | a RUNNING card pulses only while telemetry is arriving | `robot` frames |
 | what region is it in? | a pink ring around the card, and a fill one step lighter and pinker per nesting level | `is_subtree_root`, walked in the browser |
 | what kind of node is it? | a glyph before the card's label, tinted per category | `category` |
+
+The pulse is the one cue that makes a claim about *now* rather than about the
+last frame, so it is the one that has to stop when the robot or the gateway goes
+unreachable — a tree still pulsing over a dead connection is the most convincing
+thing on the canvas and the only untrue one. The colours stay, because the last
+known state is worth reading; only the motion goes.
 
 A card shows its type once, not twice. BehaviorTree.CPP writes `name="Inverter"`
 on an `<Inverter>` the author never named, so klein prints the type as the card's

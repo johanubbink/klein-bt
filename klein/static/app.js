@@ -356,7 +356,14 @@ function diagonalCurve({ source, target }) {
 // ------------------------------------------------------------------ //
 // Live status coloring — updates strokes/pills in place, no re-render
 // ------------------------------------------------------------------ //
+// The last frame the robot sent, kept whole. The per-node `_statusKey` cache
+// below is a *DOM* cache — a collapsed subtree has no cards, so it holds nothing
+// for exactly the nodes runningFrontier() most needs. This map is by uid and so
+// covers the whole tree, folded away or not.
+let lastStatusMap = {};
+
 function applyStatus(telemetryMap) {
+    lastStatusMap = telemetryMap;
     gContainer.selectAll("g.node").each(function(d) {
         if (d.data.uid == null) return;             // node has no UID to match
         const entry = telemetryMap[d.data.uid];     // { status, from }
@@ -722,21 +729,29 @@ function resetCamera() {
     svg.transition().duration(500).call(zoomBehavior.transform, target);
 }
 
+// Open every collapsed ancestor of these nodes, so each one has a card again.
+// Says whether anything moved: the caller has to relayout before reading x/y,
+// and a node the reader never folded away costs nothing.
+function revealAncestors(nodes) {
+    let reopened = false;
+    for (const node of nodes) {
+        for (let ancestor = node.parent; ancestor; ancestor = ancestor.parent) {
+            if (ancestor._children) {
+                ancestor.children = ancestor._children;
+                ancestor._children = null;
+                reopened = true;
+            }
+        }
+    }
+    return reopened;
+}
+
 // Fly the camera to one node and pulse its card — the blackboard panel's answer
 // to "where is this subtree?". Collapsed ancestors are reopened first, since a
 // board can belong to a subtree the reader has folded away.
 function focusNode(node) {
     if (!node || !rootNodeSnapshot) return;
-
-    let reopened = false;
-    for (let ancestor = node.parent; ancestor; ancestor = ancestor.parent) {
-        if (ancestor._children) {
-            ancestor.children = ancestor._children;
-            ancestor._children = null;
-            reopened = true;
-        }
-    }
-    if (reopened) updateTreeLayout(rootNodeSnapshot);   // node.x/y are set here
+    if (revealAncestors([node])) updateTreeLayout(rootNodeSnapshot);   // sets node.x/y
 
     const scale = 0.9;
     const [x, y] = orientation === "vertical" ? [node.x, node.y] : [node.y, node.x];
@@ -746,16 +761,96 @@ function focusNode(node) {
         zoomBehavior.transform,
         d3.zoomIdentity.translate(centerX - x * scale, window.innerHeight / 2 - y * scale).scale(scale)
     );
-    pulseNode(node);
+    pulseNodes([node]);
+}
+
+// The tick's leading edge: every RUNNING node with no RUNNING node beneath it.
+// A Sequence is RUNNING for as long as the child it is waiting on is, so the
+// whole spine from the root down reads RUNNING — the leaves are the only part
+// that answers "what is the robot doing?". A Parallel puts several there at once.
+//
+// Walked over the hierarchy, not the canvas: a collapsed subtree keeps its
+// children in _children and has no cards at all, and that is precisely where a
+// reader who folded the tree down has lost track of the action.
+function runningFrontier() {
+    if (!rootNodeSnapshot) return [];
+    const frontier = [];
+    (function walk(node) {
+        const entry = lastStatusMap[node.data.uid];
+        const before = frontier.length;
+        for (const child of node.children || node._children || []) walk(child);
+        // Nothing below it is running, so this node is where the tick stops.
+        if (entry && entry.status === "RUNNING" && frontier.length === before) {
+            frontier.push(node);
+        }
+    })(rootNodeSnapshot);
+    return frontier;
+}
+
+// Breathing room around a framed group, in layout units — roughly a third of a
+// card, enough that the framed cards never sit against the window edge.
+const framePad = 60;
+
+// Fit a set of cards in the visible canvas. Unlike focusNode this keeps the
+// reader's zoom whenever the group already fits, and only ever zooms *out* —
+// a single running leaf should not throw the reader to 3x, and holding the
+// scale makes a second press a no-op rather than a lurch.
+function frameNodes(nodes) {
+    if (!nodes.length) return;
+    const left = sidebarWidth();
+    const viewWidth = window.innerWidth - left;
+    const viewHeight = window.innerHeight;
+
+    // Cards are centre-anchored, and layout coords are (sibling, depth) — the
+    // swap to screen coords is the same one nodeTransform() makes.
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const node of nodes) {
+        const [x, y] = orientation === "vertical" ? [node.x, node.y] : [node.y, node.x];
+        minX = Math.min(minX, x - nodeWidth / 2);
+        maxX = Math.max(maxX, x + nodeWidth / 2);
+        minY = Math.min(minY, y - nodeHeight / 2);
+        maxY = Math.max(maxY, y + nodeHeight / 2);
+    }
+
+    const fit = Math.min(viewWidth / (maxX - minX + framePad * 2),
+                         viewHeight / (maxY - minY + framePad * 2));
+    // Clamped here rather than left to d3: it silently clamps the transform it
+    // stores, which would leave the translate below computed for another scale.
+    const [minScale] = zoomBehavior.scaleExtent();
+    const scale = Math.max(minScale, Math.min(d3.zoomTransform(svg.node()).k, fit));
+
+    const centerX = (minX + maxX) / 2;
+    const centerY = (minY + maxY) / 2;
+    svg.transition().duration(500).call(
+        zoomBehavior.transform,
+        d3.zoomIdentity
+            .translate(left + viewWidth / 2 - centerX * scale, viewHeight / 2 - centerY * scale)
+            .scale(scale)
+    );
+}
+
+// Take the camera to whatever the robot is doing right now. An idle or finished
+// tree has no frontier, so there is nothing truer to show than the whole tree.
+function focusAction() {
+    if (!rootNodeSnapshot) return;
+    const frontier = runningFrontier();
+    if (!frontier.length) {
+        resetCamera();
+        return;
+    }
+    if (revealAncestors(frontier)) updateTreeLayout(rootNodeSnapshot);   // sets x/y
+    frameNodes(frontier);
+    pulseNodes(frontier);
 }
 
 let pulseTimer = null;
 
-function pulseNode(node) {
+function pulseNodes(nodes) {
+    const wanted = new Set(nodes);
     gContainer.selectAll(".node-rect.focused").classed("focused", false);
-    const rect = gContainer.selectAll("g.node").filter(d => d === node).select(".node-rect");
-    void rect.node()?.getBoundingClientRect();      // restart a pulse in flight
-    rect.classed("focused", true);
+    const rects = gContainer.selectAll("g.node").filter(d => wanted.has(d)).select(".node-rect");
+    rects.each(function() { void this.getBoundingClientRect(); });   // restart a pulse in flight
+    rects.classed("focused", true);
     clearTimeout(pulseTimer);
     pulseTimer = setTimeout(
         () => gContainer.selectAll(".node-rect.focused").classed("focused", false), 1100);
@@ -766,6 +861,24 @@ function highlightNode(node, on) {
     gContainer.selectAll("g.node").filter(d => d === node)
         .select(".node-rect").classed("highlight", on);
 }
+
+// Camera keys. Two, because there are only two questions the camera is ever
+// asked: where is the action, and where is everything.
+//
+// Unmodified presses only — Ctrl/Cmd+R still reloads the page and Cmd+F still
+// opens the browser's find bar. The sidebar is full of real buttons, radios and
+// disclosures, so keys pressed inside it belong to whatever has focus there.
+window.addEventListener("keydown", (event) => {
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    if (!rootNodeSnapshot) return;
+    if (event.target.closest?.("#sidebar")) return;
+
+    const key = event.key.toLowerCase();
+    if (key === "f") focusAction();
+    else if (key === "r") resetCamera();
+    else return;
+    event.preventDefault();
+});
 
 // Layout selector — reflow the same hierarchy and re-aim the camera; the
 // 250ms node/link transitions animate the change.
@@ -887,6 +1000,7 @@ function connectGatewayPipeline() {
             tagSubtreeDepth(rootNodeSnapshot);
 
             bbBoardList = collectBoards(rootNodeSnapshot);
+            lastStatusMap = {};      // its uids indexed the tree we just dropped
             resetBlackboards();
             updateTreeLayout(rootNodeSnapshot);
             resetCamera();

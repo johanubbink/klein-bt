@@ -669,9 +669,23 @@ body.telemetry-stale .status-pill.running { animation: none; }
     transition: stroke 0.2s ease;
 }
 
+/* The two camera keys, named in the watermark. Sized down from the surrounding
+   0.8rem so the caps do not outweigh the prose they sit in. */
+#watermark kbd {
+    font-family: inherit;
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--text-main);
+    background: rgba(255,255,255,0.12);
+    border: 1px solid rgba(255,255,255,0.22);
+    border-radius: 3px;
+    padding: 1px 5px;
+}
+
 /* Helper Instruction Watermark */
 #watermark {
     position: absolute;
+    white-space: nowrap;      /* one line: the hints read as one row of controls */
     bottom: 20px;
     right: 20px;
     font-size: 0.8rem;

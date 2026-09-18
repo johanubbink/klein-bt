@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Two camera keys.** <kbd>F</kbd> takes the view to the action — the *running
+  frontier*, every RUNNING node with no RUNNING node under it — framing all of
+  them at once when a `Parallel` has several branches live, reopening any
+  subtree they were folded inside, and pulsing the cards it lands on. It only
+  ever zooms out, so a tree already in view stays where it is and a second press
+  does nothing. <kbd>R</kbd> re-centres the whole tree. An idle or finished tree
+  has no frontier, so <kbd>F</kbd> falls back to <kbd>R</kbd> rather than
+  guessing at where the action was.
+
 ## [0.5.0] - 2026-09-18
 
 ### Added

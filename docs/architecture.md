@@ -215,6 +215,30 @@ a pink ring. The ring is its own element drawn outside the card, deliberately
 not the card's own border — that border is the status channel, so a node inside
 a subtree still shows whether it succeeded or failed.
 
+## The camera
+
+Two keys, because there are only two questions the camera is ever asked.
+<kbd>R</kbd> re-centres the whole tree. <kbd>F</kbd> goes to the action, which
+klein defines as the **running frontier**: every RUNNING node with no RUNNING
+node beneath it. A `Sequence` is RUNNING for as long as the child it waits on
+is, so the entire spine from the root down reads RUNNING and only the leaves
+answer "what is the robot doing?" — and a `Parallel` puts several nodes there at
+once, which is why the frontier is a set and <kbd>F</kbd> frames all of it
+rather than picking a winner.
+
+The frontier is computed from the last `status` frame against the *hierarchy*,
+not against the canvas. The per-node status cache that `applyStatus` keeps to
+skip redundant DOM writes is a cache of what is drawn, and a collapsed subtree
+has no cards at all — so it knows nothing about exactly the nodes a reader who
+folded the tree down has lost track of. The raw uid map covers the whole tree
+either way; `_children` is walked alongside `children` for the same reason.
+
+Framing only ever zooms *out*. The reader's zoom level is theirs, a lone running
+leaf should not throw them to 3x, and holding the scale is what makes a second
+press a no-op instead of a lurch. An idle or finished tree has no frontier, so
+<kbd>F</kbd> falls back to <kbd>R</kbd>: with nothing running there is nothing
+truer to show than the whole tree.
+
 ## Testing without a robot
 
 [`klein/mock_robot.py`](../klein/mock_robot.py) (`klein-bt-mock`) is a fake

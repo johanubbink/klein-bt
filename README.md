@@ -1,114 +1,93 @@
 # klein
 
-A lightweight, self-contained CLI that streams live **BehaviorTree.CPP v4**
-telemetry to an interactive browser dashboard.
-
-klein connects to a running robot node over ZeroMQ — speaking the Groot2
-publisher wire protocol that ships with BehaviorTree.CPP — recursively unrolls
-nested subtrees into a single tree, and streams 10 Hz status telemetry plus live
-blackboard values to an interactive **D3.js** dashboard in your browser.
+klein lets you watch a running BehaviorTree.CPP v4 tree live in your browser.
+You see which nodes are running, succeeding or failing, plus the current
+blackboard values, as the robot ticks.
 
 ![klein streaming a live CrossDoor behavior tree to the dashboard](assets/klein-demo.gif)
 
 ## Install
 
-klein is a command-line tool, so [pipx](https://pipx.pypa.io) is the tidiest way
-to install it into its own isolated environment. It isn't on PyPI yet, so
-install it straight from GitHub:
+klein isn't on PyPI yet, so install it from GitHub with [pipx](https://pipx.pypa.io):
 
 ```bash
 pipx install git+https://github.com/johanubbink/klein-bt.git
 ```
 
-This installs two commands: `klein-bt` (the dashboard) and `klein-bt-mock`
-(a fake robot for testing).
+This gives you two commands: `klein-bt` (the dashboard) and `klein-bt-mock`
+(a fake robot for trying it out).
 
-## Usage
-
-```bash
-klein-bt                    # connect to a robot on 127.0.0.1:1667, open the dashboard
-klein-bt --robot-host 10.0.0.5 --robot-port 1667
-klein-bt --port 8080 --no-browser
-```
-
-| Flag            | Default     | Meaning                                        |
-| --------------- | ----------- | ---------------------------------------------- |
-| `--robot-host`  | `127.0.0.1` | IP of the C++ robot node                       |
-| `--robot-port`  | `1667`      | ZeroMQ REQ/REP port on the robot               |
-| `--port`        | `8080`      | klein's dashboard + telemetry port (HTTP & WS) |
-| `--no-browser`  | off         | don't auto-open the system browser             |
-
-klein prints a clickable `http://localhost:<port>` link and opens it
-automatically. The dashboard supports zoom/pan, click-to-collapse subtrees, and
-live per-node status coloring (green SUCCESS, pulsing amber RUNNING, red
-FAILURE, slate IDLE). The **Layout** control switches between a vertical tree
-(root at the top, the BT convention) and a horizontal one. D3.js is vendored
-locally, so the dashboard works on air-gapped robot networks with no internet
-access.
-
-The side pane collapses with the `«` button when you want the canvas to itself,
-and comes back with the handle it leaves behind.
-
-If the robot loads a *different* behaviour tree while you are watching — a new
-mission, or a restart onto another tree — klein notices within a tenth of a
-second, redraws the dashboard on the new tree and says so with a brief note in
-the banner. No page reload, and no stale canvas quietly showing the wrong tree.
-
-### Blackboards
-
-The pane's **Blackboards** section lists every subtree's board, refreshed at 2 Hz
-while the tree runs, in tree order and indented the way the tree nests. A row
-flashes amber when its value changes; clicking one unwraps it, and ROS message
-types klein has a renderer for collapse to a single readable line
-(`151 poses · map · 12.4 m`). Hovering a board highlights its node on the canvas.
-
-See [docs/blackboards.md](docs/blackboards.md) for the full tour: how each value
-is formatted, what `(not shown)` means, and how to add a renderer for your own
-message type.
-
-## Documentation
-
-- [docs/architecture.md](docs/architecture.md)
-- [docs/protocol.md](docs/protocol.md)
-- [docs/blackboards.md](docs/blackboards.md)
-
-## Testing without a robot
-
-`klein-bt-mock` is a small fake publisher that speaks just enough of the wire
-protocol to drive the dashboard with no real robot (it ships with the package):
+## Run it
 
 ```bash
-klein-bt-mock --port 1777             # in one shell
-klein-bt --robot-port 1777            # in another
+klein-bt                                          # robot on 127.0.0.1:1667
+klein-bt --robot-host 10.0.0.5 --robot-port 1667  # robot somewhere else
+klein-bt --port 8080 --no-browser                 # don't open a browser
 ```
 
-It carries two quite different trees and can swap between them mid-run,
-publishing a fresh tree UUID each time exactly as a robot loading a new tree
-does — so the automatic reload can be watched without a robot either:
+| Flag           | Default     | Meaning                              |
+| -------------- | ----------- | ------------------------------------ |
+| `--robot-host` | `127.0.0.1` | IP address of the robot              |
+| `--robot-port` | `1667`      | Groot2 publisher port on the robot   |
+| `--port`       | `8080`      | port the dashboard is served on      |
+| `--no-browser` | off         | don't open the browser automatically |
+
+klein opens `http://localhost:8080` for you. You can start it before the robot
+is up; it keeps retrying until the robot appears.
+
+## Using the dashboard
+
+- Node colours show status: green is SUCCESS, pulsing amber is RUNNING, red is
+  FAILURE, grey is IDLE.
+- Scroll to zoom and drag to pan. Click a node to fold or unfold its children.
+- Press `R` to see the whole tree again, or `F` to jump to whatever is running.
+- Hover a node to see its ports.
+- **Layout** switches between a vertical and a horizontal tree.
+- The **Blackboards** list shows every subtree's values. Click a row to expand
+  it, or hover a board to find its node in the tree. See
+  [docs/blackboards.md](docs/blackboards.md) for how values are shown.
+- Hide the side panel with `«` if you want more room.
+
+If the robot loads a different tree, the dashboard switches to it by itself.
+
+## Set up your robot
+
+klein talks to the Groot2 publisher that comes with BehaviorTree.CPP v4. If
+Groot2 can connect to your robot, klein can too. If not, add a publisher after
+you create the tree:
+
+```cpp
+#include "behaviortree_cpp/loggers/groot2_publisher.h"
+
+auto tree = factory.createTreeFromFile("my_tree.xml");
+BT::Groot2Publisher publisher(tree, 1667);
+```
+
+The publisher also uses the next port up (1668), so leave that one free.
+
+## Try it without a robot
 
 ```bash
-klein-bt-mock --port 1777 --switch-every 200   # swap trees roughly every 20s
-klein-bt-mock --port 1777 --tree patrol        # or just publish the other one
+klein-bt-mock --port 1777        # in one terminal
+klein-bt --robot-port 1777       # in another
 ```
 
-Run the unit tests (no extra dependencies — stdlib `unittest`):
+Add `--switch-every 200` to the mock to make it swap between two trees every
+20 seconds or so.
 
-```bash
-python -m unittest discover -s tests -t .
-```
+## Docs
+
+- [docs/blackboards.md](docs/blackboards.md): reading blackboard values, and
+  adding a renderer for your own message types.
+- [docs/architecture.md](docs/architecture.md): how klein works inside, and how
+  to run the tests.
+- [docs/protocol.md](docs/protocol.md): the Groot2 wire protocol klein speaks.
 
 ## License
 
-klein is released under the MIT License — see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE). The dashboard includes [D3.js](https://d3js.org)
+v7 (ISC License, © Mike Bostock).
 
-The dashboard bundles [D3.js](https://d3js.org) v7 (ISC License, © Mike
-Bostock), served locally so it works on air-gapped networks.
-
-## Disclaimer
-
-klein is an independent tool. It is not affiliated with, endorsed by, or
-sponsored by the BehaviorTree.CPP project or the authors of Groot / Groot2.
-"BehaviorTree.CPP", "Groot", and "Groot2" are the property of their respective
-owners. klein interoperates over the Groot2 publisher wire protocol that is part
-of the open-source, MIT-licensed BehaviorTree.CPP library; it contains no code
-copied from those projects.
+klein is an independent project, not affiliated with or endorsed by
+BehaviorTree.CPP or Groot. "BehaviorTree.CPP", "Groot" and "Groot2" belong to
+their respective owners.

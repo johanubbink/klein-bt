@@ -1,8 +1,8 @@
 # Architecture
 
-klein is a gateway: it translates between the robot's ZeroMQ request/reply
-world and the browser's push world, and serves the dashboard that consumes the
-result.
+klein is a gateway. It polls the robot over ZeroMQ, turns the replies into
+JSON, and pushes them to the browser over a WebSocket. It also serves the
+dashboard itself.
 
 ```
    robot (BT.CPP)          klein gateway              browser (D3.js)
@@ -11,242 +11,158 @@ result.
                             serve dashboard ──HTTP GET──>   (HTTP + WebSocket)
 ```
 
-Three pieces, one per column:
+The code is in three places:
 
-- [`klein/groot2_protocol.py`](../klein/groot2_protocol.py) — the wire-protocol
-  constants and status decoding, shared by the gateway (decode) and the mock
-  robot (encode) so the halves cannot drift. The protocol itself is documented
-  in [protocol.md](protocol.md).
-- [`klein/gateway.py`](../klein/gateway.py) — the asyncio process everything
-  runs in: ZMQ client, pollers, HTTP + WebSocket server.
-- [`klein/static/`](../klein/static/) — the dashboard: `index.html`,
-  `app.js` (state, WebSocket, layout), `renderers.js` (blackboard value
-  renderers), and a vendored D3.js so air-gapped robot networks need no
-  internet.
+- [`klein/groot2_protocol.py`](../klein/groot2_protocol.py): protocol constants
+  and status decoding. The gateway decodes with it and the mock robot encodes
+  with it. The protocol is described in [protocol.md](protocol.md).
+- [`klein/gateway.py`](../klein/gateway.py): the asyncio process. It holds the
+  ZeroMQ client, the pollers and the HTTP + WebSocket server.
+- [`klein/static/`](../klein/static/): the dashboard. `app.js` handles state,
+  the WebSocket and layout, `renderers.js` formats blackboard values, and D3 is
+  vendored so it works without internet.
 
-## Robot side: one REQ socket, two pollers
+## Robot side: one socket, two pollers
 
-The gateway holds a single ZeroMQ REQ socket to the robot's REP port. REQ/REP
-is strictly send-then-receive, so all requests are serialized through one
-`asyncio.Lock`; a request that times out leaves the socket stuck in the wrong
-half of its state machine, so the socket is thrown away and recreated rather
-than reused.
+The gateway keeps one ZeroMQ REQ socket to the robot. REQ/REP is strictly
+send-then-receive, so every request goes through one `asyncio.Lock`. If a
+request times out, the socket is stuck mid-exchange, so klein throws it away
+and opens a new one.
 
-On startup the gateway performs the FULLTREE handshake, retrying with backoff
-forever — klein may legitimately start before the robot, and the dashboard
-should come alive the moment the robot appears. It runs again whenever the
-robot's tree changes (below). Each handshake parses the XML into an unrolled
-tree and replaces the single cached JSON frame that every connecting client
-receives verbatim.
+At startup the gateway sends a FULLTREE request, retrying with backoff until the
+robot answers. It parses the XML into one unrolled tree and caches the result as
+a JSON frame that every new dashboard gets.
 
 Two pollers then share the socket:
 
-- **status** at 10 Hz — the packed status records, decoded and broadcast as
-  `{uid: {status, from}}`.
-- **blackboard** at 2 Hz — one dump of every subtree's board per request;
-  values change slower than status, and the msgpack payload is the heavier of
-  the two.
+- **status** at 10 Hz: the packed status records, sent on as `{uid: {status, from}}`.
+- **blackboard** at 2 Hz: a dump of every subtree's board. Values change more
+  slowly than status, and the payload is bigger.
 
-Both pollers idle when no dashboard is connected, so an unattended klein costs
-the robot nothing. Robot reachability is owned by the status poller alone (a
-second reporter on a different cadence would make the indicator flap) and is
-pushed to dashboards only on change.
+Both pollers pause when no dashboard is connected, so an idle klein puts no
+load on the robot. Only the status poller decides whether the robot is
+reachable, and that state is pushed to dashboards only when it changes.
 
 ## Tree swaps
 
-A robot can load a different behaviour tree while klein is watching. Nothing in
-the status stream says so — the UIDs simply start meaning other nodes — so
-without detection the dashboard paints the new tree's telemetry onto the old
-tree's cards.
+A robot can load a new tree while klein is watching. The status stream doesn't
+say so; the UIDs just start pointing at different nodes. So the status poller
+re-runs FULLTREE when either of these happens:
 
-The status poller re-runs the FULLTREE handshake on two triggers, and discards
-the status buffer that raised either — its UIDs may index a tree the dashboard
-has not been sent, so broadcasting it would land them on the previous tree's
-cards. When the handshake returns a tree that really is different, the new layout
-goes out followed by a one-off `notice` frame.
+1. The tree UUID in a reply differs from the loaded one. A new UUID means a new
+   tree (see [protocol.md](protocol.md#the-tree-uuid)).
+2. Telemetry comes back after an outage. Restarting the robot on the same port
+   is the usual way a tree changes, and this catches it even if a publisher
+   reuses its UUID. ZeroMQ reconnects silently, so the outage only shows up as a
+   timed-out poll.
 
-1. **The reply's tree UUID no longer matches the loaded layout.** A new UUID
-   means a new tree (see [protocol.md](protocol.md#the-tree-uuid)).
-2. **Telemetry resumed after an outage.** Stopping a robot and starting another
-   on the same port is the ordinary way a tree changes, and it is what the first
-   trigger would miss if a publisher failed to draw a fresh UUID per process.
-   klein does not stake the dashboard's correctness on that: an outage is
-   evidence it owns, so it re-handshakes on that too. (A ZeroMQ `REQ` socket
-   reconnects by itself, so the outage is visible only as a timed-out poll —
-   which is exactly what this trigger watches for.)
+The status buffer that triggered the check is dropped, since its UIDs may
+belong to a tree the dashboard doesn't have yet. If the new tree really is
+different, klein sends the new layout and a short `notice`.
 
-The second trigger is affordable only because of the third rule below: a
-reconnect to an unchanged tree costs one FULLTREE and changes nothing on screen.
+Rules that keep this safe:
 
-Three rules make that safe:
-
-- **Only a successful FULLTREE reply records the UUID**, taken from the reply
-  that carried the XML; the comparison never records. A failed re-handshake
-  therefore keeps mismatching instead of leaving the gateway believing a tree it
-  never loaded.
-- **The status poller alone detects**, for the same single-owner reason as
-  reachability, and because one owner means two handshakes cannot overlap. The
-  blackboard poller has a different hazard — the board *names* it asked for go
-  stale, which no UUID check would catch — so it captures the layout generation
-  before its request and drops a reply that arrives after a swap.
-- **An unchanged tree is absorbed quietly.** Both triggers fire on a plain
-  restart, and the UUID identifies the publisher rather than the tree's content,
-  so "changed" is over-reported by design. The gateway compares the XML it gets
-  back and keeps the layout when it is identical, rather than flashing the canvas
-  through a rebuild of the same picture. That is what makes it safe to
-  re-handshake on weak evidence.
+- Only a successful FULLTREE reply updates the stored UUID. If a re-handshake
+  fails, the next poll still mismatches and tries again.
+- Only the status poller triggers a re-handshake, so two can't overlap. The
+  blackboard poller notes the layout generation before each request and drops
+  any reply that lands after a swap.
+- If the XML is unchanged (a plain restart), klein keeps the current layout and
+  the canvas doesn't flash.
 
 ## Subtree unrolling
 
-FULLTREE returns one `<BehaviorTree>` block per subtree definition. The
-gateway stitches `<SubTree>` references in place — the reference node keeps its
-own UID and gains the referenced block as its child — so the dashboard renders
-one seamless tree and *every* UID in a STATUS packet, reference and inner nodes
-alike, lands on a visible node. A guard set prevents cyclic references from
-recursing forever.
+FULLTREE returns one `<BehaviorTree>` block per subtree definition. The gateway
+puts each block in place of the `<SubTree>` node that references it. The
+reference keeps its own UID and gets the block as its child, so every UID in a
+STATUS reply maps to a node on screen. Cyclic references are guarded against.
 
-Every node carries its **ports** through to the dashboard: the attributes the
-tree author wrote in the XML, minus the structural ones klein renders or wires
-up itself (`name`, `ID`, `_uid`, `_fullpath`). BehaviorTree.CPP's scripting
-hooks (`_skipIf`, `_while`, `_onSuccess`, …) are the author's too, so they are
-kept. Ports are fixed for the life of a tree, so they ride in the cached layout
-frame rather than being polled.
+Each node carries its ports: the XML attributes the author wrote, minus `name`,
+`ID`, `_uid` and `_fullpath`. Scripting hooks like `_skipIf` and `_onSuccess`
+are kept. Ports don't change during a tree's life, so they're sent with the
+layout and not polled.
 
-Each subtree instance owns a blackboard, registered under the instance path
-that BehaviorTree.CPP stamps as `_fullpath` (the root registers under its tree
-ID). The gateway collects these names in tree order at handshake time; that
-order restores meaning to the robot's unordered reply, and each board is
-attached to the subtree node that owns it so the panel and the canvas stay
-linked. It is the reply's guest list too — a board klein did not ask for is
-dropped, because it owns no node on the canvas and so can only be shown adrift
-(some publishers append the root board to every subtree dump; see
+Each subtree instance owns a blackboard, registered under its `_fullpath` (the
+root uses its tree ID). The gateway collects these names in tree order during
+the handshake and uses that order to sort the robot's unordered reply. Boards
+klein didn't ask for are dropped, because they have no node to attach to (see
 [protocol.md](protocol.md#blackboard-b)).
 
-Each node's `id` carries a per-handshake generation counter, so the ids of two
-different trees are disjoint. The dashboard keys its d3 join on that id, and a
-card's contents are written when it enters; without the generation, ids
-restarting at 1 per tree would match a new tree's nodes onto the old tree's
-cards and leave them showing the previous tree's labels. A *reconnect* replays
-the cached layout with the same ids, so d3 still matches there and nothing
-needlessly re-enters.
+Node `id`s include a per-handshake generation counter, so two different trees
+never share ids. The dashboard's D3 join is keyed on `id`, so without this a
+new tree's nodes could reuse the old tree's cards and labels. A reconnect
+replays the cached layout with the same ids, so nothing is redrawn.
 
 ## Node categories
 
-Every node in the layout carries a `category` — `Control`, `Decorator`,
-`Condition`, `Action` or `SubTree` — alongside the `type` it already carried
-(the registration name the tree author wrote). `type` says *which* node this is;
-`category` says *what kind*, which is what the dashboard styles on, so a reader
-can follow a tree's control flow without knowing the robot's node library.
+Each node has a `type` (its registration name, like `OpenDoor`) and a
+`category` (`Control`, `Decorator`, `Condition`, `Action` or `SubTree`). The
+dashboard styles on `category`.
 
-The categories are not klein's opinion. A FULLTREE reply's `<TreeNodesModel>`
-section is written by the robot from its own registry: each entry's tag is the
-category, its `ID` is the registration name. The gateway builds that
-`{name -> category}` map once per handshake, before unrolling, and stamps each
-node as it goes. When the robot is too old to send the section, klein falls back
-to the nodes BehaviorTree.CPP registers on itself — that alone gets every
-builtin Control and Decorator right — and labels anything left `Undefined`
-rather than guessing from the tree's shape. Inference would be wrong exactly
-where it matters: a `Sequence` with one child is not a decorator, and a
-childless node is as likely a Condition as an Action.
+Categories come from the robot's own `<TreeNodesModel>` section, read once per
+handshake. If a robot is too old to send it, klein falls back to BT.CPP's
+builtin node list and marks anything else `Undefined`. It never guesses from the
+tree's shape. Details are in [protocol.md](protocol.md#node-categories).
 
-Nothing else about a node moved. `is_subtree_root` still marks the expansion
-boundary, and how deep a node sits inside nested subtrees stays a browser-side
-derivation from the hierarchy the canvas already walks — the gateway would only
-be duplicating a number, and would get it wrong for a collapsed subtree.
+## Browser side: one port
 
-## Browser side: one port for everything
+One `websockets` server owns `--port`. It serves the static files over HTTP
+(`/`, `/styles.css`, `/app.js`, `/renderers.js`, `/d3.v7.min.js`) and upgrades
+`/ws` to a WebSocket. Because both come from the same origin, the page just
+opens `ws://<same host:port>/ws`.
 
-A single `websockets` server owns `--port`. Its `process_request` hook serves
-the static dashboard over plain HTTP (`/`, `/styles.css`, `/app.js`,
-`/renderers.js`, `/d3.v7.min.js`) and lets `/ws` upgrade to a WebSocket.
-Serving both from one origin means the page just opens
-`ws://<same-host:port>/ws` — no second port to configure, inject, or firewall.
+Dashboards only receive. On connect, a dashboard gets the cached layout, the
+last blackboard frame and the robot's reachability, then the live stream.
 
-Clients are receive-only. On connect a dashboard is immediately sent the
-cached layout, the last blackboard frame (so it needn't wait half a second for
-values), and the current robot reachability; after that it receives the
-broadcast stream. Frame types on the wire:
-
-| type | cadence | content |
+| type | when | content |
 | --- | --- | --- |
 | `layout` | on connect / re-handshake | the unrolled tree |
 | `status` | 10 Hz | `{uid: {status, from}}` |
 | `blackboard` | 2 Hz | `{board: {key: value}}`, tree order |
 | `robot` | on change | `{connected, detail}` |
-| `notice` | on a tree swap | `{text}` — transient |
+| `notice` | on a tree swap | `{text}` |
 
-Every frame but `notice` is cached, which is what lets a connecting dashboard be
-brought up to date in one go. A notice reports something that just happened on
-screen, so it is never cached and never replayed — a client connecting a minute
-later did not witness the reload.
+Every frame type except `notice` is cached for new clients. A notice is about
+something that just happened, so a late client doesn't get it.
 
-A node card encodes three separate questions on three separate channels, so no
-two can be confused for each other:
+A node card shows each piece of information in its own place:
 
-| question | channel | fed by |
+| question | shown by | from |
 | --- | --- | --- |
-| what is it doing? | colour of the card outline and the status pill | `status` frames |
-| is that still true? | a RUNNING card pulses only while telemetry is arriving | `robot` frames |
-| what region is it in? | a pink ring around the card, and a fill one step lighter and pinker per nesting level | `is_subtree_root`, walked in the browser |
-| what kind of node is it? | a glyph before the card's label, tinted per category | `category` |
+| what is it doing? | outline colour and status pill | `status` |
+| is that still live? | RUNNING cards pulse only while telemetry arrives | `robot` |
+| which subtree is it in? | a pink ring, and a fill that gets lighter and pinker per nesting level | `is_subtree_root` |
+| what kind of node is it? | a tinted glyph before the label | `category` |
 
-The pulse is the one cue that makes a claim about *now* rather than about the
-last frame, so it is the one that has to stop when the robot or the gateway goes
-unreachable — a tree still pulsing over a dead connection is the most convincing
-thing on the canvas and the only untrue one. The colours stay, because the last
-known state is worth reading; only the motion goes.
-
-A card shows its type once, not twice. BehaviorTree.CPP writes `name="Inverter"`
-on an `<Inverter>` the author never named, so klein prints the type as the card's
-primary label in that case and drops the small caption above it; only a name that
-says something the type does not — `tryOpen` on a `Fallback` — gets both rows.
-
-Colour is the *secondary* cue for type: the glyph and the registration name
-carry the meaning on their own, so the card still reads under any colour vision
-deficiency.
-
-Subtree membership is marked three ways at once, because it is the question the
-canvas gets asked most. Each step of the fill is both lighter and tinted further
-toward the subtree's own pink: the lightness is what survives a colour vision
-deficiency, the hue is what makes the region obvious to everyone else, and a
-whole-card tint is the only cue still legible when the tree is zoomed out far
-enough that the captions are gone. On top of that, every card in a region wears
-a pink ring. The ring is its own element drawn outside the card, deliberately
-not the card's own border — that border is the status channel, so a node inside
-a subtree still shows whether it succeeded or failed.
+When the robot is unreachable, the pulse stops but the colours stay, so you can
+still read the last known state. Type is shown by glyph and name as well as
+colour, so cards read fine with colour vision deficiency. If a node's name is
+just its type (BT.CPP writes `name="Inverter"` on an unnamed `<Inverter>`), the
+card shows it once.
 
 ## The camera
 
-Two keys, because there are only two questions the camera is ever asked.
-<kbd>R</kbd> re-centres the whole tree. <kbd>F</kbd> goes to the action, which
-klein defines as the **running frontier**: every RUNNING node with no RUNNING
-node beneath it. A `Sequence` is RUNNING for as long as the child it waits on
-is, so the entire spine from the root down reads RUNNING and only the leaves
-answer "what is the robot doing?" — and a `Parallel` puts several nodes there at
-once, which is why the frontier is a set and <kbd>F</kbd> frames all of it
-rather than picking a winner.
+`R` fits the whole tree. `F` frames the running frontier: every RUNNING node
+with no RUNNING node below it. Parents like `Sequence` are RUNNING whenever a
+child is, so only the frontier tells you what the robot is actually doing. A
+`Parallel` can have several, so `F` frames all of them.
 
-The frontier is computed from the last `status` frame against the *hierarchy*,
-not against the canvas. The per-node status cache that `applyStatus` keeps to
-skip redundant DOM writes is a cache of what is drawn, and a collapsed subtree
-has no cards at all — so it knows nothing about exactly the nodes a reader who
-folded the tree down has lost track of. The raw uid map covers the whole tree
-either way; `_children` is walked alongside `children` for the same reason.
+The frontier is computed from the last `status` frame over the full hierarchy
+(`children` and `_children`), so it still finds nodes inside collapsed subtrees.
+Framing only zooms out, never in. With nothing running, `F` does the same as `R`.
 
-Framing only ever zooms *out*. The reader's zoom level is theirs, a lone running
-leaf should not throw them to 3x, and holding the scale is what makes a second
-press a no-op instead of a lurch. An idle or finished tree has no frontier, so
-<kbd>F</kbd> falls back to <kbd>R</kbd>: with nothing running there is nothing
-truer to show than the whole tree.
-
-## Testing without a robot
+## Development
 
 [`klein/mock_robot.py`](../klein/mock_robot.py) (`klein-bt-mock`) is a fake
-publisher that encodes the same protocol module the gateway decodes, driving
-the full pipeline — handshake, unrolling, both pollers, renderers — with no
-C++ in the loop. It carries two quite different trees and can swap between them
-mid-run (`--switch-every`), publishing a fresh tree UUID each time exactly as a
-restarted publisher does, so the re-handshake above can be watched too.
+publisher built on the same protocol module. It runs the whole pipeline with no
+C++ involved. It has two different trees and can swap between them
+(`--switch-every`), drawing a fresh UUID each time, so you can test tree swaps.
 
-The unit tests under [`tests/`](../tests) cover the protocol encode/decode
-round-trip, the gateway's parsing, and the mock itself.
+Run the tests (stdlib only, no extra packages):
+
+```bash
+python -m unittest discover -s tests -t .
+```
+
+They cover the protocol encode/decode round trip, the gateway's parsing, and
+the mock.

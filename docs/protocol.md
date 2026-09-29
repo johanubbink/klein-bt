@@ -1,43 +1,35 @@
 # The Groot2 publisher wire protocol
 
-This documents the protocol klein speaks to a robot: the Groot2 publisher
-protocol that ships with **BehaviorTree.CPP v4** (`Groot2Publisher`). It is the
-same protocol the Groot2 editor uses. Everything here was verified against the
-BehaviorTree.CPP sources — file references point there — and klein's Python
-encoding of it lives in [`klein/groot2_protocol.py`](../klein/groot2_protocol.py).
+This is the protocol klein uses to talk to a robot. It's the Groot2 publisher
+protocol from BehaviorTree.CPP v4 (`Groot2Publisher`), the same one the Groot2
+editor uses. Everything here was checked against the BehaviorTree.CPP source.
+File references point there.
 
-## Transport and ports
+## Ports
 
-`Groot2Publisher` is constructed with a **single port** (default `1667`) and
-binds **two** ZeroMQ sockets (`src/loggers/groot2_publisher.cpp`):
+`Groot2Publisher` takes one port (default `1667`) and binds two ZeroMQ sockets
+(`src/loggers/groot2_publisher.cpp`):
 
 | socket | port | direction | purpose |
 | --- | --- | --- | --- |
 | `ZMQ_REP` | `port` | client asks, robot replies | everything: tree, status, blackboards, hooks |
-| `ZMQ_PUB` | `port + 1` | robot pushes | one message only: "breakpoint reached" |
+| `ZMQ_PUB` | `port + 1` | robot pushes | only "breakpoint reached" |
 
-The second port is always derived — it cannot be configured independently, and
-the port you pick must leave `port + 1` free (two publishers cannot sit on
-consecutive ports; Nav2 gives its two navigators 1667 and 1669 for exactly this
-reason). Groot2's UI likewise asks for a single port and connects its
-subscriber to `port + 1` silently.
+The second port is always `port + 1` and can't be set separately. That's why
+two publishers can't use neighbouring ports (Nav2 uses 1667 and 1669).
 
-klein connects only to the REP socket (`--robot-port`). The PUB socket carries
-nothing but breakpoint notifications for Groot2's interactive debugger, a
-feature klein does not implement, so klein never opens it. If you firewall for
-klein only, the one REP port suffices.
+klein only connects to the REP socket. The PUB socket is only for Groot2's
+breakpoint debugger, which klein doesn't implement. For a firewall, opening the
+REP port is enough.
 
-> **Old two-port configs.** Guides mentioning `groot_zmq_publisher_port` /
-> `groot_zmq_server_port` (often 5555/5556) describe the **old Groot v1**
-> protocol of BehaviorTree.CPP **v3**, whose `PublisherZMQ(tree,
-> max_msg_per_second, publisher_port = 1666, server_port = 1667)` really did
-> take two independent ports — a PUB stream of transitions plus a REP server
-> for the tree. That protocol is gone in v4; klein does not speak it.
+> Guides that mention `groot_zmq_publisher_port` / `groot_zmq_server_port`
+> (often 5555/5556) describe Groot v1 on BehaviorTree.CPP v3. That protocol was
+> removed in v4, and klein doesn't speak it.
 
 ## Request framing
 
-Requests are ZeroMQ multipart messages on the REQ socket. Frame 0 is a 6-byte
-header, little-endian `<BBI` (`groot2_protocol.h :: RequestHeader`):
+A request is a ZeroMQ multipart message. Frame 0 is a 6-byte little-endian
+`<BBI` header (`groot2_protocol.h :: RequestHeader`):
 
 | field | size | value |
 | --- | --- | --- |
@@ -45,72 +37,67 @@ header, little-endian `<BBI` (`groot2_protocol.h :: RequestHeader`):
 | `request_type` | u8 | an ASCII letter, see below |
 | `unique_id` | u32 | echo token chosen by the client |
 
-Some requests carry an argument as frame 1 (BLACKBOARD does; see below).
+Some requests put an argument in frame 1 (BLACKBOARD does).
 
-Replies are two frames. Frame 0 is a 22-byte reply header — the request's
-6-byte header echoed back, followed by a 16-byte tree UUID
-(`groot2_protocol.h :: ReplyHeader`). Frame 1 is the payload. On a malformed
-request the publisher replies `[b"error", <message>]` instead.
+A reply has two frames. Frame 0 is a 22-byte header: the 6-byte request header
+echoed back, then a 16-byte tree UUID (`groot2_protocol.h :: ReplyHeader`).
+Frame 1 is the payload. A malformed request gets `[b"error", <message>]`.
 
 #### The tree UUID
 
-The UUID is raw bytes, not a hex string — `SerializeHeader` memcpys the array
-in. `Groot2Publisher` draws it once, at the top of `serverLoop()`
-(`src/loggers/groot2_publisher.cpp`), and stamps that same value on every reply
-it sends; the tree XML is snapshotted in the publisher's *constructor*. A
-published tree therefore cannot outlive its UUID: **a different UUID means a
-different publisher, and so a different tree**. It is the only signal a
-request/reply client gets that the robot swapped trees underneath it — a ZeroMQ
-`REQ` socket reconnects by itself, so a robot restarting on the same port need
-not even cause a timeout.
+The UUID is 16 raw bytes, not a hex string. `Groot2Publisher` draws it once at
+the start of `serverLoop()` and puts it on every reply. The tree XML is captured
+in the constructor, so a different UUID means a different publisher, and so a
+different tree. It's the only sign a client gets that the tree changed. A
+ZeroMQ `REQ` socket reconnects by itself, so a robot restart may not even cause
+a timeout.
 
-Two caveats for a client acting on it. The UUID identifies the *publisher*, not
-the tree's content, so a robot restarted on an unchanged tree also reports a
-change. And it is stable for that publisher's whole life, so it says a tree
-differs, never how. What klein does with it is in
-[architecture.md](architecture.md#tree-swaps).
+Two things to keep in mind:
+
+- The UUID identifies the publisher, not the tree's content. Restarting a robot
+  on the same tree also changes it.
+- It tells you the tree is different, not what changed.
+
+What klein does with it is in [architecture.md](architecture.md#tree-swaps).
 
 ## Request types
 
-The full vocabulary, from `groot2_protocol.h :: RequestType`:
+From `groot2_protocol.h :: RequestType`:
 
-| type | letter | payload of the reply | klein |
+| type | letter | reply payload | used by klein |
 | --- | --- | --- | --- |
-| FULLTREE | `T` | tree XML (UTF-8) | ✅ on connect, and again whenever the tree UUID changes |
-| STATUS | `S` | packed status records | ✅ polled at 10 Hz |
-| BLACKBOARD | `B` | msgpack board dump | ✅ polled at 2 Hz |
+| FULLTREE | `T` | tree XML (UTF-8) | ✅ on connect and on tree change |
+| STATUS | `S` | packed status records | ✅ every 100 ms (10 Hz) |
+| BLACKBOARD | `B` | msgpack board dump | ✅ every 500 ms (2 Hz) |
 | HOOK_INSERT / HOOK_REMOVE | `I` / `R` | — | ✖ breakpoint debugging |
 | BREAKPOINT_UNLOCK | `U` | — | ✖ breakpoint debugging |
 | HOOKS_DUMP / REMOVE_ALL_HOOKS / DISABLE_ALL_HOOKS | `D` / `A` / `X` | — | ✖ breakpoint debugging |
 | TOGGLE_RECORDING / GET_TRANSITIONS | `r` / `t` | — | ✖ transition recording |
 | BREAKPOINT_REACHED | `N` | *pushed on the PUB socket* | ✖ |
 
-Because the protocol is strict request/reply, there is no telemetry a passive
-client can miss by not subscribing: the hooks and recording requests are
-Groot2's interactive debugging features, not extra data.
+The unused requests are Groot2's debugging features. They don't carry extra
+data a client would miss.
 
 ### FULLTREE (`T`)
 
-Returns the composed tree as XML. Relevant structure:
+Returns the full tree as XML:
 
-- One `<BehaviorTree ID="...">` block per (sub)tree definition; the root
-  `<root>` element may carry `main_tree_to_execute`, otherwise the first block
-  is the entry point.
-- Every node element carries `_uid` — the runtime UID that keys the STATUS
-  records. `ID` on a `<SubTree>` is the referenced tree's *name*, not a UID.
-- `<BehaviorTree>` blocks and `<SubTree>` references carry `_fullpath`, the
-  subtree *instance* path — this is the name its blackboard registers under
-  (the root's `_fullpath` is empty; its board registers under the tree ID).
-- A `<TreeNodesModel>` section declares the node types. Its entries are
-  **models, not instances** — the `<SubTree>` entry there is a declaration, not
-  a subtree with a blackboard — so it must be skipped when walking the tree. It
-  is, however, the authoritative source for a node's **category**.
+- One `<BehaviorTree ID="...">` block per (sub)tree definition. The `<root>`
+  element may name `main_tree_to_execute`; otherwise the first block is the
+  entry point.
+- Every node has a `_uid`, the runtime ID used in STATUS records. On a
+  `<SubTree>`, `ID` is the name of the referenced tree, not a UID.
+- `<BehaviorTree>` blocks and `<SubTree>` references have `_fullpath`, the
+  subtree instance path. Its blackboard is registered under that name. The root's
+  `_fullpath` is empty, and its board uses the tree ID.
+- A `<TreeNodesModel>` section declares the node types. These are models, not
+  instances (its `<SubTree>` entry is not a real subtree), so skip it when
+  walking the tree. It is the source of each node's category.
 
 #### Node categories
 
-Each `<TreeNodesModel>` entry's element *tag* is the node's category and its
-`ID` attribute is the registration name — which is the same string instance
-elements use as *their* tag:
+In `<TreeNodesModel>`, each entry's tag is the category and its `ID` is the
+registration name. Instances use that registration name as their tag:
 
 ```xml
 <TreeNodesModel>
@@ -123,89 +110,67 @@ elements use as *their* tag:
 </TreeNodesModel>
 ```
 
-so `{ID -> tag}` is an exact registration-name-to-category lookup, with nothing
-inferred. `Groot2Publisher` builds its reply with
-`WriteTreeToXML(tree, /*add_metadata=*/true, /*add_builtin_models=*/true)`, so
-the section is always present and always covers the builtins.
+So `{ID -> tag}` maps a registration name to its category directly.
+`Groot2Publisher` always includes this section, builtins included
+(`WriteTreeToXML(tree, true, true)`).
 
-Categories are `basic_types.h :: NodeType`, spelled as `toStr<NodeType>()`
-writes them:
+Categories are `basic_types.h :: NodeType`:
 
 | tag | what it is |
 | --- | --- |
-| `Control` | many children; sequences, fallbacks, parallels, switches |
-| `Decorator` | exactly one child; retries, timeouts, inverters, preconditions |
-| `Condition` | a leaf that answers a question and never runs long |
+| `Control` | many children: sequences, fallbacks, parallels, switches |
+| `Decorator` | one child: retries, timeouts, inverters, preconditions |
+| `Condition` | a leaf that checks something and returns quickly |
 | `Action` | a leaf that does work |
 | `SubTree` | a reference to another `<BehaviorTree>` block |
 
-A publisher always writes an instance with its registration name as the tag
-(`<OpenDoor name="OpenDoor" _uid="9"/>`; a `<SubTree>` gets `ID` instead of
-`name`) — `addTreeToXML` in `src/xml_parsing.cpp` has no other branch. The
-explicit spelling that puts the category in the tag (`<Action ID="OpenDoor"/>`)
-is what the Groot2 *editor* saves to a file, not something FULLTREE returns;
-klein reads it anyway, so a hand-written or exported tree still categorises.
+FULLTREE always writes instances as `<OpenDoor name="OpenDoor" _uid="9"/>`
+(`addTreeToXML` in `src/xml_parsing.cpp`). The Groot2 editor saves files in the
+other style, `<Action ID="OpenDoor"/>`. klein reads both.
 
-A robot that predates the model section, or one whose reply omits an entry,
-leaves klein without an answer. It then falls back to the table of nodes
-BehaviorTree.CPP registers on itself (`src/bt_factory.cpp`) — which covers every
-builtin Control and Decorator, so the tree's control skeleton still reads
-correctly — and reports anything still unresolved as `Undefined`. Nothing is
-inferred from the tree's shape: a `Sequence` with one child is still a Control,
-and a childless node may be an Action or a Condition (BT.CPP's own CrossDoor
-example registers `SmashDoor` as a Condition and the equally childless
-`OpenDoor` as an Action).
+If the model section is missing or lacks an entry, klein falls back to the nodes
+BT.CPP registers itself (`src/bt_factory.cpp`). That covers every builtin
+Control and Decorator. Anything else is `Undefined`. klein doesn't guess from
+the tree's shape, because a leaf can be either an Action or a Condition.
 
 ### STATUS (`S`)
 
-The payload is a sequence of fixed 3-byte records, little-endian `<HB`:
-`node_uid` (u16) followed by a status byte. Status values come from
-`basic_types.h :: NodeStatus`:
+The payload is a list of 3-byte little-endian `<HB` records: `node_uid` (u16)
+then a status byte (`basic_types.h :: NodeStatus`):
 
 | value | meaning |
 | --- | --- |
 | 0–4 | IDLE, RUNNING, SUCCESS, FAILURE, SKIPPED |
-| ≥ 10 | node just became IDLE; it transitioned from status `value − 10` |
+| ≥ 10 | just became IDLE, coming from status `value − 10` |
 
-The `+10` encoding lets a poller that only sees snapshots still learn how a
-node's last activation ended.
+The `+10` form lets a poller see how a node's last run ended, even though it
+only sees snapshots.
 
 ### BLACKBOARD (`B`)
 
-The request carries frame 1: the board names to dump, joined with `;`
-(these are the `_fullpath` instance names from FULLTREE, or the tree ID for
-the root). The reply payload is msgpack: a map of
-`board name → {key → JSON-encoded value}`.
+Frame 1 of the request is the board names to dump, joined with `;`. These are
+the `_fullpath` names from FULLTREE, or the tree ID for the root. The reply is
+msgpack: `board name → {key → JSON-encoded value}`.
 
-Semantics to know:
+Things to know:
 
-- msgpack **nil** replaces the map when no requested name matched a live
-  subtree — and also stands in for a subtree whose every port is remapped to
-  its parent (it owns no storage of its own).
-- Keys starting with `_` are private by BehaviorTree.CPP's own convention:
-  autoremapping skips them, so a subtree keeps them to itself. klein drops
-  them rather than showing them as user values.
-- Values appear only for types with a registered JSON converter
-  (`BT::RegisterJsonDefinition<T>()`); a type without one is silently absent,
-  indistinguishable from "never written".
-- The robot walks an unordered map, so reply order is arbitrary.
-- **The reply may carry boards you did not ask for.** Upstream's
-  `generateBlackboardsDump` answers requested names only, but the protocol is
-  what robots actually send: a real BT.CPP robot was observed attaching the root
-  board to *every* subtree dump under the literal name `ROOT` — the same entries
-  it returns under the tree ID, so a client that lists whatever arrives shows the
-  mission's board twice. (Asking for `ROOT` by itself matches nothing, so it is
-  not a board name you can request.) klein keeps only the names it asked for;
-  see [architecture.md](architecture.md#subtree-unrolling).
+- The reply is msgpack nil if no requested name matched. Nil is also used for a
+  subtree whose ports are all remapped to its parent, because it stores nothing
+  itself.
+- Keys starting with `_` are private in BT.CPP. klein hides them.
+- Only types with a JSON converter (`BT::RegisterJsonDefinition<T>()`) show up.
+  A type without one is missing, which looks the same as never written.
+- Order is arbitrary, because the robot walks an unordered map.
+- The reply can include boards you didn't ask for. Real BT.CPP robots have been
+  seen adding the root board to every dump under the name `ROOT`, duplicating
+  the tree ID's entries. (Asking for `ROOT` directly matches nothing.) klein
+  keeps only the names it requested; see
+  [architecture.md](architecture.md#subtree-unrolling).
 
 ## Where the constants live
 
-klein encodes all of this once, in
-[`klein/groot2_protocol.py`](../klein/groot2_protocol.py) — the request framing,
-the reply header's size and tree-UUID offset (with `decode_tree_uuid` to read
-it), the `NodeStatus` decode rule, the `NodeType` category names and the
-builtin-category fallback table. The gateway decodes with it and the mock robot
-([`klein/mock_robot.py`](../klein/mock_robot.py)) encodes with it, so the two
-halves cannot drift. The C++ side is
+klein encodes all of this in
+[`klein/groot2_protocol.py`](../klein/groot2_protocol.py), used by both the
+gateway and the mock robot. On the C++ side, see
 `include/behaviortree_cpp/loggers/groot2_protocol.h` and
-`src/loggers/groot2_publisher.cpp` in BehaviorTree.CPP.
+`src/loggers/groot2_publisher.cpp`.

@@ -1,31 +1,27 @@
 # Blackboards
 
-A behavior tree's blackboard is where its state lives, so the dashboard shows
-every board the robot owns, refreshed at 2 Hz while the tree runs. This page is
-about reading them; how the values get there is in
-[architecture.md](architecture.md) and [protocol.md](protocol.md).
+The dashboard shows every blackboard the robot has, refreshed twice a second
+while the tree runs.
 
 ## The list
 
-The pane's **Blackboards** section lists every subtree's board. The list mirrors
-the tree: boards appear in tree order, nested ones indented under their parent,
-each named by its subtree and badged with that node's UID. The root board — the
-mission's own state — is expanded on load; the others open on click.
+The **Blackboards** section follows the tree. Boards appear in tree order,
+nested ones indented under their parent, each labelled with its subtree name
+and node UID. The root board opens on load; click the others to open them.
 
-Because each board is bound to a node, the panel and the canvas stay connected:
-hovering a board highlights its card in the tree, and clicking the `uid NN` badge
-flies the camera to it, reopening any subtree you had collapsed on the way.
+Hover a board to highlight its node in the tree. Click the `uid NN` badge to
+jump to it; any collapsed subtree on the way opens up.
 
-A row flashes amber when its value changes. Clicking a row unwraps a long value
-and, for a message klein has a renderer for, reveals a labelled breakdown of its
-fields. A subtree whose ports are all remapped to its parent owns no values; its
-row stays, dimmed, so the list still matches the tree.
+A row flashes amber when its value changes. Click a row to see a long value in
+full, or a field-by-field breakdown for message types klein knows. A subtree
+whose ports are all remapped to its parent has no values of its own; it stays
+in the list, dimmed.
 
 ## How values are shown
 
-Values arrive as BehaviorTree.CPP serializes them — bools as `0`/`1`, structs as
-JSON tagged with the registered type name — and klein renders the ones it
-recognizes as a single readable line:
+Values arrive the way BehaviorTree.CPP serializes them: bools as `0`/`1`,
+structs as JSON tagged with their type name. klein turns the ones it knows into
+one readable line:
 
 | blackboard value | shown as |
 | --- | --- |
@@ -36,21 +32,20 @@ recognizes as a single readable line:
 | a double carrying `DBL_MAX` | `∞ (DBL_MAX)` |
 | `1.2999999999999985` | `1.3` |
 
-Numbers are trimmed to six significant digits so float noise doesn't fill the
-row; hovering any value shows exactly what the robot sent. Very large values (a
-multi-hundred-pose path serializes to tens of kilobytes) are capped for display
-with their full size noted.
+Numbers are rounded to six significant digits. Hover a value to see exactly
+what the robot sent. Very large values, like a long path, are cut short for
+display, with the full size noted.
 
-An entry reads `(not shown)` when the robot sent no value for it — either nothing
-was ever written, or its type has no JSON converter (a ROS node handle, a TF
-buffer, a timeout). The protocol can't distinguish the two; registering a
-converter with `BT::RegisterJsonDefinition<T>()` makes such a value visible.
+`(not shown)` means the robot sent nothing for that entry. Either it was never
+written, or its type has no JSON converter (a ROS node handle, a TF buffer, and
+so on). klein can't tell which. To make a value show up, register a converter
+with `BT::RegisterJsonDefinition<T>()`.
 
 ## Adding a renderer
 
-Message types klein doesn't recognize still render — the type name with its
-scalar fields inline, expanding to pretty-printed JSON — but a type you look at
-often deserves better. Add one entry to `REGISTRY` in
-[`klein/static/renderers.js`](../klein/static/renderers.js), keyed on the
-`__type` string, returning `{summary, detail}`. Renderers are pure functions and
-compose, so a wrapper type can reuse the renderer for what it wraps.
+Types klein doesn't know still show up, as the type name with its simple fields
+inline, and expand to pretty-printed JSON. For a type you look at often, add an
+entry to `REGISTRY` in [`klein/static/renderers.js`](../klein/static/renderers.js),
+keyed on the `__type` string and returning `{summary, detail}`. Renderers are
+plain functions, so one can reuse another (a wrapper type can call the renderer
+for the type it wraps).

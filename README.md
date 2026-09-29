@@ -85,9 +85,16 @@ Add `--switch-every 200` to the mock to make it swap between two trees every
 
 ## License
 
-MIT, see [LICENSE](LICENSE). The dashboard includes [D3.js](https://d3js.org)
-v7 (ISC License, © Mike Bostock).
+klein is released under the MIT License — see [LICENSE](LICENSE).
 
-klein is an independent project, not affiliated with or endorsed by
-BehaviorTree.CPP or Groot. "BehaviorTree.CPP", "Groot" and "Groot2" belong to
-their respective owners.
+The dashboard bundles [D3.js](https://d3js.org) v7 (ISC License, © Mike
+Bostock), served locally so it works on air-gapped networks.
+
+## Disclaimer
+
+klein is an independent tool. It is not affiliated with, endorsed by, or
+sponsored by the BehaviorTree.CPP project or the authors of Groot / Groot2.
+"BehaviorTree.CPP", "Groot", and "Groot2" are the property of their respective
+owners. klein interoperates over the Groot2 publisher wire protocol that is part
+of the open-source, MIT-licensed BehaviorTree.CPP library; it contains no code
+copied from those projects.

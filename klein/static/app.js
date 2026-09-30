@@ -44,8 +44,11 @@ const uidX = nodeWidth / 2 - 55;
 const maxTypeChars = Math.floor((uidX - textX - 12) / (10 * 0.72));
 
 // The primary label shares its row with the status pill, and starts after the
-// glyph. 13px at ~0.51em an advance.
-const pillX = nodeWidth / 2 - 75;
+// glyph. 13px at ~0.51em an advance. The pill is sized for its longest label,
+// "was SUCCESS" (~70px in 10px bold), plus ~5px padding a side, and keeps its
+// right edge 10px in from the card's.
+const pillWidth = 80;
+const pillX = nodeWidth / 2 - 10 - pillWidth;
 const maxLabelChars = Math.floor((pillX - labelX - 8) / (13 * 0.51));
 
 // "vertical" is the standard BT convention: root at the top, children below,
@@ -288,7 +291,7 @@ function updateTreeLayout(sourceNode) {
         .attr("class", "status-pill")
         .attr("x", pillX)
         .attr("y", rowName - 12)
-        .attr("width", 65)
+        .attr("width", pillWidth)
         .attr("height", 16)
         .attr("rx", 3)
         .style("fill", "var(--color-IDLE)");
@@ -296,7 +299,7 @@ function updateTreeLayout(sourceNode) {
     // Status text
     nodeEnter.append("text")
         .attr("class", "node-status-text")
-        .attr("x", pillX + 33)          // centred on the 65px pill
+        .attr("x", pillX + pillWidth / 2)
         .attr("y", rowName)
         .attr("text-anchor", "middle")
         .text("IDLE");

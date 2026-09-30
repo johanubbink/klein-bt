@@ -17,6 +17,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   where it ended; only a tree that has not run since it loaded falls back to
   <kbd>R</kbd>.
 
+### Fixed
+- **"was SUCCESS" no longer spills out of its status pill.** The pill was 65px
+  wide and the label ~70px, so it ran past both edges; "was RUNNING" and
+  "was SKIPPED" did too, and "was FAILURE" fit with no room to spare. The pill
+  is now 80px, with its right edge where it was, so long node names truncate
+  about two characters sooner.
+
 ## [0.5.0] - 2026-09-18
 
 ### Added

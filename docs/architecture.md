@@ -149,7 +149,9 @@ child is, so only the frontier tells you what the robot is actually doing. A
 
 The frontier is computed from the last `status` frame over the full hierarchy
 (`children` and `_children`), so it still finds nodes inside collapsed subtrees.
-Framing only zooms out, never in. With nothing running, `F` does the same as `R`.
+Framing only zooms out, never in. With nothing running, `F` frames the frontier
+of the last frame that had one, so a finished tree shows where it ended. If
+nothing has run since the tree loaded, `F` does the same as `R`.
 
 ## Development
 

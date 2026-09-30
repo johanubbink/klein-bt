@@ -12,9 +12,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   them at once when a `Parallel` has several branches live, reopening any
   subtree they were folded inside, and pulsing the cards it lands on. It only
   ever zooms out, so a tree already in view stays where it is and a second press
-  does nothing. <kbd>R</kbd> re-centres the whole tree. An idle or finished tree
-  has no frontier, so <kbd>F</kbd> falls back to <kbd>R</kbd> rather than
-  guessing at where the action was.
+  does nothing. <kbd>R</kbd> re-centres the whole tree. Once the tree finishes,
+  <kbd>F</kbd> goes to the frontier of the last frame that had one, so you see
+  where it ended; only a tree that has not run since it loaded falls back to
+  <kbd>R</kbd>.
 
 ## [0.5.0] - 2026-09-18
 

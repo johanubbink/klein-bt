@@ -361,9 +361,15 @@ function diagonalCurve({ source, target }) {
 // for exactly the nodes runningFrontier() most needs. This map is by uid and so
 // covers the whole tree, folded away or not.
 let lastStatusMap = {};
+// The last frame in which anything was RUNNING. Once the tree finishes, this is
+// where the action last was, and so where F goes.
+let lastActiveStatusMap = {};
 
 function applyStatus(telemetryMap) {
     lastStatusMap = telemetryMap;
+    if (Object.values(telemetryMap).some(entry => entry.status === "RUNNING")) {
+        lastActiveStatusMap = telemetryMap;
+    }
     gContainer.selectAll("g.node").each(function(d) {
         if (d.data.uid == null) return;             // node has no UID to match
         const entry = telemetryMap[d.data.uid];     // { status, from }
@@ -772,11 +778,11 @@ function focusNode(node) {
 // Walked over the hierarchy, not the canvas: a collapsed subtree keeps its
 // children in _children and has no cards at all, and that is precisely where a
 // reader who folded the tree down has lost track of the action.
-function runningFrontier() {
+function runningFrontier(statusMap = lastStatusMap) {
     if (!rootNodeSnapshot) return [];
     const frontier = [];
     (function walk(node) {
-        const entry = lastStatusMap[node.data.uid];
+        const entry = statusMap[node.data.uid];
         const before = frontier.length;
         for (const child of node.children || node._children || []) walk(child);
         // Nothing below it is running, so this node is where the tick stops.
@@ -829,11 +835,13 @@ function frameNodes(nodes) {
     );
 }
 
-// Take the camera to whatever the robot is doing right now. An idle or finished
-// tree has no frontier, so there is nothing truer to show than the whole tree.
+// Take the camera to whatever the robot is doing right now. A finished tree has
+// no frontier, so go to where it last had one; a tree that has never run has
+// nothing truer to show than the whole tree.
 function focusAction() {
     if (!rootNodeSnapshot) return;
-    const frontier = runningFrontier();
+    let frontier = runningFrontier();
+    if (!frontier.length) frontier = runningFrontier(lastActiveStatusMap);
     if (!frontier.length) {
         resetCamera();
         return;
@@ -1001,6 +1009,7 @@ function connectGatewayPipeline() {
 
             bbBoardList = collectBoards(rootNodeSnapshot);
             lastStatusMap = {};      // its uids indexed the tree we just dropped
+            lastActiveStatusMap = {};
             resetBlackboards();
             updateTreeLayout(rootNodeSnapshot);
             resetCamera();

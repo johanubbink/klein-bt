@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-03
+
 ### Added
 - **klein records every transition**, not just 10 Hz snapshots, so a retry
   that takes 60 µs still shows. It keeps the last 10 minutes in memory,
@@ -146,7 +148,8 @@ Initial release.
   and the WebSocket.
 - `klein-bt-mock`: a fake Groot2 publisher for running without a robot.
 
-[Unreleased]: https://github.com/johanubbink/klein-bt/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/johanubbink/klein-bt/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/johanubbink/klein-bt/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/johanubbink/klein-bt/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/johanubbink/klein-bt/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/johanubbink/klein-bt/compare/v0.2.0...v0.3.0

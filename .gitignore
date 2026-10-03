@@ -31,3 +31,10 @@ htmlcov/
 *.swp
 *~
 .DS_Store
+
+# Verification harness: compiled t11 and UI screenshots
+tests/harness/.build/
+tests/ui/artifacts/
+
+# Claude Code: agent worktrees and local settings
+.claude/

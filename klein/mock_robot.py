@@ -1,7 +1,7 @@
 """mock_robot.py — a fake BehaviorTree.CPP Groot2 publisher for testing klein.
 
-Implements just enough of that wire protocol (FULLTREE + STATUS + BLACKBOARD
-over a ZeroMQ REP socket) to drive the klein dashboard with no real robot. It
+Implements just enough of that wire protocol (FULLTREE + STATUS + BLACKBOARD,
+plus TOGGLE_RECORDING + GET_TRANSITIONS, over a ZeroMQ REP socket) to drive the klein dashboard with no real robot. It
 replays the *CrossDoor* mission from BehaviorTree.CPP's
 ``examples/t11_groot_howto.cpp`` — the canonical tutorial — so the dashboard
 shows the same tree a real robot running that example would publish.
@@ -18,6 +18,9 @@ Usage:
     klein-bt-mock --port 1777           # use another port (e.g. real robot on 1667)
     klein-bt-mock --tree patrol         # publish the other tree instead
     klein-bt-mock --switch-every 200    # swap trees every 200 status polls (~20s)
+    klein-bt-mock --log-requests        # print which requests a client sends, per second
+    klein-bt-mock --truth-log t.log     # write every transition it makes (test ground truth)
+    klein-bt-mock --replay run.btlog    # publish a recorded .btlog, in real time, looping
     python -m klein.mock_robot          # equivalent, without the console script
 
 Then, in another shell:
@@ -29,21 +32,30 @@ import math
 import os
 import struct
 import sys
+import time
+import xml.etree.ElementTree as ET
 
 import msgpack
 import zmq
 
+from .btlog import read_btlog
 from .groot2_protocol import (
     HEADER_FORMAT,
     IDLE_TRANSITION,
     PROTOCOL_ID,
     REQ_BLACKBOARD,
     REQ_FULLTREE,
+    REQ_GET_TRANSITIONS,
     REQ_STATUS,
+    REQ_TOGGLE_RECORDING,
+    RECORDING_START,
+    RECORDING_STOP,
     REQUEST_HEADER_SIZE,
     STATUS_RECORD_FORMAT,
+    TRANSITION_BUFFER_MAX,
     TREE_UUID_SIZE,
     NodeStatus,
+    encode_transition,
 )
 
 # The CrossDoor tree from examples/t11_groot_howto.cpp, with the integer _uid
@@ -138,19 +150,19 @@ IDLE = NodeStatus.IDLE
 RUNNING = NodeStatus.RUNNING
 SUCCESS = NodeStatus.SUCCESS
 FAILURE = NodeStatus.FAILURE
-WAS_SUCCESS = IDLE_TRANSITION + NodeStatus.SUCCESS   # 12: "now IDLE, previously SUCCESS"
-WAS_FAILURE = IDLE_TRANSITION + NodeStatus.FAILURE   # 13: "now IDLE, previously FAILURE"
 
 
 def _build_crossdoor_timeline():
     """Build the mission as ``(duration_ticks, {uid: status}, {bb_key: value})``.
 
-    Nodes absent from a frame are IDLE. This mirrors the deterministic CrossDoor
+    Frames hold live statuses only; nodes absent from a frame are IDLE. The
+    "was …" bytes STATUS reports are derived from the frame-to-frame transitions
+    (see ``build_status_buffer``), never written here. This mirrors the deterministic CrossDoor
     run: the door starts closed and locked, so OpenDoor fails, PickLock retries
     (failing four times, cracking it on the fifth), and the robot then passes
     through. Completed nodes keep their SUCCESS/FAILURE color — a non-reactive
     Sequence/Fallback holds a finished child's result — so a colored trail grows
-    as the mission advances; a final reset flips everything to "was …" and idle.
+    as the mission advances; a final reset drops everything back to IDLE.
 
     Each frame also carries the mission's blackboard values at that moment, so
     the values the dashboard shows stay in lockstep with the node colors rather
@@ -202,11 +214,10 @@ def _build_crossdoor_timeline():
 
     bb["mission_phase"] = "done"
     frames.append((15, dict(done), dict(bb)))   # hold the completed mission to be read
-    # Reset: the whole tree drops back to IDLE, each node flagged with its last result.
-    frames.append((6, {uid: (WAS_SUCCESS if st == SUCCESS else WAS_FAILURE)
-                        for uid, st in done.items()}, dict(bb)))
-    # Idle pause before the next lap: the tree is torn down, so the blackboard
-    # reverts to its initial state (the next lap's Script re-runs door_open:=false).
+    # Reset: the whole tree drops back to IDLE (STATUS shows each node's last result).
+    frames.append((6, {}, dict(bb)))
+    # Idle pause before the next lap: the blackboard reverts to its initial state
+    # (the next lap's Script re-runs door_open:=false).
     frames.append((12, {}, {"mission_phase": "idle", "door_open": 0,
                             "pick_attempts": 0, "lock_status": "locked"}))
     return frames
@@ -418,13 +429,13 @@ def _build_patrol_timeline():
         frames.append((2, checking, dict(bb)))
         frames.append((6, driving, dict(bb)))
         frames.append((3, dwelling, dict(bb)))
-    # The lap completes, then the whole tree drops back to IDLE flagged with its
-    # last result — the same "was …" reset CrossDoor ends on.
+    # The lap completes, then the whole tree drops back to IDLE — the same
+    # reset CrossDoor ends on.
     done = {uid: SUCCESS for uid in PATROL_UIDS}
     finished = {"patrol_leg": len(PATROL_WAYPOINTS), "next_waypoint": "dock",
                 "battery_pct": 95 - len(PATROL_WAYPOINTS) * 7}
     frames.append((6, done, dict(finished)))
-    frames.append((4, {uid: WAS_SUCCESS for uid in PATROL_UIDS}, dict(finished)))
+    frames.append((4, {}, dict(finished)))
     return frames
 
 
@@ -478,16 +489,32 @@ def _next_tree(tree):
     return order[(order.index(tree) + 1) % len(order)]
 
 
+_STATUS_TABLES = {}     # tree name -> STATUS buffer per tick, over two laps
+
+
 def build_status_buffer(tick, tree):
     """Return the 3-byte-per-node status buffer for the current tick.
 
-    Nodes not named in the current frame are reported IDLE.
+    Derived the way the robot derives it: start from an all-IDLE tree and apply
+    every frame-to-frame transition with the publisher's rule (IDLE after X is
+    stored as ``10 + X``), so "was …" is right for any timeline by construction.
+    From the second lap on the bytes repeat — every node that ever runs has run
+    once since — so two laps are computed once and reused.
     """
-    status, _bb = _frame_at(tick, tree)
-    buf = bytearray()
-    for uid in tree.uids:
-        buf += struct.pack(STATUS_RECORD_FORMAT, uid, status.get(uid, IDLE))
-    return bytes(buf)
+    table = _STATUS_TABLES.get(tree.name)
+    if table is None:
+        state, before, table = {uid: IDLE for uid in tree.uids}, {}, []
+        for t in range(2 * tree.cycle_ticks):
+            after = _frame_at(t, tree)[0]
+            for uid in tree.uids:
+                if before.get(uid, IDLE) != after.get(uid, IDLE):
+                    _apply_transition(state, uid, after.get(uid, IDLE))
+            table.append(b"".join(struct.pack(STATUS_RECORD_FORMAT, uid, state[uid])
+                                  for uid in tree.uids))
+            before = after
+        _STATUS_TABLES[tree.name] = table
+    cycle = tree.cycle_ticks
+    return table[tick if tick < 2 * cycle else cycle + (tick - cycle) % cycle]
 
 
 def build_blackboard_reply(request_frames, tick, tree):
@@ -502,6 +529,191 @@ def build_blackboard_reply(request_frames, tick, tree):
     boards = tree.blackboard(tick)
     payload = {name: boards[name] for name in names if name in boards}
     return msgpack.packb(payload or None, use_bin_type=True)
+
+
+def _live_status(value):
+    """A frame status as the publisher's callback sees it: the ``+10`` "was …"
+    form is a STATUS-buffer encoding, and on a transition it is plain IDLE."""
+    return IDLE if value >= IDLE_TRANSITION else value
+
+
+class TransitionRecorder:
+    """The publisher's transition recording (TOGGLE_RECORDING / GET_TRANSITIONS).
+
+    A real robot records a transition from its status-change callback; the mock
+    has no callback, so it diffs consecutive mission frames instead. Within one
+    step, finishing nodes are recorded deepest-first and starting nodes
+    root-first — the order a tick visits them — a few microseconds apart.
+
+    The mock's frames skip the IDLE a real node passes through between runs
+    (PickLock goes FAILURE -> RUNNING here, FAILURE -> IDLE -> RUNNING on a
+    robot), so it records fewer transitions than a robot would, never wrong ones.
+
+    Time is one wall-clock anchor read at construction and advanced by the
+    monotonic clock, so the ``start`` reply and every transition share a single
+    time base: ``start reply + offset`` is exactly the absolute time handed to
+    ``truth``. ``truth`` (``--truth-log``) is called with every transition,
+    recording or not — the mock's ground truth.
+    """
+    STEP_USEC = 5       # spacing between transitions recorded in one step
+
+    def __init__(self, clock=time.monotonic, wall_clock=time.time, truth=None):
+        self._clock = clock
+        self._anchor_mono = clock()
+        self._anchor_us = int(wall_clock() * 1_000_000)
+        self._truth = truth
+        self.recording = False
+        self._start_us = 0
+        self._buffer = collections.deque(maxlen=TRANSITION_BUFFER_MAX)
+
+    def now_us(self):
+        """Absolute wall-clock microseconds on the recorder's own time base."""
+        return self._anchor_us + int((self._clock() - self._anchor_mono) * 1_000_000)
+
+    def start(self):
+        """Begin recording; returns the wall-clock microseconds the reply carries."""
+        self.recording = True
+        self._start_us = self.now_us()
+        self._buffer.clear()
+        return self._start_us
+
+    def stop(self):
+        self.recording = False
+
+    def add(self, records):
+        """Take ``[(absolute_us, uid, status)]`` transitions, in order."""
+        if self._truth and records:
+            self._truth(records)
+        if self.recording:
+            for t_us, uid, status in records:
+                # A replayed transition can fall due between an advance() and
+                # the start it precedes; it belongs to no recording.
+                if t_us >= self._start_us:
+                    self._buffer.append((t_us - self._start_us, uid, status))
+
+    def record(self, before, after, uids):
+        """Record every node whose status differs between two ``{uid: status}`` frames."""
+        changed = [(uid, _live_status(after.get(uid, IDLE))) for uid in uids
+                   if _live_status(before.get(uid, IDLE)) != _live_status(after.get(uid, IDLE))]
+        ending = sorted((c for c in changed if c[1] != RUNNING), reverse=True)
+        starting = sorted(c for c in changed if c[1] == RUNNING)
+        now = self.now_us()
+        self.add([(now + i * self.STEP_USEC, uid, status)
+                  for i, (uid, status) in enumerate(ending + starting)])
+
+    def drain(self):
+        """The GET_TRANSITIONS payload; empties the buffer, like the publisher."""
+        payload = b"".join(encode_transition(*t) for t in self._buffer)
+        self._buffer.clear()
+        return payload
+
+
+def toggle_recording(request_frames, recorder):
+    """Apply a TOGGLE_RECORDING request; returns the reply payload frames.
+
+    Mirrors the publisher: a request without its argument frame is an error
+    (``None``), ``start`` replies with the wall-clock time as a decimal string,
+    and ``stop`` — or any other word — replies with the header alone.
+    """
+    if len(request_frames) != 2:
+        return None
+    cmd = request_frames[1].decode("utf-8", errors="replace")
+    if cmd == RECORDING_START:
+        return [str(recorder.start()).encode()]
+    if cmd == RECORDING_STOP:
+        recorder.stop()
+    return []
+
+
+def _apply_transition(state, uid, status):
+    """Update a STATUS-encoded ``{uid: byte}`` state the way the publisher's
+    callback does (groot2_publisher.cpp :: callback): a node going IDLE is
+    stored as ``IDLE_TRANSITION + previous live status``. Unlike
+    ``klein.recording.apply_transition``, an IDLE on an idle node still writes
+    ``10 + IDLE``, as the publisher does: the mock plays the robot."""
+    if status == IDLE:
+        state[uid] = IDLE_TRANSITION + _live_status(state.get(uid, IDLE))
+    else:
+        state[uid] = status
+
+
+class Replay:
+    """``--replay``: publish a recorded ``.btlog`` as if its tree were running now.
+
+    The file's transitions are re-emitted in order at their recorded times,
+    looping, each stamped on the recorder's clock. STATUS answers with the state they leave behind, so
+    ``S`` and ``t`` always agree. Time only advances when a request arrives —
+    ``advance()`` catches up — which is invisible from the client's side.
+    """
+    LOOP_GAP_USEC = 2_000_000   # t11_groot_howto sleeps 2 s between missions
+
+    def __init__(self, data, recorder):
+        log = read_btlog(data)
+        self.xml, self._records = log.xml, log.records
+        if not self._records:
+            raise ValueError("it holds no transitions")
+        self.uids = sorted({int(el.get("_uid")) for el in ET.fromstring(self.xml).iter()
+                            if el.get("_uid")})
+        self._recorder = recorder
+        self.t0 = recorder.now_us()     # where the file's offset 0 lands on the first lap
+        self.period = self._records[-1][0] + self.LOOP_GAP_USEC
+        self._next = 0          # index into the endless looped record stream
+        self.state = {uid: IDLE for uid in self.uids}
+
+    def advance(self):
+        """Apply (and hand to the recorder) every transition that is now due."""
+        now = self._recorder.now_us()
+        emitted = []
+        while True:
+            lap, i = divmod(self._next, len(self._records))
+            offset, uid, status = self._records[i]
+            t_us = self.t0 + lap * self.period + offset
+            if t_us > now:
+                break
+            _apply_transition(self.state, uid, status)
+            emitted.append((t_us, uid, status))
+            self._next += 1
+        self._recorder.add(emitted)
+
+    def status_buffer(self):
+        return b"".join(struct.pack(STATUS_RECORD_FORMAT, uid, self.state[uid])
+                        for uid in self.uids)
+
+
+class TruthLog:
+    """``--truth-log``: append every transition, as ``absolute_us uid status``
+    lines, plus a ``# publisher`` line whenever a new publisher appears."""
+
+    def __init__(self, path):
+        self._file = open(path, "a", buffering=1)
+
+    def publisher(self, name, tree_uuid, now_us):
+        self._file.write(f"# publisher {name} uuid={tree_uuid.hex()} t={now_us}\n")
+
+    def __call__(self, records):
+        self._file.write("".join(f"{t} {uid} {status}\n" for t, uid, status in records))
+        self._file.flush()
+
+    def close(self):
+        self._file.close()
+
+
+class RequestLog:
+    """``--log-requests``: count requests by type and print a line per second."""
+
+    def __init__(self, clock=time.monotonic):
+        self._clock = clock
+        self._since = clock()
+        self._counts = collections.Counter()
+
+    def add(self, req_type):
+        self._counts[chr(req_type) if 32 < req_type < 127 else f"0x{req_type:02x}"] += 1
+        now = self._clock()
+        if now - self._since >= 1.0:
+            rate = "  ".join(f"{k}={v / (now - self._since):.1f}/s"
+                             for k, v in sorted(self._counts.items()))
+            print(f"[mock_robot] requests: {rate}")
+            self._since, self._counts = now, collections.Counter()
 
 
 # A fixed UUID for the unit tests, which want reply framing to be reproducible.
@@ -540,7 +752,33 @@ def main():
                          "Ticks only advance while a dashboard is connected, "
                          "since klein idles its pollers otherwise. 0 = never "
                          "(default).")
+    ap.add_argument("--log-requests", action="store_true",
+                    help="print, once a second, how many requests of each type "
+                         "arrived — handy for seeing what a client like Groot2 "
+                         "actually sends")
+    ap.add_argument("--truth-log", metavar="FILE",
+                    help="append every transition the mock makes to FILE as "
+                         "'absolute_us uid status' lines, whether or not a "
+                         "client is recording — the ground truth tests compare "
+                         "a client's recording against")
+    ap.add_argument("--replay", metavar="FILE.btlog",
+                    help="publish a recorded FileLogger2 file instead of a "
+                         "built-in tree: its XML for FULLTREE, its transitions "
+                         "re-emitted in real time (looping) for STATUS and "
+                         "GET_TRANSITIONS")
     args = ap.parse_args()
+    if args.replay and args.switch_every:
+        ap.error("--replay and --switch-every cannot be combined")
+
+    truth = TruthLog(args.truth_log) if args.truth_log else None
+    recorder = TransitionRecorder(truth=truth)
+    replay = None
+    if args.replay:
+        try:
+            with open(args.replay, "rb") as f:
+                replay = Replay(f.read(), recorder)
+        except (OSError, ValueError) as exc:
+            ap.error(f"cannot replay {args.replay}: {exc}")
 
     ctx = zmq.Context()
     sock = ctx.socket(zmq.REP)
@@ -554,25 +792,45 @@ def main():
     # is the one thing this mock exists to let you test.
     tree_uuid = os.urandom(TREE_UUID_SIZE)
     print(f"[mock_robot] publisher listening on {endpoint}")
-    print(f"[mock_robot] tree: {tree.name} ({len(tree.uids)} nodes, 1 subtree)")
+    if replay:
+        print(f"[mock_robot] replaying {args.replay} ({len(replay.uids)} nodes, "
+              f"looping)")
+    else:
+        print(f"[mock_robot] tree: {tree.name} ({len(tree.uids)} nodes, 1 subtree)")
     if args.switch_every > 0:
         print(f"[mock_robot] swapping trees every {args.switch_every} status polls")
     print(f"[mock_robot] run:  klein-bt --robot-port {args.port}")
+    if truth:
+        truth.publisher("replay" if replay else tree.name, tree_uuid,
+                        replay.t0 if replay else recorder.now_us())
+    if not replay:
+        # The tree comes up all IDLE and enters its first frame at once; those
+        # transitions are as real as any later one (the truth log wants them).
+        recorder.record({}, _frame_at(0, tree)[0], tree.uids)
 
     tick = 0
+    request_log = RequestLog() if args.log_requests else None
     try:
         while True:
             frames = sock.recv_multipart()
             header = frames[0] if frames else b""
             req_type = header[1] if len(header) >= 2 else 0
+            if request_log:
+                request_log.add(req_type)
+            if replay:
+                replay.advance()        # catch up before answering, whatever the request
 
             if req_type == REQ_FULLTREE:
-                sock.send_multipart([reply_header(header, tree_uuid),
-                                     tree.xml.encode("utf-8")])
+                xml = replay.xml if replay else tree.xml
+                sock.send_multipart([reply_header(header, tree_uuid), xml.encode("utf-8")])
+            elif req_type == REQ_STATUS and replay:
+                sock.send_multipart([reply_header(header, tree_uuid), replay.status_buffer()])
             elif req_type == REQ_STATUS:
                 sock.send_multipart([reply_header(header, tree_uuid),
                                      build_status_buffer(tick, tree)])
+                before, _bb = _frame_at(tick, tree)
                 tick += 1
+                recorder.record(before, _frame_at(tick, tree)[0], tree.uids)
                 if args.switch_every and tick % args.switch_every == 0:
                     # Swapped *after* the reply, so the next reply of any type is
                     # the first to carry the new UUID — exactly what a restarted
@@ -580,11 +838,29 @@ def main():
                     tree = _next_tree(tree)
                     tree_uuid = os.urandom(TREE_UUID_SIZE)
                     tick = 0            # the new mission starts at its beginning
+                    # A new publisher is not recording.
+                    recorder = TransitionRecorder(truth=truth)
+                    if truth:
+                        truth.publisher(tree.name, tree_uuid, recorder.now_us())
+                    recorder.record({}, _frame_at(0, tree)[0], tree.uids)
                     print(f"[mock_robot] swapped to the {tree.name} tree "
                           f"({len(tree.uids)} nodes, new publisher UUID)")
             elif req_type == REQ_BLACKBOARD:
-                sock.send_multipart([reply_header(header, tree_uuid),
-                                     build_blackboard_reply(frames, tick, tree)])
+                # A replayed file carries no blackboard: answer like a publisher
+                # asked for boards it does not have (msgpack nil).
+                payload = (msgpack.packb(None) if replay
+                           else build_blackboard_reply(frames, tick, tree))
+                sock.send_multipart([reply_header(header, tree_uuid), payload])
+            elif req_type == REQ_TOGGLE_RECORDING:
+                payload = toggle_recording(frames, recorder)
+                if payload is None:
+                    sock.send_multipart([b"error", b"must be 2 parts message"])
+                else:
+                    sock.send_multipart([reply_header(header, tree_uuid), *payload])
+                    print(f"[mock_robot] transition recording "
+                          f"{'on' if recorder.recording else 'off'}")
+            elif req_type == REQ_GET_TRANSITIONS:
+                sock.send_multipart([reply_header(header, tree_uuid), recorder.drain()])
             else:
                 sock.send_multipart([b"error", b"unsupported request"])
     except KeyboardInterrupt:
@@ -592,6 +868,8 @@ def main():
     finally:
         sock.close(linger=0)
         ctx.term()
+        if truth:
+            truth.close()
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ klein lets you watch a running BehaviorTree.CPP v4 tree live in your browser.
 You see which nodes are running, succeeding or failing, plus the current
 blackboard values, as the robot ticks.
 
-![klein streaming a live CrossDoor behavior tree to the dashboard](assets/klein-demo.gif)
+![klein showing a live CrossDoor behavior tree: running nodes pulse, the blackboard updates, and the Timeline below draws each node's RUNNING spans as the robot ticks](assets/klein-demo.gif)
 
 ## Install
 
@@ -23,14 +23,17 @@ This gives you two commands: `klein-bt` (the dashboard) and `klein-bt-mock`
 klein-bt                                          # robot on 127.0.0.1:1667
 klein-bt --robot-host 10.0.0.5 --robot-port 1667  # robot somewhere else
 klein-bt --port 8080 --no-browser                 # don't open a browser
+klein-bt --open run.btlog                         # a saved recording, no robot
 ```
 
-| Flag           | Default     | Meaning                              |
-| -------------- | ----------- | ------------------------------------ |
-| `--robot-host` | `127.0.0.1` | IP address of the robot              |
-| `--robot-port` | `1667`      | Groot2 publisher port on the robot   |
-| `--port`       | `8080`      | port the dashboard is served on      |
-| `--no-browser` | off         | don't open the browser automatically |
+| Flag              | Default     | Meaning                              |
+| ----------------- | ----------- | ------------------------------------ |
+| `--robot-host`    | `127.0.0.1` | IP address of the robot              |
+| `--robot-port`    | `1667`      | Groot2 publisher port on the robot   |
+| `--port`          | `8080`      | port the dashboard is served on      |
+| `--no-browser`    | off         | don't open the browser automatically |
+| `--record-buffer` | `10m`       | how much recent history to record (`90s`, `30m`, `1h`); `0` turns recording off |
+| `--open FILE`     |             | show a saved `.btlog` (and `FILE.bb.jsonl` beside it) instead of a robot |
 
 klein opens `http://localhost:8080` for you. You can start it before the robot
 is up; it keeps retrying until the robot appears.
@@ -46,9 +49,34 @@ is up; it keeps retrying until the robot appears.
 - The **Blackboards** list shows every subtree's values. Click a row to expand
   it, or hover a board to find its node in the tree. See
   [docs/blackboards.md](docs/blackboards.md) for how values are shown.
-- Hide the side panel with `«` if you want more room.
+- Drag the side panel's right edge to make it wider or narrower, or fold it
+  away with its `◂` button (or a double-click on the edge) for more room.
+  klein remembers both.
 
 If the robot loads a different tree, the dashboard switches to it by itself.
+
+## Record, rewind and replay
+
+klein records everything the robot does (BehaviorTree.CPP 4.3.3 or newer),
+blackboard included, and keeps the last 10 minutes. Change that with
+`--record-buffer` (`30m`, `1h`, or `0` to turn recording off). Don't log
+from Groot2 against the same robot at the same time: each would get only
+some of the transitions.
+
+![A saved recording opened with klein-bt --open: the playhead is dragged back through PickLock's failed attempts, stepped, moved by a Log row, then played](assets/klein-replay.gif)
+
+The drawer under the tree shows the recording:
+
+- **Log**: every transition. Click a row to see the tree and blackboard at
+  that moment; Esc goes back to live.
+- **Timeline**: each node's running time as bars, so every retry shows. Drag
+  the playhead to go back in time, step with |◀ ▶|, play with ▶.
+- **Save**: downloads one `.zip` with a `.btlog` per tree run (Groot2 opens
+  these) and its blackboard in a `.bb.jsonl` beside it.
+
+`klein-bt --open FILE.btlog` shows a saved recording without a robot, in the
+same Log and Timeline. Unzip a saved `.zip` first; the `.bb.jsonl` beside the
+file brings its blackboard along.
 
 ## Set up your robot
 
@@ -79,9 +107,10 @@ Add `--switch-every 200` to the mock to make it swap between two trees every
 
 - [docs/blackboards.md](docs/blackboards.md): reading blackboard values, and
   adding a renderer for your own message types.
-- [docs/architecture.md](docs/architecture.md): how klein works inside, and how
-  to run the tests.
+- [docs/architecture.md](docs/architecture.md): how klein works inside.
 - [docs/protocol.md](docs/protocol.md): the Groot2 wire protocol klein speaks.
+- [docs/testing.md](docs/testing.md): the test tiers and harness, and
+  `scripts/make_gifs.py`, which remakes the GIFs above.
 
 ## License
 

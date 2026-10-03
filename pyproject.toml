@@ -41,11 +41,12 @@ Issues = "https://github.com/johanubbink/klein-bt/issues"
 Changelog = "https://github.com/johanubbink/klein-bt/blob/main/CHANGELOG.md"
 
 [project.scripts]
-klein-bt = "klein.gateway:main_cli"
+klein-bt = "klein.cli:main_cli"
 klein-bt-mock = "klein.mock_robot:main"
 
 [project.optional-dependencies]
-dev = ["build", "twine"]
+# playwright: the browser checks in tests/ (they skip without it).
+dev = ["build", "twine", "playwright"]
 
 [tool.setuptools]
 # Only ship the klein package; the sibling test suite stays out of the wheel.
@@ -63,5 +64,9 @@ klein = [
     "static/styles.css",
     "static/app.js",
     "static/renderers.js",
+    "static/recording.js",
+    "static/cursor.js",
+    "static/drawer.js",
+    "static/timeline.js",
     "static/d3.v7.min.js",
 ]

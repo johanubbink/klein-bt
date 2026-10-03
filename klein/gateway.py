@@ -6,14 +6,25 @@ FULLTREE handshake, recursively unrolls nested subtrees into a single tree, and
 then streams 10 Hz status telemetry — plus 2 Hz blackboard values, one board per
 subtree — to browser dashboards over WebSockets. A robot that loads a
 *different* tree is noticed on the next poll, from the tree UUID every reply
-carries, and the handshake is re-run.
+carries, and the handshake is re-run. Unless ``--record-buffer 0``, every
+transition the robot reports is also drained after each status poll into an
+in-memory ``Recording`` (see docs/architecture.md, "Recording").
 
 Everything the browser needs is served from a **single port** (``--port``):
 
 * plain HTTP for the dashboard (``/`` and ``/index.html``), its ``/styles.css``,
-  ``/app.js`` and ``/renderers.js``, and the bundled D3.js (``/d3.v7.min.js``), and
+  ``/app.js``, ``/renderers.js``, ``/recording.js``, ``/cursor.js``,
+  ``/drawer.js`` and ``/timeline.js``, and the bundled D3.js (``/d3.v7.min.js``), and
 * a WebSocket endpoint (``/ws``) that pushes the unrolled tree layout on connect
-  and then broadcasts live status and blackboard frames.
+  and then broadcasts live status and blackboard frames — and, while recording,
+  streams the recording itself (``klein/streaming.py``), and
+* while recording, the recorded tree runs as downloads: ``/log/runs``,
+  ``/log.btlog?run=N``, ``/log.bb.jsonl?run=N``, and all of them in one
+  ``/log.zip`` (the Save button).
+
+``--open FILE.btlog`` shows a saved recording instead, with no robot: the file
+(and its ``FILE.bb.jsonl`` blackboard sidecar, if present) is loaded into the
+same ``Recording`` and streamed exactly as a live one.
 
 Serving both from one origin means the dashboard just opens
 ``ws://<same-host:port>/ws`` — no port to configure, inject, or firewall twice.
@@ -22,21 +33,21 @@ The browser can only speak HTTP/WebSocket — never ZeroMQ — so klein is the
 translator between the robot's REQ/REP world and the browser's push world.
 """
 
-import argparse
 import asyncio
+import io
 import json
 import logging
-import math
 import random
-import socket
 import struct
 import sys
+import time
 import webbrowser
+import zipfile
 import xml.etree.ElementTree as ET
 from http import HTTPStatus
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
-import msgpack
 import zmq
 import zmq.asyncio
 import websockets
@@ -44,39 +55,56 @@ from websockets.datastructures import Headers
 from websockets.http11 import Response
 
 from .groot2_protocol import (
-    BUILTIN_CATEGORIES,
-    CATEGORY_SUBTREE,
-    CATEGORY_UNDEFINED,
     HEADER_FORMAT,
-    NODE_CATEGORIES,
     PROTOCOL_ID,
+    RECORDING_START,
     REQ_BLACKBOARD,
     REQ_FULLTREE,
+    REQ_GET_TRANSITIONS,
     REQ_STATUS,
-    STATUS_RECORD_FORMAT,
-    STATUS_RECORD_SIZE,
-    decode_status,
+    REQ_TOGGLE_RECORDING,
+    TRANSITION_BUFFER_MAX,
+    decode_transitions,
     decode_tree_uuid,
+    iter_status,
+    parse_blackboard,
+    parse_status,
 )
+from .btlog import BtlogError, export_blackboard, export_run, load_btlog, read_btlog
+from .layout import collect_uids, extract_blackboard_names, parse_node_categories, unroll_tree
+from .recording import Layout, RobotClock, decode_state, snapshot_run
+from .streaming import Streamer
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = PACKAGE_DIR / "static"    # dashboard web assets live here, not beside the .py
 
 # Timeouts / cadence
-POLL_INTERVAL = 0.1             # 10 Hz status poll
+# 10 Hz status poll. Read on every poll: the tests set it lower, since the mock
+# steps once per STATUS and so runs its missions and swaps faster. Not a flag.
+POLL_INTERVAL = 0.1
 BLACKBOARD_POLL_INTERVAL = 0.5  # 2 Hz blackboard poll — values change slower than status
 REQUEST_TIMEOUT = 2.0           # seconds to wait for a robot reply
 LAYOUT_RETRY_MAX = 5.0          # cap on handshake retry backoff
 
-# Static files served over HTTP, keyed by request path ("/" -> "/index.html").
-_STATIC_ROUTES = {
-    "/index.html": ("index.html", "text/html; charset=utf-8"),
-    "/styles.css": ("styles.css", "text/css; charset=utf-8"),
-    "/app.js": ("app.js", "text/javascript; charset=utf-8"),
-    "/renderers.js": ("renderers.js", "text/javascript; charset=utf-8"),
-    "/d3.v7.min.js": ("d3.v7.min.js", "text/javascript; charset=utf-8"),
+# Static files served over HTTP at "/<name>" ("/" is "/index.html"). The
+# scripts are all the dashboard's own, and it needs every one of them to render.
+_CONTENT_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
 }
+_STATIC_FILES = ("index.html", "styles.css", "d3.v7.min.js", "renderers.js", "recording.js",
+                 "cursor.js", "drawer.js", "timeline.js", "app.js")
+_STATIC_ROUTES = {f"/{name}": (name, _CONTENT_TYPES[Path(name).suffix])
+                  for name in _STATIC_FILES}
 _INDEX_FALLBACK = b"<!doctype html><h1>klein: index.html missing from package</h1>"
+
+# The recording's downloads (docs/architecture.md, "Browser side: one port"):
+# a run's files by suffix (None: all of them in one zip) and their types.
+_LOG_SUFFIXES = (".btlog", ".bb.jsonl")
+_LOG_TYPES = {".btlog": "application/octet-stream", ".bb.jsonl": "application/x-ndjson",
+              None: "application/zip"}
+_LOG_ROUTES = ("/log/runs", "/log.zip", *(f"/log{suffix}" for suffix in _LOG_SUFFIXES))
 
 
 class RobotTimeout(Exception):
@@ -95,9 +123,27 @@ class KleinGateway:
     """Bridges the robot's ZeroMQ REQ/REP channel to browser WebSockets, and
     serves the dashboard + telemetry from a single HTTP/WebSocket port."""
 
-    def __init__(self, robot_host, robot_port, port):
+    def __init__(self, robot_host, robot_port, port, recording=None, debug=False):
         self.robot_endpoint = f"tcp://{robot_host}:{robot_port}"
         self.port = port
+        self.debug = debug                  # serve GET /debug/state
+
+        # Transition recording (docs/architecture.md, "Recording"). None is
+        # --record-buffer 0: no r/t on the wire, and the pollers idle without clients.
+        self.recording = recording
+        # Mirrors the recording into every dashboard (docs/protocol.md,
+        # "Streaming the recording"): backfill on connect, then each change.
+        self.streamer = (None if recording is None else
+                         Streamer(recording, websockets.broadcast, name=self.robot_endpoint))
+        self._clock = RobotClock()          # klein's monotonic clock -> robot µs
+        self._recorded_tree = None          # the segments' layout object; new per XML
+        self._armed = False                 # an open segment is taking `t` drains
+        self._cannot_record = False         # this publisher answered `r` with an error
+        self._file = None                   # the opened .btlog's name (--open): no robot
+        # A request (any poller's, or the handshake's) timed out since the last
+        # good status poll: if the robot turns out to have gone, the open
+        # segment ends at the head, the last time klein heard from it.
+        self._timed_out = False
 
         self.ctx = zmq.asyncio.Context()
         self.socket = None                  # created lazily / recreated on fault
@@ -107,7 +153,6 @@ class KleinGateway:
         # which would make the gateway unconstructible from plain sync code.
         self._req_lock = None               # REQ/REP is strictly send→recv
 
-        self.all_behavior_trees = {}        # tree_id -> root <element> of that block
         self._node_categories = {}          # registration name -> category, from <TreeNodesModel>
         self.tree_structure = None          # unrolled nested dict sent to clients
         self._layout_json = None            # cached layout frame, rebuilt each handshake
@@ -118,7 +163,7 @@ class KleinGateway:
         self._blackboard_request = None      # pre-encoded b"name1;name2" request payload
         self._blackboard_json = None         # cached last frame, for late-joining clients
 
-        self._node_seq = 0                  # per-tree node counter (uid may be null)
+        self._node_seq = 0                  # node count of the loaded tree
         self._layout_generation = 0         # bumped per handshake; prefixes node ids
         self._tree_uuid = None              # publisher UUID the loaded layout came from
         self._layout_xml = None             # raw FULLTREE XML, to spot an unchanged tree
@@ -127,9 +172,8 @@ class KleinGateway:
         # ambiguous. Starts "not connected" until the first successful handshake.
         self._robot_connected = False
         self._robot_detail = f"Connecting to robot at {self.robot_endpoint}…"
-        self._robot_state_json = json.dumps(
-            {"type": "robot", "connected": False, "detail": self._robot_detail}
-        )
+        self._robot_state_json = None
+        self._publish_robot_state()
 
         # request path -> (body_bytes, content_type); populated once in run().
         self._static = {}
@@ -181,200 +225,28 @@ class KleinGateway:
     # ------------------------------------------------------------------ #
     # Layout: FULLTREE handshake + recursive subtree unrolling
     # ------------------------------------------------------------------ #
-    def _next_id(self):
-        """A node id unique across handshakes, not just within one tree.
-
-        ``_node_seq`` restarts at 1 per tree (it doubles as the unrolled node
-        count), so the generation prefix is what keeps two trees' id sets
-        disjoint for the dashboard's keyed join — see docs/architecture.md.
-        """
-        self._node_seq += 1
-        return f"{self._layout_generation}:{self._node_seq}"
-
-    @staticmethod
-    def extract_uid(element):
-        """Return the integer node UID from a layout element, or None.
-
-        BehaviorTree.CPP embeds the runtime UID as the ``_uid`` attribute
-        (``uid`` is accepted as a fallback). The ``ID`` attribute is a subtree
-        *name*, not a UID, so it must not shadow ``_uid``.
-        """
-        uid_str = element.get("_uid") or element.get("uid")
-        if uid_str is not None and uid_str.lstrip("-").isdigit():
-            return int(uid_str)
-        return None
-
-    # Structural attributes: klein renders these itself (name, ID) or uses them
-    # to wire the tree up (_uid, _fullpath). Everything else the robot stamped
-    # on the element is a port the tree author wrote — a Precondition's `if`, a
-    # RetryUntilSuccessful's `num_attempts`, a Switch's cases, a subtree's port
-    # remapping — and is what the node card shows. That includes the scripting
-    # hooks BT.CPP serializes out of a node's pre/post-conditions (`_skipIf`,
-    # `_while`, `_onSuccess`, …): underscored, but the author's writing.
-    STRUCTURAL_ATTRS = frozenset({"name", "ID", "uid", "_uid", "_fullpath"})
-
-    @classmethod
-    def extract_ports(cls, element):
-        """Return the element's port attributes, in document order."""
-        return {
-            key: value
-            for key, value in element.attrib.items()
-            if key not in cls.STRUCTURAL_ATTRS
-        }
-
-    def unroll_node(self, element, expanding=frozenset()):
-        """Recursively convert a layout element into a nested dict.
-
-        ``<SubTree ID="X">`` references are stitched in place: the SubTree node
-        keeps its own UID and gains the matching ``<BehaviorTree>`` definition
-        as its child, so *every* UID — the reference and all inner nodes — maps
-        cleanly onto incoming status packets. ``expanding`` guards against
-        cyclic subtree references.
-        """
-        node_type = element.tag
-
-        if node_type == "SubTree":
-            subtree_id = element.get("ID")
-            node = {
-                "id": self._next_id(),
-                "uid": self.extract_uid(element),
-                "type": "SubTree",
-                "category": CATEGORY_SUBTREE,
-                "name": element.get("name") or subtree_id or "SubTree",
-                "subtree_id": subtree_id,
-                "is_subtree_root": True,
-                # This instance's blackboard, named exactly as
-                # extract_blackboard_names asks the robot for it — the dashboard
-                # pairs each board with the node that owns it.
-                "board": element.get("_fullpath") or subtree_id,
-                "ports": self.extract_ports(element),
-                "children": [],
-            }
-            subtree_root = self.all_behavior_trees.get(subtree_id)
-            if subtree_root is not None and subtree_id not in expanding:
-                node["children"] = [
-                    self.unroll_node(subtree_root, expanding | {subtree_id})
-                ]
-            return node
-
-        return {
-            "id": self._next_id(),
-            "uid": self.extract_uid(element),
-            "type": node_type,
-            "category": self._category_for(element),
-            "name": element.get("name") or node_type,
-            "ports": self.extract_ports(element),
-            "children": [self.unroll_node(child, expanding) for child in element],
-        }
-
-    @staticmethod
-    def parse_node_categories(root):
-        """Return ``{registration name: category}`` from ``<TreeNodesModel>``.
-
-        An entry's tag is the category and its ``ID`` is the registration name
-        instance elements use as their own tag — see docs/protocol.md. Entries
-        with no ``ID``, and tags that are not categories (``<MetadataFields>``),
-        are skipped rather than trusted.
-        """
-        categories = {}
-        for model in root.findall("TreeNodesModel"):
-            for entry in model:
-                registration_id = entry.get("ID")
-                if registration_id and entry.tag in NODE_CATEGORIES:
-                    categories[registration_id] = entry.tag
-        return categories
-
-    def _category_for(self, element):
-        """Return one instance element's category, most authoritative source first:
-        a tag that is itself a category (the explicit ``<Action ID="OpenDoor"/>``
-        spelling), then the robot's ``<TreeNodesModel>``, then the nodes
-        BehaviorTree.CPP registers on itself, else ``Undefined``.
-
-        Never guessed from the tree's shape — see docs/protocol.md.
-        """
-        tag = element.tag
-        if tag in NODE_CATEGORIES:
-            return tag
-        return (self._node_categories.get(tag)
-                or BUILTIN_CATEGORIES.get(tag)
-                or CATEGORY_UNDEFINED)
-
-    @staticmethod
-    def extract_blackboard_names(root):
-        """Return the blackboard names to ask the robot for, in tree order.
-
-        Every subtree instance owns a blackboard, and the publisher registers it
-        under the subtree's *instance path* — which BehaviorTree.CPP stamps as
-        ``_fullpath`` on each ``<BehaviorTree>`` block and on the ``<SubTree>``
-        element referencing it. The root subtree's path is empty (it registers
-        under its tree ID instead), and older robots omit ``_fullpath``
-        altogether, hence the ``ID`` fallback. Names may repeat across a block
-        and its reference, so duplicates are dropped.
-
-        Only nodes *inside* ``<BehaviorTree>`` blocks are considered: a FULLTREE
-        reply also carries a ``<TreeNodesModel>`` section that declares the node
-        types, and its ``<SubTree>`` entry is a model, not an instance.
-        """
-        blocks = root.findall(".//BehaviorTree")
-        elements = list(blocks)
-        for block in blocks:
-            elements.extend(block.iter("SubTree"))
-
-        names = []
-        seen = set()
-        for element in elements:
-            name = element.get("_fullpath") or element.get("ID")
-            if name and name not in seen:
-                seen.add(name)
-                names.append(name)
-        return names
-
     def _parse_layout(self, xml_str):
         """Parse FULLTREE XML and build the unrolled tree structure."""
         root = ET.fromstring(xml_str)
         self._layout_xml = xml_str      # what the current layout was built from
 
-        # Built before unrolling, because unroll_node stamps each node's
+        # Built before unrolling, because unroll_tree stamps each node's
         # category from it. Rebuilt per handshake, so re-handshaking against a
         # different tree never carries the previous tree's node types over.
-        self._node_categories = self.parse_node_categories(root)
+        self._node_categories = parse_node_categories(root)
 
-        self.all_behavior_trees = {}
-        block_paths = {}            # tree ID -> that block's _fullpath, for the root's board
-        first_tree_id = None
-        for bt_block in root.findall(".//BehaviorTree"):
-            tree_id = bt_block.get("ID")
-            if not tree_id:
-                continue
-            children = list(bt_block)
-            self.all_behavior_trees[tree_id] = children[0] if children else None
-            block_paths[tree_id] = bt_block.get("_fullpath")
-            if first_tree_id is None:
-                first_tree_id = tree_id
-
-        # Prefer an explicit entrypoint if the XML declares one; otherwise the
-        # first <BehaviorTree> block is the main tree.
-        main_tree_id = root.get("main_tree_to_execute") or first_tree_id
-        if main_tree_id not in self.all_behavior_trees:
-            main_tree_id = first_tree_id
-
-        if main_tree_id is None or self.all_behavior_trees.get(main_tree_id) is None:
-            raise ValueError("layout XML contains no usable <BehaviorTree> block")
-
+        self.tree_structure, self._node_seq = unroll_tree(
+            root, self._node_categories, self._layout_generation + 1)
         self._layout_generation += 1
-        self._node_seq = 0
-        self.tree_structure = self.unroll_node(self.all_behavior_trees[main_tree_id])
-        self.tree_structure["root_tree_id"] = main_tree_id
-        # The root's own blackboard, taken from *its* block rather than the first
-        # one — main_tree_to_execute need not point at the first <BehaviorTree>.
-        # Real robots leave the root's _fullpath empty, so this falls through to
-        # the tree ID, exactly as extract_blackboard_names does.
-        self.tree_structure["board"] = block_paths.get(main_tree_id) or main_tree_id
         # Serialize once: the layout is immutable until the next handshake, so
         # every connecting (or reconnecting) client is sent this same frame.
         self._layout_json = json.dumps({"type": "layout", "data": self.tree_structure})
+        # One object per parsed XML: segments recorded while the tree is
+        # unchanged share it, which is what groups them into one run.
+        self._recorded_tree = Layout(self._layout_generation, xml_str, self.tree_structure,
+                                     sorted(collect_uids(self.tree_structure)))
 
-        self._blackboard_names = self.extract_blackboard_names(root)
+        self._blackboard_names = extract_blackboard_names(root)
         self._blackboard_request = ";".join(self._blackboard_names).encode("utf-8")
         self._blackboard_json = None    # values from the previous tree are stale
 
@@ -389,20 +261,35 @@ class KleinGateway:
         self._set_robot_state(True, f"Connected to robot at {self.robot_endpoint}")
 
     def _set_robot_state(self, connected, detail):
-        """Record robot reachability and push it to dashboards on change.
+        """Record robot reachability and push it to dashboards on change."""
+        self._robot_connected = connected
+        self._robot_detail = detail
+        self._publish_robot_state()
 
-        The latest state is cached so a dashboard that connects later is told
+    def _publish_robot_state(self):
+        """Push the ``robot`` frame (reachability and ``_recording_state()``)
+        to dashboards when it changed.
+
+        The latest frame is cached so a dashboard that connects later is told
         immediately whether the robot is reachable (see ``ws_handler``). Only
         real changes are broadcast, so this is safe to call on the 10 Hz path.
         """
-        if connected == self._robot_connected and detail == self._robot_detail:
-            return
-        self._robot_connected = connected
-        self._robot_detail = detail
-        self._robot_state_json = json.dumps(
-            {"type": "robot", "connected": connected, "detail": detail}
-        )
-        self._broadcast(self._robot_state_json)
+        frame = json.dumps({"type": "robot", "connected": self._robot_connected,
+                            "detail": self._robot_detail,
+                            "recording": self._recording_state()})
+        if frame != self._robot_state_json:
+            self._robot_state_json = frame
+            self._broadcast(frame)
+
+    def _recording_state(self):
+        """What the drawer says about recording: ``"off"`` (--record-buffer 0),
+        ``"unsupported"`` (the publisher answered ``r`` with an error), ``"on"``,
+        or ``"file"`` (``--open``: no robot)."""
+        if self._file is not None:
+            return "file"
+        if self.recording is None:
+            return "off"
+        return "unsupported" if self._cannot_record else "on"
 
     def _tree_changed(self, header_frame):
         """True when a reply came from a different tree than the loaded layout.
@@ -437,6 +324,31 @@ class KleinGateway:
             self._broadcast_notice(
                 "The robot loaded a new behaviour tree — reloaded.")
 
+    def open_file(self, path):
+        """Show a saved ``.btlog`` instead of a robot (``--open``). Its
+        ``<stem>.bb.jsonl`` sidecar beside it, if any, is the blackboard.
+
+        Raises ``OSError``, ``BtlogError`` (not a FileLogger2 file),
+        ``ET.ParseError`` or ``ValueError`` (unusable XML or sidecar). Returns
+        the bytes of a trailing partial record, which are ignored.
+        """
+        path = Path(path)
+        log = read_btlog(path.read_bytes())
+        self._parse_layout(log.xml)
+        sidecar = path.with_suffix(".bb.jsonl")
+        try:
+            text = sidecar.read_text(encoding="utf-8") if sidecar.is_file() else None
+            self.recording = load_btlog(log, self._recorded_tree, self._blackboard_names, text)
+        except IndexError:                  # a record's uid past the state's end
+            raise BtlogError("a record names a node uid the file's tree doesn't have")
+        except (ValueError, KeyError, TypeError) as exc:     # the sidecar, not UTF-8 or not ours
+            raise ValueError(f"{sidecar.name} is not a klein blackboard sidecar ({exc!r})")
+        self._file = path.name
+        self.streamer = Streamer(self.recording, websockets.broadcast, source="file",
+                                 name=path.name)
+        self._set_robot_state(False, f"No robot — viewing {path.name}")
+        return log.trailing
+
     async def fetch_layout(self):
         """Handshake with the robot to load the tree, retrying until it works.
 
@@ -470,6 +382,7 @@ class KleinGateway:
                 # place and the mismatch keeps driving the retry.
                 self._tree_uuid = decode_tree_uuid(reply[0])
                 self._mark_connected()
+                await self._arm()           # every handshake, the unchanged-XML one too
                 if not changed:
                     print(f"[klein] robot restarted with the same tree "
                           f"({self._node_seq} nodes); layout kept.")
@@ -488,6 +401,8 @@ class KleinGateway:
                 self._broadcast(self._layout_json)  # dashboards that connected while we waited
                 return True
             except (RobotTimeout, ValueError, ET.ParseError) as exc:
+                if isinstance(exc, RobotTimeout):
+                    self._timed_out = True
                 wait = min(float(attempt), LAYOUT_RETRY_MAX)
                 print(
                     f"[klein] waiting for robot at {self.robot_endpoint} "
@@ -500,88 +415,130 @@ class KleinGateway:
                 await asyncio.sleep(wait)
 
     # ------------------------------------------------------------------ #
+    # Recording: arm (r start + S baseline), then one `t` drain per status poll
+    # ------------------------------------------------------------------ #
+    async def _arm(self):
+        """Begin a recording segment: ``r start``, then a STATUS baseline.
+
+        Run on every handshake and after an overflow. The ``r start`` reply is
+        the robot's wall-clock µs, the base every drained offset is added to.
+        In that order nothing is lost between the two: whatever ran after
+        ``r start`` is in the robot's buffer, and what ran before the ``S`` is
+        in the baseline too, so the first drain replays it on top of the
+        baseline (``apply_transition`` makes that replay end on the baseline).
+        A robot without recording (BT.CPP < 4.3.3) answers ``r`` with an error;
+        klein then records nothing from this publisher and behaves as with
+        ``--record-buffer 0``, until the next handshake tries again.
+        """
+        if self.recording is None:
+            return
+        self._armed = False
+        self._cannot_record = False         # a new handshake may be a new publisher
+        sent = time.monotonic()
+        reply = await self._request(REQ_TOGGLE_RECORDING, RECORDING_START.encode())
+        received = time.monotonic()
+        self._cannot_record = len(reply) < 2 or reply[0] == b"error"
+        try:
+            if self._cannot_record:
+                if self.recording.open_segment is not None:
+                    self.recording.end_segment(self._clock.robot_us(received))
+                print("[klein] robot cannot record transitions (needs BehaviorTree.CPP "
+                      ">= 4.3.3); not recording.", file=sys.stderr)
+                return
+            start_us = int(reply[1])
+            reply = await self._request(REQ_STATUS)
+            if not reply or len(reply) < 2 or reply[0] == b"error":
+                return
+            tree = self._recorded_tree
+            baseline = bytearray(tree.size)
+            for uid, status in iter_status(reply[1]):
+                if uid < tree.size:
+                    baseline[uid] = status
+            if self._timed_out and self.recording.open_segment is not None:
+                # A request timed out (a blackboard poll, say) and the robot came
+                # back as a new publisher before any status poll timed out: that
+                # was an outage too.
+                self._end_segment_at_head()
+            self._timed_out = False
+            previous = self.recording.segments[-1] if self.recording.segments else None
+            if previous is not None and previous.t_end is not None:
+                # Ended when the robot went away.
+                self.recording.add_gap(previous.t_end, start_us, "outage")
+            self._clock.arm(start_us, sent, received)
+            self.recording.begin_segment(tree, start_us, baseline)
+            self._armed = True
+        finally:
+            # The drawer says whether klein records. Last, so that a dashboard
+            # told "on" already has the segment it records into, and one told
+            # "unsupported" the end of the last one.
+            self._publish_robot_state()
+
+    async def _drain_transitions(self):
+        """One ``t`` drain into the open segment. A drain of exactly the
+        publisher's cap means the oldest were dropped: record an overflow gap
+        and re-arm, so the new segment starts from a fresh baseline."""
+        reply = await self._request(REQ_GET_TRANSITIONS)
+        if len(reply) < 2 or reply[0] == b"error":
+            return
+        segment = self.recording.open_segment
+        records = [(segment.t_begin + offset, uid, status)
+                   for offset, uid, status in decode_transitions(reply[1])]
+        if len(records) == TRANSITION_BUFFER_MAX:
+            self.recording.add_gap(segment.last_ts, records[0][0], "overflow")
+            self.recording.append(records)
+            await self._arm()
+        else:
+            self.recording.append(records)
+        now = self._clock.robot_us(time.monotonic())
+        self.recording.evict(now)           # first, so the head frame has its sizes
+        self.recording.advance_head(now)
+
+    def _end_segment_at_head(self):
+        """End the open segment when the robot went away: at the head, the last
+        drain, which is the last time klein heard from it."""
+        segment = self.recording.open_segment
+        self.recording.end_segment(max(self.recording.head or segment.t_begin,
+                                       segment.t_begin))
+
+    def debug_state(self):
+        """The read-only dump behind ``GET /debug/state`` (``--debug`` only)."""
+        rec = self.recording
+        if rec is None:
+            return {"recording": False}
+        segment = rec.open_segment
+        return {
+            "recording": self._armed,
+            "head": rec.head,
+            "t_min": rec.t_min,
+            "segments": [{"id": s.id, "t_begin": s.t_begin, "t_end": s.t_end,
+                          "start_seq": s.start_seq, "head_seq": s.head_seq,
+                          "start_state": list(s.state_at_seq(s.start_seq)),
+                          "layout_id": s.layout.generation} for s in rec.segments],
+            "runs": [[s.id for s in run] for run in rec.runs()],
+            "gaps": [list(gap) for gap in rec.gaps],
+            "records": [[ts, uid, status] for s in rec.segments
+                        for _seq, ts, uid, status in s.iter_records(s.start_seq, s.head_seq)],
+            "state": (decode_state(segment.state, segment.layout.uids)
+                      if segment is not None else None),
+            "blackboard": [{"seg": s.id, "t_start": s.blackboard.t_start,
+                            "boards": dict(s.blackboard.boards),
+                            "changes": [list(c) for c in s.blackboard.changes()]}
+                           for s in rec.segments],
+            "bytes": list(rec.bytes_used()),
+        }
+
+    def _idle(self):
+        """True when the pollers should wait: no dashboard is watching and there
+        is nothing to record (recording off, or a publisher that can't). Not
+        while an outage interrupts recording, so the robot's return is noticed."""
+        return not self.clients and (self.recording is None or self._cannot_record)
+
+    # ------------------------------------------------------------------ #
     # Telemetry: STATUS poll -> parse -> broadcast
     # ------------------------------------------------------------------ #
-    @staticmethod
-    def parse_status(buffer):
-        """Unpack a status buffer into ``{node_uid: {"status", "from"}}``.
-
-        ``from`` is the previous status name for an idle-transition record, else
-        ``None`` (see ``groot2_protocol.decode_status``). A trailing partial
-        record is ignored.
-        """
-        usable = len(buffer) - (len(buffer) % STATUS_RECORD_SIZE)
-        records = struct.iter_unpack(STATUS_RECORD_FORMAT, memoryview(buffer)[:usable])
-        updates = {}
-        for node_uid, status_int in records:
-            status, transitioned_from = decode_status(status_int)
-            updates[node_uid] = {"status": status, "from": transitioned_from}
-        return updates
-
-    @staticmethod
-    def _json_safe(value):
-        """Coerce a decoded msgpack value into something ``json.dumps`` accepts.
-
-        Robots can hand us values Python will serialize into JSON the browser
-        then refuses: a non-finite float becomes bare ``NaN``/``Infinity``, which
-        ``JSON.parse`` rejects — killing not just this frame but the dashboard's
-        whole message stream. Raw bytes are equally unserializable.
-        """
-        if isinstance(value, bytes):
-            return value.decode("utf-8", errors="replace")
-        if isinstance(value, float) and not math.isfinite(value):
-            return str(value)
-        if isinstance(value, dict):
-            return {str(k): KleinGateway._json_safe(v) for k, v in value.items()}
-        if isinstance(value, (list, tuple)):
-            return [KleinGateway._json_safe(v) for v in value]
-        return value
-
-    @staticmethod
-    def parse_blackboard(buffer, order=None):
-        """Decode a msgpack blackboard dump into ``{board_name: {key: value}}``.
-
-        The publisher replies with msgpack nil when no requested name matched a
-        live subtree, which decodes to ``None`` — reported here as no boards at
-        all. Keys starting with ``_`` are private by BehaviorTree.CPP's own
-        convention — autoremapping skips them, so a subtree keeps them to itself
-        — and they are dropped here rather than in the browser so the 2 Hz frame
-        stays small and the dashboard needs no knowledge of that convention.
-
-        The robot walks an unordered map, so its reply order is arbitrary.
-        ``order`` (the names we asked for, in tree order) restores a stable,
-        meaningful order — root tree first — that the dashboard renders as-is,
-        and it is also the guest list: a board the robot volunteers that klein
-        never asked for belongs to no node in the layout, so the panel could
-        only show it adrift. Seen in the wild — some publishers append the root
-        board to every subtree dump under the name ``ROOT``, which then listed
-        the mission's own board a second time. Without an ``order`` there is
-        nothing to check against, and everything is kept.
-
-        A subtree whose every port is remapped to its parent holds nothing of
-        its own, and the publisher sends nil for it rather than an empty map.
-        Such a board is reported as empty, not dropped: the dashboard should say
-        the subtree has no entries rather than omit the subtree.
-        """
-        boards = msgpack.unpackb(buffer, raw=False, strict_map_key=False)
-        if not isinstance(boards, dict):
-            return {}
-        boards = {str(name): entries for name, entries in boards.items()}
-        names = (list(boards) if order is None
-                 else [name for name in order if name in boards])
-        parsed = {}
-        for name in names:
-            entries = boards[name]
-            parsed[name] = {} if not isinstance(entries, dict) else {
-                str(key): KleinGateway._json_safe(value)
-                for key, value in entries.items()
-                if not str(key).startswith("_")
-            }
-        return parsed
-
     async def blackboard_poller(self):
-        """Poll every subtree's blackboard at 2 Hz (only while clients are
-        watching) and broadcast the values.
+        """Poll every subtree's blackboard at 2 Hz (without clients only while
+        recording), broadcast the values and add them to the recording.
 
         Robot reachability is deliberately *not* reported here: ``status_poller``
         already owns that at 10 Hz, and a second reporter on a different cadence
@@ -590,7 +547,7 @@ class KleinGateway:
         means two handshakes can never overlap.
         """
         while True:
-            if not self.clients or not self._blackboard_request:
+            if self._idle() or not self._blackboard_request:
                 await asyncio.sleep(BLACKBOARD_POLL_INTERVAL)
                 continue
             try:
@@ -604,27 +561,31 @@ class KleinGateway:
                 reply = await self._request(REQ_BLACKBOARD, self._blackboard_request)
                 if (self._layout_generation == generation
                         and reply and len(reply) >= 2 and reply[0] != b"error"):
-                    boards = self.parse_blackboard(reply[1], names)
+                    boards = parse_blackboard(reply[1], names)
                     # Broadcast even when empty, so the dashboard can say so.
                     self._blackboard_json = json.dumps(
                         {"type": "blackboard", "data": boards}
                     )
                     self._broadcast(self._blackboard_json)
+                    if self._armed:
+                        self.recording.add_blackboard(
+                            self._clock.robot_us(time.monotonic()), boards)
             except RobotTimeout:
-                pass  # status_poller reports the outage; values just stop updating
+                # status_poller reports the outage; values just stop updating.
+                self._timed_out = True
             except Exception as exc:  # never let the poller die
                 print(f"[klein] blackboard poller error: {exc}", file=sys.stderr)
             await asyncio.sleep(BLACKBOARD_POLL_INTERVAL)
 
     def _broadcast_status(self, buffer):
         """Decode one status buffer and push it to dashboards."""
-        updates = self.parse_status(buffer)
+        updates = parse_status(buffer)
         if updates:
             self._broadcast(json.dumps({"type": "status", "data": updates}))
 
     async def status_poller(self):
-        """Poll the robot at 10 Hz (only while clients are watching) and
-        broadcast parsed status frames.
+        """Poll the robot at 10 Hz (without clients only while recording),
+        broadcast parsed status frames, and drain transitions after each.
 
         Also the sole owner of tree-change detection: the handshake is re-run,
         before any further status is believed, when a reply's tree UUID no longer
@@ -633,7 +594,7 @@ class KleinGateway:
         running a different tree.
         """
         while True:
-            if not self.clients:
+            if self._idle():
                 await asyncio.sleep(POLL_INTERVAL)
                 continue
             try:
@@ -657,10 +618,18 @@ class KleinGateway:
                         await self._reload_tree("robot telemetry resumed")
                     else:
                         self._broadcast_status(reply[1])
+                        self._timed_out = False     # any timeout before this was a blip
+                        if self._armed:
+                            await self._drain_transitions()
             except RobotTimeout:
+                self._timed_out = True
                 if self._robot_connected:
                     print("[klein] robot status poll timed out; retrying...",
                           file=sys.stderr)
+                if self.recording is not None and self.recording.open_segment is not None:
+                    # The resume re-handshake opens the next segment and the gap.
+                    self._end_segment_at_head()
+                    self._armed = False
                 self._set_robot_state(
                     False, f"Lost connection to robot at {self.robot_endpoint} — retrying…"
                 )
@@ -672,20 +641,112 @@ class KleinGateway:
     # HTTP + WebSocket on one port
     # ------------------------------------------------------------------ #
     @staticmethod
-    def _http_response(status, body, content_type):
+    def _http_response(status, body, content_type, attachment=None):
+        """``attachment`` is a filename: the browser saves the body under it."""
         headers = Headers()
         headers["Content-Type"] = content_type
         headers["Content-Length"] = str(len(body))
         headers["Cache-Control"] = "no-store"
+        if attachment is not None:
+            headers["Content-Disposition"] = f'attachment; filename="{attachment}"'
         return Response(status, HTTPStatus(status).phrase, headers, body)
 
+    def log_runs(self):
+        """``[(run, entry)]``: each tree run of the recording with its
+        ``GET /log/runs`` entry. Run indices count from the oldest retained run,
+        so they shift when eviction drops one. ``blackboard`` is False when the
+        run has no blackboard sample (a file opened without its sidecar): its
+        ``/log.bb.jsonl`` is then a 404, not a header-only sidecar that would
+        reopen as empty boards. Two runs of one tree that start in the same
+        second get ``_2``, ``_3``… after the time, so every name (and the
+        zip's entries) stays unique."""
+        out = []
+        used = set()
+        for i, run in enumerate(self.recording.runs()):
+            start = run[0].t_start
+            tree_id = run[0].layout.tree["root_tree_id"]
+            stamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime(start / 1e6))
+            stem = base = f"{tree_id}_{stamp}"
+            n = 1
+            while stem in used:
+                n += 1
+                stem = f"{base}_{n}"
+            used.add(stem)
+            out.append((run, {"run": i, "tree_id": tree_id, "t_begin": start,
+                              "t_end": run[-1].t_end,
+                              "filename": f"{stem}.btlog",
+                              "blackboard": any(s.blackboard.t_start is not None
+                                                for s in run)}))
+        return out
+
+    @staticmethod
+    def _log_files(run, entry, suffixes=_LOG_SUFFIXES):
+        """Run ``run``'s downloads among ``suffixes``, ``{suffix: (filename,
+        bytes)}``: its ``.btlog`` and, when it has a blackboard, its
+        ``.bb.jsonl`` under the same stem."""
+        stem = entry["filename"].removesuffix(".btlog")
+        files = {}
+        if ".btlog" in suffixes:
+            files[".btlog"] = (entry["filename"], export_run(run, run[0].layout.xml))
+        if ".bb.jsonl" in suffixes and entry["blackboard"]:
+            files[".bb.jsonl"] = (stem + ".bb.jsonl", export_blackboard(run, entry["tree_id"]))
+        return files
+
+    async def _download(self, runs, suffix, name=None):
+        """Export ``runs`` (``[(run, entry)]``, snapshots) in a worker thread:
+        the one run's ``suffix`` file, or with ``suffix`` None every run's
+        files as one deflated ``.zip`` named ``name``. The ``process_request``
+        hook awaits it."""
+        def build():
+            if suffix is not None:
+                (run, entry), = runs
+                return self._log_files(run, entry, (suffix,))[suffix]
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+                for run, entry in runs:
+                    for filename, data in self._log_files(run, entry).values():
+                        archive.writestr(filename, data)
+            return name, buffer.getvalue()
+        filename, body = await asyncio.to_thread(build)
+        return self._http_response(200, body, _LOG_TYPES[suffix], filename)
+
+    def _log_response(self, path, query):
+        """``GET /log/runs``, ``/log.zip``, ``/log.btlog?run=N`` and
+        ``/log.bb.jsonl?run=N``. Each request reads the runs once and
+        snapshots them in one go (no await), so eviction can't change them
+        halfway through; a download returns a coroutine (``_download``) that
+        exports the snapshots off the event loop."""
+        runs = self.log_runs()
+        if path == "/log/runs":
+            body = json.dumps([entry for _run, entry in runs]).encode()
+            return self._http_response(200, body, "application/json")
+        if path == "/log.zip":
+            name = time.strftime("klein_%Y-%m-%d_%H-%M-%S.zip")
+            return self._download([(snapshot_run(run), entry) for run, entry in runs],
+                                  None, name)
+        index = parse_qs(query).get("run", [""])[0]
+        if not index.isdigit() or int(index) >= len(runs):
+            return self._http_response(404, b"no such run", "text/plain; charset=utf-8")
+        run, entry = runs[int(index)]
+        suffix = path.removeprefix("/log")
+        if suffix == ".bb.jsonl" and not entry["blackboard"]:  # e.g. a file opened without one
+            return self._http_response(404, b"no blackboard in this run",
+                                       "text/plain; charset=utf-8")
+        return self._download([(snapshot_run(run), entry)], suffix)
+
     def _process_request(self, connection, request):
-        """Serve the dashboard's static files (HTML, CSS, JS, D3) over plain
-        HTTP; let ``/ws`` upgrade to a WebSocket. Runs for every incoming
+        """Serve the dashboard's static files (HTML, CSS, JS, D3) and the
+        recording's downloads over plain HTTP; let ``/ws`` upgrade to a WebSocket. Runs for every incoming
         connection before the handshake."""
-        path = request.path.split("?", 1)[0]
+        url = urlsplit(request.path)
+        path = url.path
         if path == "/ws":
             return None  # not an HTTP response -> proceed with the WS upgrade
+        if path == "/debug/state" and self.debug:
+            body = json.dumps(self.debug_state()).encode()
+            return self._http_response(200, body, "application/json")
+        if path in _LOG_ROUTES and self.recording is not None:
+            return self._log_response(path, url.query)
         if path == "/":
             path = "/index.html"
         asset = self._static.get(path)
@@ -695,11 +756,13 @@ class KleinGateway:
         return self._http_response(200, body, content_type)
 
     async def ws_handler(self, websocket):
-        """Push the layout on connect (if loaded), then keep the connection open
-        for broadcasts."""
+        """Push the recording's backfill and the layout on connect (if loaded),
+        then keep the connection open for broadcasts."""
         self.clients.add(websocket)
         print(f"[klein] dashboard connected ({len(self.clients)} active).")
         try:
+            if self.streamer is not None:
+                self.streamer.subscribe(websocket)  # synchronous: nothing can overtake it
             if self._layout_json is not None:
                 await websocket.send(self._layout_json)
             # else: fetch_layout() will broadcast the layout to us once it loads.
@@ -713,14 +776,16 @@ class KleinGateway:
             pass
         finally:
             self.clients.discard(websocket)
+            if self.streamer is not None:
+                self.streamer.unsubscribe(websocket)
             print(f"[klein] dashboard disconnected ({len(self.clients)} active).")
 
     def _load_static(self):
         """Load the packaged static files into memory once, keyed by URL path.
 
-        A missing ``index.html`` falls back to a stub page; a missing
-        render-critical asset (D3 or the dashboard script) just means that route
-        404s (and the dashboard can't render).
+        A missing ``index.html`` falls back to a stub page; a missing script
+        (D3 or one of the dashboard's) just means that route 404s (and the
+        dashboard can't render).
         """
         for path, (filename, content_type) in _STATIC_ROUTES.items():
             body = _load_asset(filename)
@@ -729,9 +794,9 @@ class KleinGateway:
         self._static.setdefault(
             "/index.html", (_INDEX_FALLBACK, "text/html; charset=utf-8")
         )
-        # The dashboard needs D3 and both of its own scripts to render at all.
-        for asset in ("d3.v7.min.js", "app.js", "renderers.js"):
-            if f"/{asset}" not in self._static:
+        # The dashboard needs D3 and all of its own scripts to render at all.
+        for asset in _STATIC_FILES:
+            if asset.endswith(".js") and f"/{asset}" not in self._static:
                 print(f"[klein] warning: {asset} not bundled; dashboard will not render.",
                       file=sys.stderr)
 
@@ -749,6 +814,10 @@ class KleinGateway:
         async with websockets.serve(
             self.ws_handler, "0.0.0.0", self.port,
             process_request=self._process_request,
+            # An HTTP answer is part of the opening handshake, which this
+            # bounds (default 10 s): a Save of a full 200 MiB recording takes
+            # ~15 s to export and compress, and would be cut off unanswered.
+            open_timeout=60,
         ):
             print(f"[klein] dashboard + telemetry live on http://localhost:{self.port}")
             # The server is now listening, so it's safe to open the browser — do
@@ -756,70 +825,18 @@ class KleinGateway:
             if open_browser:
                 url = f"http://localhost:{self.port}"
                 asyncio.get_running_loop().run_in_executor(None, _open_browser, url)
+            if self._file is not None:
+                await asyncio.Future()      # an opened file: nothing to poll
             await self.fetch_layout()      # retries until the robot answers
             # Both pollers run forever, sharing the REQ socket via _req_lock.
             await asyncio.gather(self.status_poller(), self.blackboard_poller())
 
 
 # --------------------------------------------------------------------------- #
-# CLI entrypoint
+# Browser launch (the CLI's --no-browser turns it off)
 # --------------------------------------------------------------------------- #
 def _open_browser(url):
     try:
         webbrowser.open(url)
     except Exception:
         pass  # headless / no browser available — the printed link still works
-
-
-def _port_available(port):
-    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    # Match the asyncio server's bind semantics (SO_REUSEADDR): reject a port
-    # only when a live listener holds it, not when harmless TIME_WAIT sockets
-    # linger from a just-closed session (which would block an immediate restart).
-    probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    try:
-        probe.bind(("0.0.0.0", port))
-        return True
-    except OSError:
-        return False
-    finally:
-        probe.close()
-
-
-def main_cli():
-    parser = argparse.ArgumentParser(
-        prog="klein-bt",
-        description="Live BehaviorTree.CPP v4 telemetry dashboard over ZeroMQ.",
-    )
-    parser.add_argument("--robot-host", default="127.0.0.1",
-                        help="IP address of the C++ robot node (default: 127.0.0.1)")
-    parser.add_argument("--robot-port", type=int, default=1667,
-                        help="ZeroMQ REQ/REP port on the robot (default: 1667)")
-    parser.add_argument("--port", type=int, default=8080,
-                        help="port for the klein dashboard + telemetry server (default: 8080)")
-    parser.add_argument("--no-browser", action="store_true",
-                        help="do not auto-open the system browser")
-    args = parser.parse_args()
-
-    if not _port_available(args.port):
-        print(f"[klein] port {args.port} is already in use — try a different --port.",
-              file=sys.stderr)
-        sys.exit(1)
-
-    print()
-    print("  klein — BehaviorTree.CPP telemetry")
-    print(f"  robot     : tcp://{args.robot_host}:{args.robot_port}")
-    print(f"  dashboard : http://localhost:{args.port}")
-    print()
-
-    gateway = KleinGateway(args.robot_host, args.robot_port, args.port)
-    try:
-        # The browser is opened from inside run(), once the server is listening,
-        # so it never races ahead of the socket being ready.
-        asyncio.run(gateway.run(open_browser=not args.no_browser))
-    except KeyboardInterrupt:
-        print("\n[klein] shutting down.")
-
-
-if __name__ == "__main__":
-    main_cli()

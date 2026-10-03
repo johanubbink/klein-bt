@@ -6,6 +6,12 @@ let rootNodeSnapshot = null;
 let gatewayConnected = false;
 let robotConnected = false;
 let robotDetail = "Connecting to klein gateway…";
+// Whether klein records this robot ("on", "off", "unsupported"), or shows an
+// opened file with no robot ("file", klein-bt --open), from the `robot`
+// frame: the drawer's chip says so, and an ended segment gives way to the
+// status frames once klein says the robot is back but can't record. Null
+// until klein has said.
+let recordingSupport = null;
 
 const nodeWidth = 220;
 // Three text rows (type, name, ports) plus even ~7px gaps above, between and
@@ -84,7 +90,7 @@ function truncate(text, limit) {
 
 // The node's category, as the robot declared it. The gateway stamps exactly one
 // on every node; "Undefined" is its "the robot never said", which paints as the
-// undifferentiated cyan caption the dashboard has always drawn.
+// undifferentiated cyan caption.
 function categoryOf(node) {
     return node.category && node.category !== "Undefined" ? node.category : null;
 }
@@ -129,7 +135,7 @@ function nodeClasses(d) {
 // Everything the card had to abbreviate: type and name in full, what kind of
 // node it is, the blackboard it opens, and every port one per line. Every node
 // gets one — a control node has no ports, but it does have a category worth
-// naming, and those are exactly the cards that had no tooltip at all before.
+// naming.
 function nodeTitle(node) {
     const lines = [`${node.type} "${node.name}"`];
     const category = categoryOf(node);
@@ -200,23 +206,16 @@ function updateTreeLayout(sourceNode) {
         .data(nodesList, d => d.data.id);
 
     const nodeEnter = nodeSelection.enter().append("g")
-        .each(d => { d._statusKey = null; })   // (re)appeared: force next status frame to repaint it
+        .each(d => { d._statusKey = null; })   // (re)appeared: force the repaint below
         .attr("transform", nodeTransform(sourceNode.x0 || 0, sourceNode.y0 || 0))
         .on("click", (event, d) => {
             if (event.defaultPrevented) return;
-            if (d.children) {
-                d._children = d.children;
-                d.children = null;
-            } else {
-                d.children = d._children;
-                d._children = null;
-            }
-            updateTreeLayout(d);
+            toggleFold(d);
         });
 
     // Native tooltip. First child, as SVG wants <title> to be, and on every
     // node: the cards with no ports are the control and decorator nodes whose
-    // category the tooltip is now the place to spell out.
+    // category the tooltip spells out.
     nodeEnter.append("title")
         .text(d => nodeTitle(d.data));
 
@@ -334,6 +333,52 @@ function updateTreeLayout(sourceNode) {
         d.x0 = d.x;
         d.y0 = d.y;
     });
+
+    // Cards that just (re)appeared, e.g. by unfolding, show the displayed state
+    // now rather than IDLE until the next frame.
+    paintStatus(lastStatusMap);
+}
+
+// Fold or unfold one node: its card's click, and its Timeline row's chevron.
+// The Timeline lists the canvas's own fold, so it follows on the next render.
+function toggleFold(d) {
+    if (d.children) {
+        d._children = d.children;
+        d.children = null;
+    } else {
+        d.children = d._children;
+        d._children = null;
+    }
+    updateTreeLayout(d);
+    requestRender();
+}
+
+// Alt-click on a Timeline chevron: fold every subtree except this node's own
+// (it and its ancestors are unfolded), so only its section stays open.
+function foldOthers(d) {
+    const keep = new Set(d.ancestors());
+    KleinRecording.eachNode(rootNodeSnapshot, (node) => {
+        if (keep.has(node)) {
+            if (node._children) {
+                node.children = node._children;
+                node._children = null;
+            }
+        } else if (node.data.is_subtree_root && node.children) {
+            node._children = node.children;
+            node.children = null;
+        }
+    });
+    updateTreeLayout(rootNodeSnapshot);
+    requestRender();
+}
+
+// The hierarchy node with this layout id, folded away or not.
+function nodeById(id) {
+    let found = null;
+    KleinRecording.eachNode(rootNodeSnapshot, (node) => {
+        if (node.data.id === id) found = node;
+    });
+    return found;
 }
 
 // Cubic Bézier connector drawn card-edge to card-edge: parent bottom-center
@@ -359,20 +404,16 @@ function diagonalCurve({ source, target }) {
 // ------------------------------------------------------------------ //
 // Live status coloring — updates strokes/pills in place, no re-render
 // ------------------------------------------------------------------ //
-// The last frame the robot sent, kept whole. The per-node `_statusKey` cache
-// below is a *DOM* cache — a collapsed subtree has no cards, so it holds nothing
-// for exactly the nodes runningFrontier() most needs. This map is by uid and so
-// covers the whole tree, folded away or not.
+// The displayed state (see render()), kept whole. The per-node `_statusKey`
+// cache below is a *DOM* cache — a collapsed subtree has no cards, so it holds
+// nothing for exactly the nodes runningFrontier() most needs. This map is by uid
+// and so covers the whole tree, folded away or not.
 let lastStatusMap = {};
-// The last frame in which anything was RUNNING. Once the tree finishes, this is
-// where the action last was, and so where F goes.
+// The last displayed state in which anything was RUNNING. Once the tree
+// finishes, this is where the action last was, and so where F goes.
 let lastActiveStatusMap = {};
 
-function applyStatus(telemetryMap) {
-    lastStatusMap = telemetryMap;
-    if (Object.values(telemetryMap).some(entry => entry.status === "RUNNING")) {
-        lastActiveStatusMap = telemetryMap;
-    }
+function paintStatus(telemetryMap) {
     gContainer.selectAll("g.node").each(function(d) {
         if (d.data.uid == null) return;             // node has no UID to match
         const entry = telemetryMap[d.data.uid];     // { status, from }
@@ -465,13 +506,10 @@ function collectBoards(root) {
 // _children included, so a collapsed subtree keeps its level and comes back at
 // the right tint when it is reopened.
 function tagSubtreeDepth(root) {
-    (function walk(node, depth) {
-        const own = depth + (node.data.is_subtree_root ? 1 : 0);
-        node.subtreeDepth = own;
-        for (const child of node.children || node._children || []) {
-            walk(child, own);
-        }
-    })(root, 0);
+    KleinRecording.eachNode(root, (node) => {
+        node.subtreeDepth = (node.parent ? node.parent.subtreeDepth : 0)
+                            + (node.data.is_subtree_root ? 1 : 0);
+    });
 }
 
 function createBBGroup(info) {
@@ -593,7 +631,11 @@ function syncBBOrder(container, ordered) {
     if (!correct) ordered.forEach(el => container.appendChild(el));
 }
 
-function renderBlackboards(boards) {
+// `flash: false` paints without flashing changed rows: for a cursor moving
+// through the past, where every step changes something.
+//
+// `empty` is what the panel says when there are no boards at all.
+function renderBlackboards(boards, { flash = true, empty = "This robot reports no blackboards." } = {}) {
     // Layout order first, so the panel reads like the canvas. A board the robot
     // reports that the layout never mentioned is still shown, flat at the
     // bottom — cover for a robot whose XML omits the instance paths.
@@ -642,10 +684,12 @@ function renderBlackboards(boards) {
             // Flash on a real change only — not the first time a key is seen.
             const stateKey = name + " " + key;
             const serialized = JSON.stringify(value === undefined ? null : value);
-            if (stateKey in bbLastValues && bbLastValues[stateKey] !== serialized) {
+            if (flash && stateKey in bbLastValues && bbLastValues[stateKey] !== serialized) {
                 row.row.classList.remove("bb-changed");
                 void row.row.offsetWidth;        // restart a flash already in flight
                 row.row.classList.add("bb-changed");
+            } else if (!flash) {
+                row.row.classList.remove("bb-changed");     // a live flash still running
             }
             bbLastValues[stateKey] = serialized;
         }
@@ -674,7 +718,7 @@ function renderBlackboards(boards) {
     bbCount.textContent = names.length ? String(names.length) : "";
     // Per-board dashes cover empty boards; this line is for having none at all.
     bbEmpty.hidden = names.length > 0;
-    bbEmpty.textContent = "This robot reports no blackboards.";
+    bbEmpty.textContent = empty;
 }
 
 // A new tree means new boards: drop the old ones rather than leave values that
@@ -693,49 +737,118 @@ function resetBlackboards() {
 }
 
 // ------------------------------------------------------------------ //
-// Sidebar — collapsible, and the camera works around it
+// Sidebar — resizable and collapsible like the drawer; the camera works around it
 // ------------------------------------------------------------------ //
+// The shown width lives in --sidebar-width on <html>, so the drawer's left
+// edge and the banner stack's centre follow it in CSS alone; the camera reads
+// sidebarWidth() (visibleViewport). Collapsed, a strip as wide as the
+// drawer's toolbar is tall keeps the fold button, as the collapsed drawer
+// keeps its toolbar. See docs/architecture.md, "The sidebar".
 const sidebar = document.getElementById("sidebar");
-const sidebarCollapse = document.getElementById("sidebar-collapse");
-const sidebarShow = document.getElementById("sidebar-show");
+const SIDEBAR_DEFAULT = 320;                // px
+const SIDEBAR_MIN = 200;                    // px; at most half the window
+const SIDEBAR_STRIP = 49;                   // collapsed: 48 px plus the right border
+
+// Right is wider; dragging a collapsed sidebar opens it at the dragged width.
+// Resized or folded, the drawer under the canvas changed width with it, so
+// the Timeline's bars are redrawn for its new axis.
+const sidebarPane = KleinDrawer.pane({
+    el: sidebar, handle: document.getElementById("sidebar-handle"),
+    button: document.getElementById("sidebar-collapse"),
+    key: "klein.sidebar", sizeName: "width", cssVar: "--sidebar-width", axis: "x", grow: 1,
+    initial: SIDEBAR_DEFAULT, strip: () => SIDEBAR_STRIP,
+    clamp: (w) => Math.round(Math.max(SIDEBAR_MIN, Math.min(w, window.innerWidth / 2))),
+    labels: ["Collapse panel", "Expand panel"], ariaLabel: true,
+    onResize: () => requestRender(),
+    onFold: nudgeCamera,
+});
 
 // How much of the viewport's left edge the pane covers. The canvas spans the
 // whole window, so this is what keeps the tree out from under the pane.
 function sidebarWidth() {
-    return sidebar.classList.contains("collapsed") ? 0 : sidebar.offsetWidth;
+    return sidebarPane.shown();
 }
 
-function setSidebarOpen(open) {
-    const width = sidebar.offsetWidth;
-    sidebar.classList.toggle("collapsed", !open);
-    sidebarShow.hidden = open;
-    sidebarCollapse.setAttribute("aria-expanded", String(open));
-    sidebarShow.setAttribute("aria-expanded", String(open));
-
-    // Nudge the view by half the pane so the tree stays centred in the space
-    // that is actually visible — without throwing away the reader's zoom/pan.
+// Folded or unfolded: nudge the view by half the change so the tree stays
+// centred in the space that is actually visible — without throwing away the
+// reader's zoom/pan.
+function nudgeCamera(before) {
     if (!rootNodeSnapshot) return;
     const current = d3.zoomTransform(svg.node());
     const shifted = d3.zoomIdentity
-        .translate(current.x + (open ? width / 2 : -width / 2), current.y)
+        .translate(current.x + (sidebarWidth() - before) / 2, current.y)
         .scale(current.k);
     svg.transition().duration(220).call(zoomBehavior.transform, shifted);
 }
 
-sidebarCollapse.addEventListener("click", () => setSidebarOpen(false));
-sidebarShow.addEventListener("click", () => setSidebarOpen(true));
+// The part of the window the canvas can actually be seen in: right of the
+// sidebar, below the banner strip and above the drawer. The svg spans the
+// whole window under them, so every camera move aims at this instead. Its bottom is the top of the hint
+// line (#watermark), which rides just above the drawer: a fitted tree would
+// otherwise put its last row under it.
+const watermark = document.getElementById("watermark");
 
-// Pan the camera so the root sits at the conventional entry point:
-// top-center for vertical trees, left-center for horizontal ones.
-function resetCamera() {
-    // Cards are center-anchored, so offset by half a card to keep the root
-    // fully on-screen — and clear of the sidebar.
-    const scale = 0.8;
+// The top strip is always kept clear for one banner pill (#banner-stack:
+// 12px from the top, a 34px pill, plus a margin), so the camera never puts
+// the tree under the "Viewing t = …" pill and pausing doesn't move it. A
+// second pill at once may overlap the tree's top for a moment.
+const BANNER_INSET = 12 + 34 + 10;
+
+function visibleViewport() {
     const left = sidebarWidth();
+    return { left, top: BANNER_INSET, width: window.innerWidth - left,
+             height: watermark.getBoundingClientRect().top - BANNER_INSET };
+}
+
+// Breathing room around a framed group, in layout units — roughly a third of a
+// card, enough that the framed cards never sit against the window edge.
+const framePad = 60;
+
+// The screen-oriented box (x across, y down, layout units) around these cards.
+// Cards are centre-anchored, and layout coords are (sibling, depth) — the swap
+// to screen coords is the same one nodeTransform() makes.
+function cardBounds(nodes) {
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const node of nodes) {
+        const [x, y] = orientation === "vertical" ? [node.x, node.y] : [node.y, node.x];
+        minX = Math.min(minX, x - nodeWidth / 2);
+        maxX = Math.max(maxX, x + nodeWidth / 2);
+        minY = Math.min(minY, y - nodeHeight / 2);
+        maxY = Math.max(maxY, y + nodeHeight / 2);
+    }
+    return { minX, maxX, minY, maxY };
+}
+
+// How long R, F and a blackboard focus fly the camera: no flight at all for a
+// reader who asked the system for reduced motion.
+const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+function cameraMs() {
+    return reducedMotion.matches ? 0 : 500;
+}
+
+// The scale at which a box (plus framePad all round) just fits the view.
+function fitScale(box, view) {
+    return Math.min(view.width / (box.maxX - box.minX + framePad * 2),
+                    view.height / (box.maxY - box.minY + framePad * 2));
+}
+
+// Fit the whole (unfolded) tree into the visible viewport, with the root at
+// the conventional entry point: the tree's top edge at the top, centred
+// across, for vertical trees; its left edge at the left, centred down, for
+// horizontal ones. Never zooms in past 1:1, so a small tree isn't blown up.
+function resetCamera() {
+    const view = visibleViewport();
+    const box = cardBounds(rootNodeSnapshot.descendants());
+    // Clamped here rather than left to d3: it silently clamps the transform it
+    // stores, which would leave the translate below computed for another scale.
+    const [minScale] = zoomBehavior.scaleExtent();
+    const scale = Math.max(minScale, Math.min(1, fitScale(box, view)));
     const target = orientation === "vertical"
-        ? d3.zoomIdentity.translate(left + (window.innerWidth - left) / 2, 80).scale(scale)
-        : d3.zoomIdentity.translate(left + 40 + (nodeWidth / 2) * scale, window.innerHeight / 2).scale(scale);
-    svg.transition().duration(500).call(zoomBehavior.transform, target);
+        ? d3.zoomIdentity.translate(view.left + view.width / 2 - (box.minX + box.maxX) / 2 * scale,
+                                    view.top + (framePad - box.minY) * scale)
+        : d3.zoomIdentity.translate(view.left + (framePad - box.minX) * scale,
+                                    view.top + view.height / 2 - (box.minY + box.maxY) / 2 * scale);
+    svg.transition().duration(cameraMs()).call(zoomBehavior.transform, target.scale(scale));
 }
 
 // Open every collapsed ancestor of these nodes, so each one has a card again.
@@ -764,11 +877,11 @@ function focusNode(node) {
 
     const scale = 0.9;
     const [x, y] = orientation === "vertical" ? [node.x, node.y] : [node.y, node.x];
-    const left = sidebarWidth();
-    const centerX = left + (window.innerWidth - left) / 2;
-    svg.transition().duration(500).call(
+    const view = visibleViewport();
+    svg.transition().duration(cameraMs()).call(
         zoomBehavior.transform,
-        d3.zoomIdentity.translate(centerX - x * scale, window.innerHeight / 2 - y * scale).scale(scale)
+        d3.zoomIdentity.translate(view.left + view.width / 2 - x * scale,
+                                  view.top + view.height / 2 - y * scale).scale(scale)
     );
     pulseNodes([node]);
 }
@@ -796,44 +909,24 @@ function runningFrontier(statusMap = lastStatusMap) {
     return frontier;
 }
 
-// Breathing room around a framed group, in layout units — roughly a third of a
-// card, enough that the framed cards never sit against the window edge.
-const framePad = 60;
-
 // Fit a set of cards in the visible canvas. Unlike focusNode this keeps the
 // reader's zoom whenever the group already fits, and only ever zooms *out* —
 // a single running leaf should not throw the reader to 3x, and holding the
 // scale makes a second press a no-op rather than a lurch.
 function frameNodes(nodes) {
     if (!nodes.length) return;
-    const left = sidebarWidth();
-    const viewWidth = window.innerWidth - left;
-    const viewHeight = window.innerHeight;
+    const view = visibleViewport();
+    const box = cardBounds(nodes);
+    const [minScale] = zoomBehavior.scaleExtent();      // see resetCamera
+    const scale = Math.max(minScale, Math.min(d3.zoomTransform(svg.node()).k, fitScale(box, view)));
 
-    // Cards are centre-anchored, and layout coords are (sibling, depth) — the
-    // swap to screen coords is the same one nodeTransform() makes.
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    for (const node of nodes) {
-        const [x, y] = orientation === "vertical" ? [node.x, node.y] : [node.y, node.x];
-        minX = Math.min(minX, x - nodeWidth / 2);
-        maxX = Math.max(maxX, x + nodeWidth / 2);
-        minY = Math.min(minY, y - nodeHeight / 2);
-        maxY = Math.max(maxY, y + nodeHeight / 2);
-    }
-
-    const fit = Math.min(viewWidth / (maxX - minX + framePad * 2),
-                         viewHeight / (maxY - minY + framePad * 2));
-    // Clamped here rather than left to d3: it silently clamps the transform it
-    // stores, which would leave the translate below computed for another scale.
-    const [minScale] = zoomBehavior.scaleExtent();
-    const scale = Math.max(minScale, Math.min(d3.zoomTransform(svg.node()).k, fit));
-
-    const centerX = (minX + maxX) / 2;
-    const centerY = (minY + maxY) / 2;
-    svg.transition().duration(500).call(
+    const centerX = (box.minX + box.maxX) / 2;
+    const centerY = (box.minY + box.maxY) / 2;
+    svg.transition().duration(cameraMs()).call(
         zoomBehavior.transform,
         d3.zoomIdentity
-            .translate(left + viewWidth / 2 - centerX * scale, viewHeight / 2 - centerY * scale)
+            .translate(view.left + view.width / 2 - centerX * scale,
+                       view.top + view.height / 2 - centerY * scale)
             .scale(scale)
     );
 }
@@ -852,6 +945,7 @@ function focusAction() {
     if (revealAncestors(frontier)) updateTreeLayout(rootNodeSnapshot);   // sets x/y
     frameNodes(frontier);
     pulseNodes(frontier);
+    KleinTimeline.revealRows(frontier.map(node => node.data.id));
 }
 
 let pulseTimer = null;
@@ -877,12 +971,13 @@ function highlightNode(node, on) {
 // asked: where is the action, and where is everything.
 //
 // Unmodified presses only — Ctrl/Cmd+R still reloads the page and Cmd+F still
-// opens the browser's find bar. The sidebar is full of real buttons, radios and
-// disclosures, so keys pressed inside it belong to whatever has focus there.
+// opens the browser's find bar. The sidebar and the drawer are full of real
+// buttons, radios and disclosures, so keys pressed inside them belong to
+// whatever has focus there.
 window.addEventListener("keydown", (event) => {
     if (event.ctrlKey || event.metaKey || event.altKey) return;
     if (!rootNodeSnapshot) return;
-    if (event.target.closest?.("#sidebar")) return;
+    if (event.target.closest?.("#sidebar, #drawer")) return;
 
     const key = event.key.toLowerCase();
     if (key === "f") focusAction();
@@ -905,21 +1000,40 @@ for (const input of document.querySelectorAll('input[name="layout"]')) {
 }
 
 // ------------------------------------------------------------------ //
-// Banners — the floating messages along the bottom of the canvas
+// Banners — one stack of pills along the top of the canvas
 // ------------------------------------------------------------------ //
 // A banner is addressed by a stable `key`, so repeated news about the same
 // thing replaces it instead of piling up, and any caller can take its own
 // message down without knowing what else is on screen. `kind` picks the dot
 // colour and the sort order (see .banner.* in styles.css); `timeout` makes it
 // clear itself. A new kind of message costs one showBanner() call.
+//
+// `action` ({label, onClick}) adds a button, as "Back to live" on the
+// "Viewing t = …" pill; `mono` sets the text in monospace; `live: false`
+// keeps a pill that changes on every key press out of the aria-live stack's
+// announcements.
 const bannerStack = document.getElementById("banner-stack");
 const BANNER_FADE_MS = 450;     // must match the .banner.leaving transition
-const banners = new Map();      // key -> { el, timers }
+const banners = new Map();      // key -> { el, text, button, timers }
 
-function showBanner(key, text, { kind = "info", timeout = 0 } = {}) {
+function showBanner(key, text, { kind = "info", timeout = 0, action = null, mono = false,
+                                 live = true } = {}) {
     let entry = banners.get(key);
     if (!entry) {
-        entry = { el: bannerStack.appendChild(document.createElement("div")), timers: [] };
+        const el = bannerStack.appendChild(document.createElement("div"));
+        el.dataset.key = key;
+        if (!live) el.setAttribute("aria-live", "off");
+        const textEl = el.appendChild(document.createElement("span"));
+        textEl.className = "banner-text" + (mono ? " mono" : "");
+        let button = null;
+        if (action) {
+            button = el.appendChild(document.createElement("button"));
+            button.type = "button";
+            button.className = "banner-action";
+            button.textContent = action.label;
+            button.addEventListener("click", action.onClick);
+        }
+        entry = { el, text: textEl, button, timers: [] };
         banners.set(key, entry);
     }
     entry.timers.forEach(clearTimeout);     // a repeat restarts the clock
@@ -928,7 +1042,7 @@ function showBanner(key, text, { kind = "info", timeout = 0 } = {}) {
     // re-asserted does not replay its entry animation.
     const className = `banner ${kind}`;
     if (entry.el.className !== className) entry.el.className = className;
-    if (entry.el.textContent !== text) entry.el.textContent = text;
+    if (entry.text.textContent !== text) entry.text.textContent = text;
     if (timeout > 0) {
         // Removed in two steps: the element has to leave the flex stack to
         // avoid holding a gap open, and that cannot be transitioned — so it
@@ -964,7 +1078,11 @@ function updateConnectionUI() {
         dot.attr("class", "dot");
         txt.text("klein gateway offline — reconnecting…");
         showBanner("connection", "Lost connection to the klein gateway — reconnecting…",
-                   { kind: "warn" });
+                   { kind: "error" });
+    } else if (shownRecording()?.source === "file") {
+        dot.attr("class", "dot file");
+        txt.text(robotDetail);
+        hideBanner("connection");   // no robot by design: nothing has gone wrong
     } else if (!robotConnected) {
         dot.attr("class", "dot warn");
         txt.text(robotDetail);
@@ -977,16 +1095,198 @@ function updateConnectionUI() {
 }
 
 // ------------------------------------------------------------------ //
+// One render path — what the cursor shows, painted on the next frame
+// ------------------------------------------------------------------ //
+// Messages only store what they carry and ask for a frame; render() decides
+// what to show. While klein records, that is its recording at the cursor, and
+// live is the head of the last segment. Without a recording (--record-buffer
+// 0, or a robot older than BehaviorTree.CPP 4.3.3) it is the latest `layout`,
+// `status` and `blackboard` frames. Either way the same
+// paintStatus/renderBlackboards draw it; only the source differs.
+//
+// The browser's mirror of the gateway's recording (recording.js), filled from
+// the WebSocket.
+const recordingStore = KleinRecording.createStore();
+// The one recording klein streams: the robot's or an opened file's.
+function shownRecording() {
+    return recordingStore.recording;
+}
+// The shared cursor: live, paused where the Log or the Timeline put it, or
+// playing at 1x.
+let clock = KleinCursor.live();
+function seek(next) {
+    clock = next;
+    requestRender({ boards: true });
+}
+KleinDrawer.onSeek(seek);
+KleinTimeline.connect({
+    seek,
+    toggleFold: (id) => { const d = nodeById(id); if (d) toggleFold(d); },
+    foldOthers: (id) => { const d = nodeById(id); if (d) foldOthers(d); },
+    glyphFor,
+});
+
+// The latest frames, for when there is no recording to show.
+let frameTree = null;
+let frameStatus = {};
+let frameBoards = null;
+
+// The root id of the tree on the canvas. Node ids are generation-prefixed (see
+// updateTreeLayout), so an equal id is the same tree: a `segment` and a `layout`
+// frame for one tree draw it once, and a same-tree restart not at all.
+let drawnTreeId = null;
+let displaySource = "frames";
+let renderQueued = false;
+let boardsDirty = false;
+let boardsLive = true;          // the board panel last showed live values
+
+function requestRender({ boards = false } = {}) {
+    boardsDirty = boardsDirty || boards;
+    if (renderQueued) return;
+    renderQueued = true;
+    // A hidden tab gets no animation frames; a (throttled) timer still keeps
+    // the displayed state, and so where F goes, current.
+    (document.hidden ? setTimeout : requestAnimationFrame)(render);
+}
+
+// A new tree: rebuild the hierarchy, the board list and the camera.
+function showTree(treeData) {
+    drawnTreeId = treeData.id;
+    rootNodeSnapshot = d3.hierarchy(treeData);
+    rootNodeSnapshot.x0 = 0;
+    rootNodeSnapshot.y0 = 0;
+    tagSubtreeDepth(rootNodeSnapshot);
+
+    bbBoardList = collectBoards(rootNodeSnapshot);
+    lastStatusMap = {};      // its uids indexed the tree we just dropped
+    lastActiveStatusMap = {};
+    resetBlackboards();
+    updateTreeLayout(rootNodeSnapshot);
+    resetCamera();
+    boardsDirty = true;
+}
+
+function render() {
+    renderQueued = false;
+    const rec = shownRecording();
+    KleinDrawer.showRecording(rec, recordingSupport);
+    const now = performance.now();
+    // Eviction dropped the moment shown: pause on the oldest kept record (just
+    // after it, as clicking its Log row does), and say so rather than jump
+    // silently. Eviction goes oldest first, so that is the first segment's.
+    if (rec && rec.backfillDone && KleinCursor.evicted(clock, now, rec)) {
+        const first = rec.segments[0];
+        clock = KleinCursor.pause(first.id, Math.min(first.startSeq + 1, first.headSeq));
+        showBanner("evicted", `Older than the kept ${KleinDrawer.keptSpan(rec)}: `
+                   + "moved to the oldest kept transition", { kind: "info", timeout: 6000 });
+    }
+    let pos = rec && rec.backfillDone ? KleinCursor.cursorPos(clock, now, rec) : null;
+    // Playing moves on every frame, and goes live once it reaches the head.
+    if (pos && clock.mode === "playing") {
+        if (pos.live) clock = KleinCursor.live();
+        else requestRender({ boards: true });
+    }
+    const seg = pos && rec.segment(pos.seg);
+    // An ended segment stays the source while the robot is away (its head is
+    // the last state klein saw); once klein says the robot is back but can't
+    // record, its status frames are shown instead.
+    const recording = Boolean(seg)
+        && !(pos.live && seg.tEnd !== null && recordingSupport === "unsupported");
+    const source = recording ? "recording" : "frames";
+    if (source !== displaySource) boardsDirty = true;
+    displaySource = source;
+    document.body.classList.toggle("viewing-past", recording && !pos.live);
+    // An opened file without a .bb.jsonl sidecar: there is no blackboard at any moment.
+    const noBoards = recording && rec.source === "file" && seg.bb.tStart === null;
+    document.body.classList.toggle("no-blackboard", noBoards);
+    // The moment shown, first in the banner stack, with the way back.
+    if (recording && !pos.live) {
+        // An opened file has no live to go back to: no button (Esc still
+        // returns to its end).
+        const action = rec.source === "file" ? null
+            : { label: "Back to live", onClick: KleinDrawer.goLive };
+        showBanner("viewing", `Viewing t = ${KleinDrawer.formatTime(pos.t)}`,
+                   { kind: "past", mono: true, live: false, action });
+    } else {
+        hideBanner("viewing");
+    }
+    KleinDrawer.update(pos && rec, pos);
+
+    const tree = recording ? seg.layout : frameTree;
+    if (tree && tree.id !== drawnTreeId) showTree(tree);
+    KleinTimeline.update(recording ? rec : null, pos, rootNodeSnapshot, clock);
+    if (!rootNodeSnapshot) return;
+
+    lastStatusMap = recording
+        ? KleinRecording.decodeState(KleinRecording.stateAtSeq(seg, pos.seq), seg.uids)
+        : frameStatus;
+    if (Object.values(lastStatusMap).some(entry => entry.status === "RUNNING")) {
+        lastActiveStatusMap = lastStatusMap;
+    }
+    paintStatus(lastStatusMap);
+
+    if (!boardsDirty) return;
+    boardsDirty = false;
+    // Live takes the newest sample, even one stamped a moment after the last
+    // drain's head. Null before a segment's first sample: live keeps what is
+    // shown (or waits for values); a past moment shows no values, since what
+    // is shown belongs to another moment.
+    const boards = recording ? KleinRecording.bbAt(seg, pos.live ? Infinity : pos.t)
+                             : frameBoards;
+    // Flash only live changes: not moving through the past, and not the jump
+    // back to live from it.
+    const live = !recording || pos.live;
+    if (boards) {
+        renderBlackboards(boards, { flash: live && boardsLive });
+    } else if (noBoards) {
+        renderBlackboards({}, { flash: false, empty: "No blackboard in this file." });
+    } else if (!live) {
+        // Before the segment's kept blackboard: dropped by eviction (which
+        // cuts the blackboard at the exact cutoff, transitions by whole
+        // chunks), or a moment before its first sample.
+        const empty = seg.bbDropped ? "Blackboard history from this moment was dropped."
+                                    : "No blackboard sample yet at this moment.";
+        renderBlackboards({}, { flash: false, empty });
+    } else if (!boardsLive) {
+        renderBlackboards({}, { flash: false, empty: "Waiting for values…" });
+    }
+    boardsLive = live;
+}
+
+// Read-only facts about the mirror and the display, for the test harness
+// (BrowserProbe): `displayed` is the state last painted.
+window.kleinDebug = () => {
+    const rec = shownRecording();
+    return { ...(rec ? KleinRecording.describe(rec) : {}),
+             displaySource, displayed: lastStatusMap };
+};
+
+// ------------------------------------------------------------------ //
 // Gateway WebSocket connection
 // ------------------------------------------------------------------ //
+// Whether a recording frame can change the boards shown. A head or a gap
+// can't; nor can eviction while live, which keeps each key's newest value,
+// but in the past it may move the blackboard's start past the cursor.
+function changesBoards(type) {
+    if (type === "head" || type === "gap") return false;
+    return type !== "evict" || clock.mode !== "live";
+}
+
 function connectGatewayPipeline() {
     // Same origin as this page — klein serves HTTP + WebSocket on one port.
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/ws`);
+    ws.binaryType = "arraybuffer";  // the recording's records frames
 
     ws.onopen = () => {
         gatewayConnected = true;
         updateConnectionUI();       // klein sends the robot's state right after
+        // klein re-sends everything, and the first tree it names redraws the
+        // canvas.
+        drawnTreeId = null;
+        frameTree = null;
+        frameStatus = {};
+        frameBoards = null;
     };
 
     ws.onclose = () => {
@@ -999,31 +1299,33 @@ function connectGatewayPipeline() {
     ws.onerror = () => ws.close();
 
     ws.onmessage = (event) => {
+        if (typeof event.data !== "string") {   // binary: the recording's records
+            recordingStore.ingest(event.data);
+            requestRender();
+            return;
+        }
         const message = JSON.parse(event.data);
-
-        if (message.type === "layout") {
-            const treeData = message.data;
-            if (!treeData) return;
-
-            rootNodeSnapshot = d3.hierarchy(treeData);
-            rootNodeSnapshot.x0 = 0;
-            rootNodeSnapshot.y0 = 0;
-            tagSubtreeDepth(rootNodeSnapshot);
-
-            bbBoardList = collectBoards(rootNodeSnapshot);
-            lastStatusMap = {};      // its uids indexed the tree we just dropped
-            lastActiveStatusMap = {};
-            resetBlackboards();
-            updateTreeLayout(rootNodeSnapshot);
-            resetCamera();
+        if (recordingStore.ingest(message)) {
+            requestRender({ boards: changesBoards(message.type) });
+            return;
         }
 
-        else if (message.type === "status" && rootNodeSnapshot) {
-            applyStatus(message.data);
+        if (message.type === "layout") {
+            if (!message.data) return;
+            frameTree = message.data;
+            frameStatus = {};        // its uids indexed the previous tree
+            frameBoards = null;
+            requestRender({ boards: true });
+        }
+
+        else if (message.type === "status") {
+            frameStatus = message.data;
+            requestRender();
         }
 
         else if (message.type === "blackboard") {
-            renderBlackboards(message.data || {});
+            frameBoards = message.data || {};
+            requestRender({ boards: true });
         }
 
         else if (message.type === "notice") {
@@ -1033,7 +1335,9 @@ function connectGatewayPipeline() {
         else if (message.type === "robot") {
             robotConnected = message.connected;
             robotDetail = message.detail;
+            recordingSupport = message.recording;
             updateConnectionUI();
+            requestRender();        // the drawer's chip
         }
     };
 }

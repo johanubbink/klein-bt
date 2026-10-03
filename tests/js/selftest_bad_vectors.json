@@ -1,0 +1,14 @@
+{
+  "module": "selftest_model.js",
+  "cases": [
+    {"name": "passes", "call": "applyTransition", "args": [{}, 3, 1], "expect": {"3": 1}},
+    {"name": "KNOWN-BAD: IDLE after SUCCESS claimed to be plain 0", "call": "applyTransition",
+     "args": [{"3": 2}, 3, 0], "expect": {"3": 0}},
+    {"name": "KNOWN-BAD: an unknown function", "call": "noSuchFunction", "args": [], "expect": null},
+    {"name": "KNOWN-BAD: a wrong Map (plain JSON would call both {})", "call": "countByUid",
+     "args": [[[0, 11, 1]]], "expect": {}},
+    {"name": "KNOWN-BAD: a wrong Set", "call": "uidsTouched",
+     "args": [[[0, 11, 1]]], "expect": [4]},
+    {"name": "KNOWN-BAD: no expect", "call": "replay", "args": [[]]}
+  ]
+}

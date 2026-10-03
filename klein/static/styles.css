@@ -27,12 +27,12 @@
     /* Subtree nesting — the *region* channel. Each step is both lighter *and*
        tinted further toward --type-SubTree, because a ~1.13:1 step of lightness
        alone is too quiet to answer "where does this subtree start?" across a
-       wide tree. Carrying the subtree's own hue also
-       ties the region to the pink glyph, caption and frame on the card that
-       opens it. The lightness component is what survives a colour vision
-       deficiency; the hue is what makes it obvious to everyone else.
-       Three steps is the ceiling — a fourth starts reading as a highlight. */
-    --subtree-fill-0: #23232f;      /* main tree — the card as it has always been */
+       wide tree. Carrying the subtree's own hue also ties the region to the
+       pink glyph, caption and frame on the card that opens it. The lightness
+       component is what survives a colour vision deficiency; the hue is what
+       makes it obvious to everyone else. Three steps is the ceiling — a fourth
+       starts reading as a highlight. */
+    --subtree-fill-0: #23232f;      /* main tree */
     --subtree-fill-1: #35293f;
     --subtree-fill-2: #46324f;
     --subtree-fill-3: #573b60;      /* depth 3 and deeper, clamped */
@@ -40,7 +40,17 @@
     /* No system stack guarantees symbol coverage; name the symbol fonts. */
     --font-symbol: "DejaVu Sans", "Noto Sans Symbols 2", "Segoe UI Symbol", sans-serif;
 
+    /* Not recorded: the hatch of the Timeline's gap bands and the Log's
+       "dropped" line, so "nothing here" reads the same in both tabs. */
+    --hatch: repeating-linear-gradient(135deg,
+        color-mix(in srgb, var(--color-IDLE) 22%, transparent) 0 4px, transparent 4px 9px);
+
+    /* Set by app.js: the sidebar's shown width (the 49 px strip when
+       collapsed), which the drawer and the banner stack sit right of. */
     --sidebar-width: 320px;
+    /* Set by drawer.js: the drawer's height, which the hint line
+       (#watermark) rises by. This is the toolbar alone, until it runs. */
+    --drawer-height: 49px;
 }
 
 body, html {
@@ -53,6 +63,9 @@ body, html {
     color: var(--text-main);
     overflow: hidden;
 }
+
+/* The attribute always hides, whatever display a rule gives the element. */
+[hidden] { display: none !important; }
 
 /* Visible to screen readers, not on screen. */
 .sr-only {
@@ -70,8 +83,11 @@ body, html {
 /* ------------------------------------------------------------------ */
 /* Full height because a real robot's blackboards are far taller than any
    floating card: eight boards and seventeen root entries need the screen. It
-   overlays rather than insets so the canvas keeps the whole viewport, and it
-   slides away entirely when you want the tree to itself. */
+   overlays rather than insets so the canvas keeps the whole viewport. It
+   behaves like the drawer: its width is --sidebar-width (app.js), dragged on
+   the right edge, and collapsed it leaves a 49 px strip with its fold button,
+   as the collapsed drawer leaves its toolbar. Above the drawer (z-index), so
+   the edge's grip stays whole where they meet. */
 #sidebar {
     position: absolute;
     top: 0;
@@ -79,16 +95,37 @@ body, html {
     bottom: 0;
     width: var(--sidebar-width);
     box-sizing: border-box;     /* the stated width is the width, border included */
-    z-index: 10;
+    z-index: 11;
     display: flex;
     flex-direction: column;
     background: rgba(26, 26, 34, 0.85);
     backdrop-filter: blur(8px);
     border-right: 1px solid var(--border-color);
     box-shadow: 4px 0 15px -3px rgba(0, 0, 0, 0.5);
-    transition: transform 0.22s ease;
 }
-#sidebar.collapsed { transform: translateX(-100%); }
+#sidebar.collapsed > :not(#sidebar-collapse, #sidebar-handle) { display: none; }
+
+/* The right edge is the grip, as the drawer's top edge is (shared below). */
+#sidebar-handle {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    right: -5px;
+    width: 10px;
+    z-index: 1;
+    cursor: col-resize;
+    touch-action: none;
+}
+#sidebar-handle::after { top: 50%; left: 3px; width: 4px; height: 36px; margin-top: -18px; }
+
+/* The drawer's fold button (shared below), as far from the resize edge as the
+   drawer's is from its top edge: centred in the collapsed strip. */
+#sidebar-collapse {
+    position: absolute;
+    top: 9px;
+    right: 9px;
+    z-index: 1;
+}
 
 #sidebar-header {
     flex-shrink: 0;
@@ -96,41 +133,13 @@ body, html {
     border-bottom: 1px solid var(--border-color);
 }
 
-.header-row { display: flex; align-items: flex-start; gap: 10px; }
-
 h1 {
-    flex: 1;
     margin: 0;
+    padding-right: 26px;        /* clear of the fold button */
     font-size: 1.05rem;
     font-weight: 600;
     letter-spacing: -0.015em;
 }
-
-#sidebar-collapse, #sidebar-show {
-    flex-shrink: 0;
-    padding: 1px 7px 3px;
-    font-size: 0.95rem;
-    line-height: 1;
-    font-family: inherit;
-    color: var(--text-muted);
-    background: #23232f;
-    border: 1px solid var(--border-color);
-    border-radius: 5px;
-    cursor: pointer;
-}
-#sidebar-collapse:hover, #sidebar-show:hover { color: var(--text-main); border-color: #475569; }
-
-/* The only way back once the pane is gone: a handle tucked against the edge. */
-#sidebar-show {
-    position: absolute;
-    top: 16px;
-    left: 0;
-    z-index: 10;
-    padding: 6px 8px 8px;
-    border-left: 0;
-    border-radius: 0 6px 6px 0;
-}
-#sidebar-show[hidden] { display: none; }
 
 .status-tracker {
     display: flex;
@@ -151,12 +160,14 @@ h1 {
 }
 .dot.online { background-color: #22c55e; box-shadow: 0 0 8px #22c55e; }
 .dot.warn { background-color: var(--color-RUNNING); box-shadow: 0 0 8px var(--color-RUNNING); }
+.dot.file { background-color: var(--accent); }      /* an opened file: no robot, by design */
 
 /* ------------------------------------------------------------------ */
 /* Layout selector — a segmented control, not a mystery button          */
 /* ------------------------------------------------------------------ */
 .control-row {
     display: flex;
+    flex-wrap: wrap;            /* a narrow sidebar puts the control under its label */
     align-items: center;
     gap: 10px;
     margin-top: 14px;
@@ -318,6 +329,17 @@ h1 {
     font-style: italic;
 }
 
+/* Viewing the past: the blackboard is a 2 Hz sample, not a per-transition
+   record, so say so once while the panel shows a past moment. */
+#bb-past-note {
+    display: none;
+    margin: 0 6px 8px;
+    font-size: 0.72rem;
+    color: color-mix(in srgb, var(--color-RUNNING) 40%, var(--text-main));
+}
+body.viewing-past #bb-past-note { display: block; }
+body.no-blackboard #bb-past-note { display: none; }     /* an opened file without one */
+
 /* Nesting mirrors the tree: a board owned by a subtree of a subtree is indented
    under it, with a hairline guide so the relationship survives long names. */
 .bb-group { padding-left: calc(var(--depth, 0) * 12px); }
@@ -350,8 +372,8 @@ h1 {
 .bb-group-toggle:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 
 /* Pink because it is the colour the canvas gives a subtree: its SubTree card's
-   glyph and caption, and the frame drawn around it. (--accent cyan is no longer
-   a type colour anywhere — it means "the UI is pointing at this".) */
+   glyph and caption, and the frame drawn around it. (--accent cyan is not a
+   type colour anywhere — it means "the UI is pointing at this".) */
 .bb-group-name {
     flex: 1;
     min-width: 0;
@@ -456,9 +478,6 @@ h1 {
 
 /* The breakdown a renderer produces for a struct: the fields worth naming,
    in full precision, rather than the JSON they arrived as. */
-/* `display: grid` outranks the UA stylesheet's [hidden] rule, so the attribute
-   has to be honoured explicitly or every breakdown shows unasked. */
-.bb-detail[hidden] { display: none; }
 .bb-detail {
     display: grid;
     grid-template-columns: auto 1fr;
@@ -490,23 +509,23 @@ h1 {
 @media (prefers-reduced-motion: reduce) {
     .bb-row.bb-changed { animation: none; }
     .bb-chevron, .segmented span { transition: none; }
-    #sidebar { transition: none; }
+    .fold-chevron { transition: none; }
     .node-rect { transition: none; }
     .node-rect.focused { animation: none; stroke: var(--accent) !important; }
     .banner { animation: none; }
     .banner.leaving { transition: none; }
 }
 
-/* Banners — the floating messages along the bottom of the canvas.
+/* Banners — one stack of pills along the top of the canvas.
    ------------------------------------------------------------------
    One stack, one look, addressed from app.js by key rather than by id, so a new
-   kind of message needs no markup. Bottom, not top: in the default vertical
-   layout the tree's root card sits at top-centre, and no passing message is
-   worth covering the first node of it. */
+   kind of message needs no markup. Centred over the visible canvas (right of
+   the sidebar at whatever width it is shown, its collapsed strip too). The camera keeps the
+   first pill's strip clear of the tree (BANNER_INSET in app.js). */
 #banner-stack {
     position: absolute;
-    bottom: 24px;
-    left: 50%;
+    top: 12px;
+    left: calc(var(--sidebar-width) + (100% - var(--sidebar-width)) / 2);
     transform: translateX(-50%);
     z-index: 20;
     max-width: 80%;
@@ -517,31 +536,49 @@ h1 {
     pointer-events: none;       /* the canvas keeps its full drag area */
 }
 
-/* A quiet panel-coloured pill. These float over the tree and are read in
-   passing, so the state rides on a small coloured dot — the same language as
-   the sidebar's connection indicator — rather than on a saturated fill. */
+/* A quiet panel-coloured pill, 34px tall. These float over the tree, so the
+   state rides on a small coloured dot — the same language as the sidebar's
+   connection indicator — rather than on a saturated fill. */
 .banner {
-    padding: 7px 14px 7px 12px;
-    border-radius: 6px;
-    text-align: center;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 34px;
+    box-sizing: border-box;
+    padding: 5px 16px 5px 14px;
+    border-radius: 999px;
     font-size: 0.82rem;
     font-weight: 500;
     color: var(--text-main);
     background: var(--panel-bg);
     border: 1px solid var(--border-color);
-    box-shadow: 0 2px 10px -4px rgba(0, 0, 0, 0.55);
+    box-shadow: 0 2px 10px -4px var(--bg-color);
     animation: banner-in 0.18s ease-out;
 }
+.banner:has(.banner-action) { padding-right: 5px; }
 .banner::before {
     content: "";
-    display: inline-block;
+    flex-shrink: 0;
     width: 7px;
     height: 7px;
+    margin-right: -4px;         /* 8px to the text, inside the 12px gap */
     border-radius: 50%;
-    margin-right: 8px;
-    vertical-align: 1px;
     background-color: var(--banner-dot, var(--text-muted));
 }
+.banner-text.mono { font-family: ui-monospace, "DejaVu Sans Mono", monospace; white-space: nowrap; }
+.banner-action {
+    pointer-events: auto;       /* the stack lets clicks through; its buttons don't */
+    height: 24px;
+    padding: 0 12px;
+    font: inherit;
+    color: inherit;
+    background: color-mix(in srgb, var(--text-main) 10%, var(--panel-bg));
+    border: 0;
+    border-radius: 999px;
+    cursor: pointer;
+}
+.banner-action:hover { background: color-mix(in srgb, var(--text-main) 18%, var(--panel-bg)); }
+.banner-action:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 /* Set by showBanner() before the element is removed, so a self-clearing banner
    fades rather than vanishing. */
 .banner.leaving {
@@ -550,9 +587,12 @@ h1 {
 }
 
 /* The kinds. A new one is two declarations: a dot colour, and where it sorts —
-   `order` keeps problems above passing notes however they happened to arrive. */
-.banner.warn { --banner-dot: var(--color-RUNNING); order: 0; }
-.banner.info { --banner-dot: var(--accent);        order: 1; }
+   `order` keeps the moment being viewed first, then problems above passing
+   notes however they happened to arrive. */
+.banner.past  { --banner-dot: color-mix(in srgb, var(--color-RUNNING) 45%, var(--text-main)); order: -1; }
+.banner.error { --banner-dot: var(--color-FAILURE); order: 0; }
+.banner.warn  { --banner-dot: var(--color-RUNNING); order: 0; }
+.banner.info  { --banner-dot: var(--accent);        order: 1; }
 
 @keyframes banner-in {
     from { opacity: 0; transform: translateY(4px); }
@@ -591,7 +631,10 @@ svg:active { cursor: grabbing; }
    stops, because motion is what reads as live. `animation: none` returns the
    element to full opacity, so nothing is left stranded mid-fade. */
 body.telemetry-stale .node-rect.running,
-body.telemetry-stale .status-pill.running { animation: none; }
+body.telemetry-stale .status-pill.running,
+/* The same for a moment in the past: what ran then is not running now. */
+body.viewing-past .node-rect.running,
+body.viewing-past .status-pill.running { animation: none; }
 
 /* Picked from the blackboard panel: say which card the camera just flew to,
    without permanently recoloring a node whose status stroke means something. */
@@ -602,7 +645,7 @@ body.telemetry-stale .status-pill.running { animation: none; }
 .node-rect.focused { animation: klein-focus 0.5s ease-in-out 2; }
 
 /* Hovering a board row in the panel: say which card it belongs to. The stroke
-   is set inline by applyStatus, so this has to shout to be heard. */
+   is set inline by paintStatus, so this has to shout to be heard. */
 .node-rect.highlight { stroke: var(--accent) !important; stroke-width: 4px; }
 
 /* Node Text Elements */
@@ -622,13 +665,13 @@ body.telemetry-stale .status-pill.running { animation: none; }
 .node-glyph {
     font-size: 13px;            /* sits on the 13px label row, so it matches it */
     text-anchor: middle;
-    fill: var(--cat-ink, var(--accent));   /* unknown category: as it always looked */
+    fill: var(--cat-ink, var(--accent));   /* unknown category */
     font-family: var(--font-symbol);
 }
 
 /* The one category -> colour mapping, read by the canvas cards and the legend
    alike. A node with no .cat-* class leaves --cat-ink unset, and each reader
-   below falls back to the ink it drew before there were categories. */
+   below falls back to its own default ink. */
 .cat-Control   { --cat-ink: var(--type-Control); }
 .cat-Decorator { --cat-ink: var(--type-Decorator); }
 .cat-Condition { --cat-ink: var(--type-Condition); }
@@ -686,7 +729,7 @@ body.telemetry-stale .status-pill.running { animation: none; }
 #watermark {
     position: absolute;
     white-space: nowrap;      /* one line: the hints read as one row of controls */
-    bottom: 20px;
+    bottom: calc(var(--drawer-height) + 20px);     /* above the drawer */
     right: 20px;
     font-size: 0.8rem;
     color: var(--text-muted);
@@ -694,4 +737,577 @@ body.telemetry-stale .status-pill.running { animation: none; }
     background: rgba(0,0,0,0.3);
     padding: 5px 10px;
     border-radius: 4px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Drawer — Log and Timeline under the canvas                          */
+/* ------------------------------------------------------------------ */
+/* Beside the sidebar rather than under it, so the blackboards keep their full
+   height; its left edge follows --sidebar-width. Its height is
+   --drawer-height (drawer.js): from the toolbar alone to 80% of the window. */
+#drawer {
+    position: absolute;
+    left: var(--sidebar-width);
+    right: 0;
+    bottom: 0;
+    height: var(--drawer-height);
+    box-sizing: border-box;
+    z-index: 10;
+    display: flex;
+    flex-direction: column;
+    background: var(--panel-bg);
+    border-top: 1px solid var(--border-color);
+    box-shadow: 0 -4px 15px -3px rgba(0, 0, 0, 0.5);
+}
+
+/* The whole top edge is the grip, straddling the border so it is easy to hit;
+   the pill in the middle only says so. The sidebar's right edge is the same
+   grip turned upright (#sidebar-handle). */
+#drawer-handle {
+    position: absolute;
+    top: -5px;
+    left: 0;
+    right: 0;
+    height: 10px;
+    z-index: 1;
+    cursor: row-resize;
+    touch-action: none;
+}
+#drawer-handle::after, #sidebar-handle::after {
+    content: "";
+    position: absolute;
+    border-radius: 2px;
+    background: var(--color-IDLE);
+}
+#drawer-handle::after { top: 3px; left: 50%; width: 36px; height: 4px; margin-left: -18px; }
+#drawer-handle:hover::after, #sidebar-handle:hover::after { background: var(--text-muted); }
+
+#drawer-toolbar {
+    flex-shrink: 0;
+    height: 48px;
+    box-sizing: border-box;
+    padding: 0 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    border-bottom: 1px solid var(--border-color);
+    white-space: nowrap;
+}
+
+/* The fold button, the drawer's and the sidebar's alike: a chevron pointing
+   the way the panel folds, turned round while it is collapsed. */
+#drawer-collapse, #sidebar-collapse {
+    flex-shrink: 0;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    font-size: 0.85rem;
+    font-family: var(--font-symbol);    /* ◂ and ▾ from one font, the same size */
+    color: var(--text-muted);
+    background: none;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    cursor: pointer;
+}
+#drawer-collapse:hover, #sidebar-collapse:hover {
+    color: var(--text-main);
+    border-color: var(--color-TRANSITION);
+}
+#drawer-collapse:focus-visible, #sidebar-collapse:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+}
+.fold-chevron { display: inline-block; transition: transform 0.15s ease; }
+#drawer.collapsed .fold-chevron, #sidebar.collapsed .fold-chevron { transform: rotate(180deg); }
+
+.drawer-tabs { display: flex; flex-shrink: 0; gap: 2px; }
+.drawer-tabs [role="tab"] {
+    height: 32px;
+    padding: 0 14px;
+    font-family: inherit;
+    font-size: 0.82rem;
+    color: var(--text-muted);
+    background: none;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    cursor: pointer;
+}
+.drawer-tabs [role="tab"]:hover { color: var(--text-main); }
+.drawer-tabs [role="tab"][aria-selected="true"] {
+    color: var(--text-main);
+    font-weight: 600;
+    border-bottom-color: var(--accent);
+}
+.drawer-tabs [role="tab"]:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* The recording chip: red while klein records (the universal "rec" dot),
+   grey when it can't or won't. Both are tints of the status palette. */
+#drawer-chip {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    color: color-mix(in srgb, var(--color-FAILURE) 25%, var(--text-main));
+    background: color-mix(in srgb, var(--color-FAILURE) 18%, var(--panel-bg));
+}
+.drawer-chip-dot {
+    flex-shrink: 0;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--color-FAILURE);
+}
+/* Narrow windows: the leading "Recording · " gives way long before the
+   numbers after it (and the note beside the chip before either). */
+#drawer-chip-text { display: flex; min-width: 0; }
+.drawer-chip-label, .drawer-chip-stats { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.drawer-chip-label { flex-shrink: 1000; white-space: pre; }     /* keep its trailing space */
+#drawer-chip[data-state="off"] {
+    color: var(--text-muted);
+    background: color-mix(in srgb, var(--color-IDLE) 15%, var(--panel-bg));
+}
+#drawer-chip[data-state="off"] .drawer-chip-dot { background: var(--color-IDLE); }
+/* An opened file: not recording, and nothing wrong either. */
+#drawer-chip[data-state="file"] {
+    color: var(--text-main);
+    background: color-mix(in srgb, var(--accent) 15%, var(--panel-bg));
+}
+#drawer-chip[data-state="file"] .drawer-chip-dot { background: var(--accent); }
+
+/* A size cap, not the time window, decided how far back a history goes. */
+#drawer-note {
+    min-width: 0;
+    flex-shrink: 100000;        /* the first to give way; the full text is its title */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 0.75rem;
+    color: var(--color-RUNNING);    /* the warn colour, as on the banners */
+}
+
+/* The filter both tabs share, at the toolbar's far end. */
+#drawer-filter-label {
+    margin-left: auto;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+#drawer-filter {
+    width: 150px;
+    height: 28px;
+    box-sizing: border-box;
+    padding: 0 8px;
+    font: inherit;
+    font-size: 0.78rem;
+    color: var(--text-main);
+    background: var(--bg-color);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+}
+#drawer-filter:focus { outline: none; border-color: var(--accent); }
+#drawer-filter:not(:placeholder-shown) { border-color: var(--accent); }
+
+/* Save, after the filter: a plain button. */
+#drawer-save {
+    flex-shrink: 0;
+    height: 28px;
+    padding: 0 12px;
+    font: inherit;
+    font-size: 0.75rem;
+    color: var(--text-main);
+    background: var(--subtree-fill-0);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    cursor: pointer;
+}
+#drawer-save:hover:not(:disabled) { border-color: var(--accent); }
+#drawer-save:disabled { color: var(--color-IDLE); cursor: default; }
+#drawer-save:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* A narrow drawer (1000 px with the sidebar): the word "Filter" goes (the
+   input keeps it as its title) and the filter narrows, so the chip keeps
+   its numbers next to Save. */
+#drawer { container: drawer / inline-size; }
+@container drawer (max-width: 820px) {
+    .drawer-word { display: none; }
+    #drawer-filter { width: 120px; }
+}
+
+#drawer-body {
+    position: relative;         /* the offsetParent drawer.js measures rows from */
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-color) transparent;
+}
+
+/* ---- Log tab ------------------------------------------------------------
+   One row per transition, in fixed 20 px rows so drawer.js can place the few
+   in view by index; the head stays put while the body scrolls under it. */
+#drawer-log { --log-columns: 128px 64px 140px minmax(120px, 220px) minmax(0, 1fr); }
+.log-head {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    display: grid;
+    grid-template-columns: var(--log-columns);
+    column-gap: 14px;
+    padding: 4px 16px;
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--color-IDLE);
+    background: var(--panel-bg);
+    border-bottom: 1px solid var(--border-color);
+}
+/* clip: rows placed past the capped spacer (the overscan below the view,
+   once the list is scaled) must not make it scroll further. */
+#log-rows { position: relative; overflow: clip; }
+.log-row {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 20px;
+    box-sizing: border-box;
+    display: grid;
+    grid-template-columns: var(--log-columns);
+    column-gap: 14px;
+    align-items: center;
+    padding: 0 16px 0 13px;
+    border-left: 3px solid transparent;
+    font-family: ui-monospace, "DejaVu Sans Mono", monospace;
+    font-size: 12px;
+    white-space: nowrap;
+    cursor: pointer;
+}
+.log-row > span { overflow: hidden; text-overflow: ellipsis; }
+.log-row:hover { background: color-mix(in srgb, var(--text-main) 5%, transparent); }
+.log-row.selected {
+    background: color-mix(in srgb, var(--accent) 16%, var(--panel-bg));
+    border-left-color: var(--accent);
+}
+/* The first row of a segment after another: a new tree, or the same tree
+   picked up again after an outage or an overflow. Its Δ cell says which. */
+.log-row.seg-start { border-top: 1px dashed var(--border-color); }
+.log-time { color: var(--text-main); }
+.log-delta { color: var(--text-main); }
+.log-delta.quiet, .log-delta.boundary { color: var(--color-IDLE); }
+.log-delta.boundary { font-family: inherit; font-style: italic; }
+.log-subtree, .log-node { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+.log-subtree { color: var(--type-SubTree); }
+.log-subtree:hover { text-decoration: underline; }
+.log-node { font-size: 13px; color: var(--text-main); }
+.log-arrow { color: var(--color-IDLE); }
+/* Status names in the status palette, lifted toward the text colour so the
+   mid-tone fills read as text on the panel. */
+.log-row [data-status="IDLE"]    { color: color-mix(in srgb, var(--color-IDLE) 60%, var(--text-main)); }
+.log-row [data-status="RUNNING"] { color: color-mix(in srgb, var(--color-RUNNING) 70%, var(--text-main)); }
+.log-row [data-status="SUCCESS"] { color: color-mix(in srgb, var(--color-SUCCESS) 70%, var(--text-main)); }
+.log-row [data-status="FAILURE"] { color: color-mix(in srgb, var(--color-FAILURE) 70%, var(--text-main)); }
+.log-row [data-status="SKIPPED"] { color: color-mix(in srgb, var(--color-SKIPPED) 70%, var(--text-main)); }
+/* The first line once eviction dropped history: hatched as the Timeline's
+   not-recorded bands, so "nothing before this" reads the same in both tabs. */
+#log-dropped {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 20px;
+    box-sizing: border-box;
+    padding: 0 16px;
+    line-height: 19px;
+    font-size: 11px;
+    font-style: italic;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--text-muted);
+    border-bottom: 1px dashed var(--color-IDLE);
+    background: var(--hatch);
+}
+#log-empty {
+    margin: 10px 16px;
+    font-size: 0.78rem;
+    font-style: italic;
+    color: var(--text-muted);
+}
+
+/* ---- Timeline tab -------------------------------------------------------
+   A name column (--tl-label) and a time axis. The controls and
+   the axis stay at the top of the scrolling body; under them each section's
+   header row sticks while its section scrolls by (a nested one covers its
+   parent's). Bars are RUNNING spans, capped in the outcome's colour; a
+   single mark is an outcome reached in the tick it started. Every colour is
+   a palette token, tinted toward the panel or the text with color-mix. */
+#drawer-timeline {
+    --tl-label: 206px;              /* the name column; the axis starts here */
+    --tl-pad: 16px;                 /* right of the axis */
+    --tl-head: 60px;                /* the controls (38) and the axis (22) */
+    --tl-run: color-mix(in srgb, var(--color-RUNNING) 80%, var(--panel-bg));
+    --tl-playhead: color-mix(in srgb, var(--color-RUNNING) 45%, var(--text-main));
+    position: relative;
+}
+.tl-head {
+    position: sticky;
+    top: 0;
+    z-index: 4;
+    background: var(--panel-bg);
+}
+.tl-controls {
+    height: 38px;
+    box-sizing: border-box;
+    padding: 0 16px;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    border-bottom: 1px solid var(--subtree-fill-0);
+    font-size: 12px;
+    color: var(--text-muted);
+}
+.tl-controls button {
+    min-width: 28px;
+    height: 26px;
+    padding: 0 6px;
+    font-family: var(--font-symbol);
+    font-size: 12px;
+    color: var(--text-main);
+    background: var(--subtree-fill-0);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    cursor: pointer;
+}
+.tl-controls button:hover:not(:disabled) { border-color: var(--text-muted); }
+.tl-controls button:disabled { color: var(--color-IDLE); cursor: default; }
+.tl-controls button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+#tl-prev { margin-left: 8px; }
+#tl-window {
+    min-width: 7.5em;
+    text-align: center;
+    font-family: ui-monospace, "DejaVu Sans Mono", monospace;
+    color: color-mix(in srgb, var(--text-muted) 50%, var(--text-main));
+}
+
+/* The axis: press or drag anywhere on it to move the playhead. */
+#tl-ruler {
+    position: relative;
+    height: 22px;
+    border-bottom: 1px solid var(--subtree-fill-0);
+    cursor: ew-resize;
+    touch-action: none;
+}
+#tl-ruler-track {
+    position: absolute;
+    left: var(--tl-label);
+    right: var(--tl-pad);
+    top: 0;
+    bottom: 0;
+    pointer-events: none;
+}
+.tl-tick {
+    position: absolute;
+    top: 4px;
+    padding-left: 4px;
+    border-left: 1px solid var(--border-color);
+    font-family: ui-monospace, "DejaVu Sans Mono", monospace;
+    font-size: 11px;
+    line-height: 14px;
+    white-space: nowrap;
+    color: var(--color-IDLE);
+}
+#tl-grip {
+    position: absolute;
+    bottom: 0;
+    width: 10px;
+    height: 8px;
+    margin-left: calc(var(--tl-label) - 5px);
+    background: var(--tl-playhead);
+    clip-path: polygon(0 0, 100% 0, 50% 100%);
+    pointer-events: none;
+}
+
+#tl-lanes { position: relative; cursor: grab; touch-action: pan-y; }
+#tl-lanes:active { cursor: grabbing; }
+#tl-playhead {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    margin-left: calc(var(--tl-label) - 1px);
+    z-index: 3;
+    background: var(--tl-playhead);
+    pointer-events: none;
+}
+#tl-playhead.live { opacity: 0.6; }
+
+/* Not recorded (a gap), or the robot ran another tree: a hatched band over
+   every row, headers too, since none of them has bars there. */
+#tl-bands {
+    position: absolute;
+    left: var(--tl-label);
+    right: var(--tl-pad);
+    top: 0;
+    bottom: 0;
+    z-index: 3;
+    pointer-events: none;
+}
+.tl-band {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    background: var(--hatch);
+    border-left: 1px dashed var(--color-IDLE);
+    border-right: 1px dashed var(--color-IDLE);
+    box-sizing: border-box;
+    overflow: hidden;
+    container-type: inline-size;
+}
+/* A label that doesn't fit is cut with an ellipsis; in a sliver, dropped. */
+.tl-band span {
+    display: block;
+    padding: 2px 6px;
+    font-size: 10px;
+    font-style: italic;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--text-muted);
+}
+@container (max-width: 40px) {
+    .tl-band span { display: none; }
+}
+
+/* The left edge of the kept history once eviction dropped some (drawer.js
+   droppedNote): a dashed edge over the rows; its note (#tl-dropped-note)
+   sits in the controls strip, clear of the bars. */
+.tl-dropped {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 24px;
+    border-left: 2px dashed var(--color-IDLE);
+    background: linear-gradient(90deg,
+        color-mix(in srgb, var(--color-IDLE) 18%, transparent), transparent);
+}
+#tl-dropped-note {
+    margin-right: auto;         /* left of the controls, which keep the right */
+    min-width: 0;
+    font-size: 11px;
+    font-style: italic;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--text-muted);
+}
+/* A window holding more records than the bars are drawn for. */
+#tl-too-many {
+    position: absolute;
+    left: calc(var(--tl-label) + 12px);
+    top: 4px;
+    z-index: 4;
+    margin: 0;
+    padding: 3px 10px;
+    font-size: 11px;
+    font-style: italic;
+    color: var(--text-muted);
+    background: var(--panel-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    pointer-events: none;
+}
+
+.tl-row {
+    position: relative;
+    height: 20px;
+    background: color-mix(in srgb, var(--sub-fill, transparent) 55%, var(--panel-bg));
+}
+.tl-row[data-tint="0"] { background: transparent; }
+.tl-row[data-tint="1"] { --sub-fill: var(--subtree-fill-1); }
+.tl-row[data-tint="2"] { --sub-fill: var(--subtree-fill-2); }
+.tl-row[data-tint="3"] { --sub-fill: var(--subtree-fill-3); }
+/* A section's header: its subtree's own row, in the canvas region's fill. */
+.tl-row.tl-header {
+    position: sticky;
+    top: var(--tl-head);
+    z-index: 2;
+    height: 24px;
+    background: var(--sub-fill, var(--subtree-fill-0));
+    border-top: 1px solid var(--border-color);
+    box-sizing: border-box;
+    font-weight: 700;
+}
+#tl-rows > .tl-section > .tl-header { box-shadow: 0 3px 6px var(--bg-color); }
+/* Back in the parent section after a nested one. */
+.tl-section + .tl-row { border-top: 1px solid var(--border-color); box-sizing: border-box; }
+/* Kept only for the matching rows inside it (the filter). */
+.tl-row.context .tl-name { color: var(--text-muted); font-weight: 500; }
+
+.tl-label {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: var(--tl-label);
+    box-sizing: border-box;
+    padding-right: 8px;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12px;
+    white-space: nowrap;
+    overflow: hidden;
+    color: var(--text-main);
+    cursor: default;
+}
+.tl-chevron {
+    flex-shrink: 0;
+    width: 12px;
+    padding: 0;
+    font-size: 10px;
+    line-height: 1;
+    font-family: var(--font-symbol);
+    color: var(--text-muted);
+    background: none;
+    border: 0;
+    cursor: pointer;
+}
+span.tl-chevron { cursor: default; }
+.tl-chevron:hover { color: var(--text-main); }
+.tl-chevron:focus-visible { outline: 1px solid var(--accent); }
+.tl-glyph { flex-shrink: 0; font-family: var(--font-symbol); color: var(--cat-ink, var(--text-muted)); }
+.tl-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.tl-meta { flex-shrink: 0; font-size: 10px; font-weight: 400; color: var(--color-IDLE); }
+
+.tl-track {
+    position: absolute;
+    left: var(--tl-label);
+    right: var(--tl-pad);
+    top: 0;
+    bottom: 0;
+    overflow: hidden;
+    background: linear-gradient(var(--subtree-fill-0), var(--subtree-fill-0)) 0 9px / 100% 1px no-repeat;
+}
+.tl-header .tl-track { background-position: 0 11px; }
+.tl-track i { position: absolute; top: 5px; height: 10px; border-radius: 2px; }
+.tl-header .tl-track i { top: 6px; }
+.tl-bar { background: var(--tl-run); }
+.tl-cap, .tl-mark { width: 3px; }
+.tl-track .tl-sub { top: 16px; height: 3px; width: 3px; border-radius: 0; }
+.tl-header .tl-track .tl-sub { top: 18px; }
+.tl-track .s-2 { background: color-mix(in srgb, var(--color-SUCCESS) 55%, var(--text-main)); }
+.tl-track .s-3 { background: color-mix(in srgb, var(--color-FAILURE) 55%, var(--text-main)); }
+.tl-track .s-4 { background: color-mix(in srgb, var(--color-SKIPPED) 55%, var(--text-main)); }
+.tl-track .kid { background: var(--text-muted); }
+
+#tl-empty {
+    margin: 10px 16px;
+    font-size: 0.78rem;
+    font-style: italic;
+    color: var(--text-muted);
 }

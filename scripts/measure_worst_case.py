@@ -97,6 +97,17 @@ _SCRUB = """async ([steps]) => {
 }"""
 
 # Frame gaps (rAF to rAF) while a real mouse drags along the ruler.
+# The overview's marks rebuilt once (its track narrowed by 1 px, so they are
+# due), with layout: [ms, marks drawn].
+_OVERVIEW_MARKS = """() => { const track = document.getElementById('ov-track');
+  track.style.right = '7px';
+  const rec = shownRecording(), t = performance.now();
+  KleinOverview.update(rec, KleinCursor.cursorPos(clock, performance.now(), rec));
+  void document.getElementById('ov-marks').offsetHeight;
+  const ms = performance.now() - t;
+  track.style.right = '';
+  return [ms, document.querySelectorAll('#ov-marks i').length]; }"""
+
 _RAF_START = """() => { window.__raf = []; window.__rafOn = true;
   const loop = (t) => { __raf.push(t); if (__rafOn) requestAnimationFrame(loop); };
   requestAnimationFrame(loop); }"""
@@ -104,8 +115,8 @@ _RAF_STOP = """() => { __rafOn = false; const r = __raf;
   return r.slice(1).map((t, i) => t - r[i]); }"""
 
 
-def drag_frames(page, steps=60):
-    box = page.locator("#tl-ruler-track").bounding_box()
+def drag_frames(page, steps=60, track="#tl-ruler-track"):
+    box = page.locator(track).bounding_box()
     y = box["y"] + box["height"] / 2
     page.mouse.move(box["x"] + 5, y)
     page.evaluate(_RAF_START)
@@ -179,6 +190,16 @@ def part_file(args, path, n):
                 print(f"Timeline scrub, {label} ({span:g} s): per step JS+layout {stats(js)}")
                 gaps = drag_frames(page, steps=30 if label == "30 s window" else 6)
                 print(f"Timeline scrub, {label}: ruler drag frame gaps {stats(gaps)}")
+            # The overview: its marks (gaps and tree-run starts),
+            # and the knob dragged across the whole recording (on the Log tab:
+            # on the Timeline's, the thumb under the pointer would pan instead).
+            page.click("#drawer-tab-log")
+            page.wait_for_timeout(500)
+            ms, marks = page.evaluate(_OVERVIEW_MARKS)
+            print(f"Overview: marks rebuilt in {ms:.1f} ms ({marks} marks)")
+            gaps = drag_frames(page, steps=30, track="#ov-track")
+            print(f"Overview drag across the whole recording: frame gaps {stats(gaps)}")
+            page.click("#drawer-tab-timeline")
             # Panning moves the window: every bar in it is computed again.
             page.click("#tl-zoom-in")
             span = page.evaluate("KleinTimeline.debug().span") / 1e6

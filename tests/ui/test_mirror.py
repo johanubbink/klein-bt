@@ -46,12 +46,14 @@ class BrowserMirrorTest(DashboardCase):
                                     timeout=15000)
         mine, theirs = self.compare(browser, gw)
         # The cards show what the page painted, and that is a STATUS frame
-        # within one poll either way (the head runs a poll ahead). The tree
-        # swaps about every second, so read between swaps: no card in its
-        # exit transition, and all three frames from the displayed tree.
+        # within one poll either way (the head runs a poll ahead), read once
+        # the page has painted every frame it received: at a 10 ms poll an
+        # animation frame can span several. The tree swaps about every
+        # second, so read between swaps: no card in its exit transition, and
+        # all three frames from the displayed tree.
         for _ in range(5):
             browser.wait_for_nodes(1)
-            snap = browser.snapshot()
+            snap = browser.snapshot(painted=True)
             n = snap["statusCount"]
             frames = browser.status_frames(n - 1, n + 1)
             if all(set(f) == set(snap["displayed"]) == set(snap["state"]) for f in frames):

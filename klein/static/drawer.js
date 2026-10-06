@@ -1,7 +1,8 @@
-// drawer.js — the bottom drawer: a toolbar with the Log and Timeline tabs, the
-// recording chip and the shared filter, over a scrollable body; and the
-// shared cursor's controls (Log rows, ↑/↓/Esc; app.js shows the "Viewing
-// t = …" banner with its Back to live button, KleinDrawer.goLive).
+// drawer.js — the bottom drawer: a transport row shared by both tabs (fold,
+// |◀ ▶ ▶|, Live, the overview of overview.js, the clock), a
+// tab row (the Log and Timeline tabs, the shared filter, the Timeline's zoom,
+// the recorder pill with Save) over a scrollable body; and the shared
+// cursor's controls (the transport buttons, Log rows, the keys).
 //
 // The drawer's height lives in the --drawer-height custom property on <html>,
 // so the hint line (#watermark) rises with it in CSS alone; app.js reads the
@@ -15,9 +16,10 @@
 
 const DEFAULT_HEIGHT = 300;             // px
 const MAX_FRACTION = 0.8;               // of the window's height
+const TAB_ROW_HEIGHT = 48;              // px, as #drawer-toolbar (hidden while collapsed)
 
 const drawer = document.getElementById("drawer");
-const toolbar = document.getElementById("drawer-toolbar");
+const transport = document.getElementById("drawer-transport");
 const chip = document.getElementById("drawer-chip");
 const chipLabel = chip.querySelector(".drawer-chip-label");
 const chipStats = chip.querySelector(".drawer-chip-stats");
@@ -47,6 +49,15 @@ function dragEdge(edge, axis, size, onMove, onEnd) {
         edge.addEventListener("pointermove", move);
         edge.addEventListener("pointerup", end);
         edge.addEventListener("pointercancel", end);
+    });
+}
+
+// A mouse click on a button inside el lets go of the focus, so the keys
+// (Space above all, R/F) work right away; a key press keeps it there.
+function blurOnClick(el) {
+    el.addEventListener("click", (event) => {
+        const button = event.target.closest("button");
+        if (button && event.detail) button.blur();
     });
 }
 
@@ -110,31 +121,26 @@ function pane({ el, handle, button, key, sizeName, cssVar, axis, grow, initial, 
         onResize();
     }, save);
     handle.addEventListener("dblclick", toggle);
-    // A mouse click lets go of the focus, so R/F work right away (a key press
-    // keeps it on the button).
-    button.addEventListener("click", (event) => {
-        toggle();
-        if (event.detail) button.blur();
-    });
+    button.addEventListener("click", toggle);
+    blurOnClick(button);
     window.addEventListener("resize", apply);   // the limits follow the window
     apply();
     return { shown, collapsed: () => collapsed };
 }
 
-// The toolbar alone, plus the drawer's top border.
+// The transport row alone, plus the drawer's top border: the collapsed strip.
 function minHeight() {
-    return toolbar.offsetHeight + drawer.offsetHeight - drawer.clientHeight;
+    return transport.offsetHeight + drawer.offsetHeight - drawer.clientHeight;
 }
 
-// Up is taller; from the toolbar alone to 80% of the window. Shown again, the
-// Log and the Timeline catch up on what they skipped while folded (app.js
-// requestRender).
+// Up is taller; from both rows to 80% of the window.
 const drawerPane = pane({
     el: drawer, handle: document.getElementById("drawer-handle"),
     button: document.getElementById("drawer-collapse"),
     key: "klein.drawer", sizeName: "height", cssVar: "--drawer-height", axis: "y", grow: -1,
     initial: DEFAULT_HEIGHT, strip: minHeight,
-    clamp: (h) => Math.round(Math.max(minHeight(), Math.min(h, window.innerHeight * MAX_FRACTION))),
+    clamp: (h) => Math.round(Math.max(minHeight() + TAB_ROW_HEIGHT,
+                                      Math.min(h, window.innerHeight * MAX_FRACTION))),
     labels: ["Collapse drawer", "Expand drawer"],
     onResize: () => requestRender(),
 });
@@ -157,9 +163,9 @@ for (const tab of tabs) {
 }
 
 // ------------------------------------------------------------------ //
-// The recording chip
+// The recorder pill
 // ------------------------------------------------------------------ //
-// How much is kept, as the chip says it: "42 s", "10 min", "1 h 5 min".
+// How much is kept, as the pill says it: "42 s", "10 min", "1 h 5 min".
 function formatKept(us) {
     const seconds = us / 1e6;
     if (seconds < 60) return `${Math.floor(seconds)} s`;
@@ -182,8 +188,9 @@ function formatBytes(bytes) {
     return `${Math.round(bytes / 1e6)} MB`;
 }
 
-// What the chip says, from the browser's recording mirror and the gateway's
-// `recording` state ("on", "off", "unsupported"; null before klein says).
+// What the pill's tooltip says, from the browser's recording mirror and the
+// gateway's `recording` state ("on", "off", "unsupported"; null before klein
+// says).
 // The window is the span actually kept, head back to the oldest record: a
 // slow tree keeps up to a chunk beyond --record-buffer, a size cap less.
 // An opened file (klein-bt --open) says so instead, with what it holds.
@@ -242,15 +249,28 @@ function setText(el, text) {
     if (el.textContent !== text) el.textContent = text;
 }
 
+// What the pill shows, shorter than its tooltip (summary's text): a label,
+// "Recording" or "file: NAME", and the numbers, the span kept and its size
+// ("1 min · 148 kB"). Recording off shows its reason whole, in place of the
+// numbers. Returns [label, stats].
+function pillText(rec, state, text) {
+    if (state === "off") return ["", text];
+    const label = state === "file" ? `file: ${rec.name}` : "Recording";
+    if (!hasRecords(rec)) return [label, state === "file" ? "" : "waiting for the robot"];
+    const stats = [keptSpan(rec)];
+    if (state === "on" && rec.bytes) stats.push(formatBytes(rec.bytes[0] + rec.bytes[1]));
+    return [label, stats.join(" · ")];
+}
+
 // Called on every render, so it writes only what changed. In a narrow window
-// the note gives way first, then the leading "Recording · " (the red dot
-// already says it), so the numbers are the last to go; hovering shows all.
+// the note gives way first, then the label (the red dot already says it), so
+// the numbers are the last to go; hovering shows all.
 function showRecording(rec, support) {
     const { state, text, note: noteText } = summary(rec, support);
     if (chip.dataset.state !== state) chip.dataset.state = state;
-    const cut = text.startsWith("Recording · ") ? "Recording · ".length : 0;
-    setText(chipLabel, text.slice(0, cut));
-    setText(chipStats, text.slice(cut));
+    const [label, stats] = pillText(rec, state, text);
+    setText(chipLabel, label);
+    setText(chipStats, stats);
     if (chip.title !== text) chip.title = text;
     setText(note, noteText);
     if (note.title !== noteText) note.title = noteText;
@@ -267,15 +287,14 @@ function showRecording(rec, support) {
 // gateway's name, so the "Saved …" pill can say that name.
 const saveButton = document.getElementById("drawer-save");
 
-// Always shown; greyed out while klein doesn't record (the chip is grey; the
-// tooltip then says why, as the chip does) or has nothing yet. The tree
-// runs: segments split where the tree changes, as the gateway's
-// Recording.runs().
+// The pill's right half, always shown; greyed out while klein doesn't record
+// (the pill is grey; the tooltip then says why, as the pill's does) or has
+// nothing yet. The tooltip counts the tree runs (KleinRecording.treeRuns),
+// one .btlog each.
 function showSave(rec, state, chipText) {
     const empty = !hasRecords(rec);
     saveButton.disabled = state === "off" || empty;
-    const runs = empty ? 0 : rec.segments.filter(
-        (s, i) => i === 0 || s.layout !== rec.segments[i - 1].layout).length;
+    const runs = empty ? 0 : R.treeRuns(rec).length;
     const title = state === "off" ? chipText
         : empty ? "Nothing recorded yet"
         : `Save everything kept as one .zip · ${runs} tree run${runs === 1 ? "" : "s"}`;
@@ -434,7 +453,7 @@ function fillRow(el, index, row, prev, selected, shift) {
     const boundary = prev !== null && prev.seg !== row.seg;
     let delta = "";
     if (boundary) {
-        const newTree = rec.segment(row.seg).layoutId !== rec.segment(prev.seg).layoutId;
+        const newTree = !R.sameTree(rec.segment(row.seg), rec.segment(prev.seg));
         delta = newTree ? "new tree" : "resumed";
         c.delta.title = newTree ? "The robot loaded a different tree"
                                 : "Recording picked up again after an outage or an overflow";
@@ -568,30 +587,42 @@ function update(recording, position) {
     pos = rec ? position : null;
     if (pos && pos.live && !wasLive) follow = true;    // back to live, however
     wasLive = !pos || pos.live;
+    paintTransport();
     if (!logShown()) return;
     refreshRows();
     if (pos && pos.live && follow) scrollToNewest();
     paint();
 }
 
-// Pause just after the record (segId, seq). The position is set here too, so
-// a second key press before the next frame steps on from it.
+// Move the shared cursor. The position is set here too, so a second key
+// press before the next frame acts from there.
+function setClock(clock) {
+    pos = C.cursorPos(clock, performance.now(), rec);
+    seek(clock);
+}
+
+// Pause just after the record (segId, seq).
 function goTo(segId, seq) {
     follow = false;
-    const clock = C.pause(segId, seq + 1);
-    pos = C.cursorPos(clock, 0, rec);
-    seek(clock);
+    setClock(C.pause(segId, seq + 1));
 }
 
 function goLive() {
     follow = true;
-    seek(C.live());
+    setClock(C.live());
 }
 
-// One row up (-1) or down (+1) the list as filtered. From live, up takes the
-// newest row; at either end the cursor stays put. False when the key does
-// nothing here.
+// Home: paused at the oldest kept moment.
+function goOldest() {
+    follow = false;
+    setClock(C.pauseAt(rec, rec.tMin));
+}
+
+// One row up (-1) or down (+1) the Log as filtered, whichever tab is shown:
+// the transport's |◀ ▶| and ↑/↓. From live, up takes the newest row; at
+// either end the cursor stays put. False when the key does nothing here.
 function stepRow(dir) {
+    if (!pos) return false;
     refreshRows();
     if (!rows.count) return false;
     let index;
@@ -605,10 +636,77 @@ function stepRow(dir) {
         if (index < 0 || index >= rows.count) return true;
     }
     const row = R.logRowAt(rows, index);
-    reveal(index);
+    if (logShown()) reveal(index);
     goTo(row.seg, row.seq);
     return true;
 }
+
+// ------------------------------------------------------------------ //
+// The transport row
+// ------------------------------------------------------------------ //
+// |◀ ▶ ▶| and Live/Jump to live (End/Jump to end for an opened file), from
+// either tab and folded; the clock is KleinCursor.shownTime.
+const prevButton = document.getElementById("tr-prev");
+const nextButton = document.getElementById("tr-next");
+const playButton = document.getElementById("tr-play");
+const jumpButton = document.getElementById("tr-jump");
+const clockEl = document.getElementById("tr-clock");
+const clockParts = [".tr-main", ".tr-ms", ".tr-micro"].map((s) => clockEl.querySelector(s));
+let painted = { pos: null, t: null };   // the position the transport last painted, and its time
+
+function setAttr(el, name, value) {
+    if (el.getAttribute(name) !== value) el.setAttribute(name, value);
+}
+
+// Every render, so only what changed is written: a new text node on every
+// frame would have the browser lay the drawer out again each time.
+function paintTransport() {
+    const file = Boolean(rec && rec.source === "file");
+    const state = !pos ? "none" : !pos.live ? "past" : file ? "end" : "live";
+    const playing = state === "live" || (state === "past" && pos.mode === "playing");
+    prevButton.disabled = !pos;
+    nextButton.disabled = !pos || pos.live;
+    playButton.disabled = state === "none" || state === "end";
+    jumpButton.hidden = !pos;
+    jumpButton.disabled = state !== "past";             // live (or at the end): a state
+    if (jumpButton.dataset.state !== state) jumpButton.dataset.state = state;
+    setText(jumpButton, state === "past" ? (file ? "Jump to end ⏭︎" : "Jump to live ⏭︎")
+                                         : state === "end" ? "End" : "Live");
+    setAttr(jumpButton, "title", state !== "past" ? (file ? "At the file's end" : "Live")
+                                 : file ? "Go to the file's end (End, Esc)" : "Back to live (End, Esc)");
+    setText(playButton, playing ? "❚❚" : "▶︎");
+    setAttr(playButton, "aria-label", playing ? "Pause" : "Play at 1×");
+    setAttr(playButton, "title", playing ? "Pause (Space)"
+                                         : "Play at 1× (Space) · reaching the head goes live");
+    // "14:03:22", ".201", " 030": a narrow drawer drops the µs, then the ms.
+    painted = { pos, t: pos ? C.shownTime(pos, rec) : null };
+    const time = pos ? formatTime(painted.t) : "";
+    setText(clockParts[0], time.slice(0, -8));
+    setText(clockParts[1], time.slice(-8, -4));
+    setText(clockParts[2], time.slice(-4));
+    clockEl.hidden = !pos;
+}
+
+// Pause at the moment shown (live: the head's seq at the time last painted,
+// so nothing jumps), or play from it.
+function togglePlay() {
+    if (!pos) return;
+    if (pos.mode === "live") {
+        if (rec.source === "file") return;              // an opened file's end
+        setClock(C.pause(pos.seg, pos.seq, painted.pos === pos ? painted.t : C.shownTime(pos, rec)));
+    } else if (pos.mode === "playing") {
+        setClock(C.pause(pos.seg, pos.seq, pos.t));
+    } else {
+        setClock(C.play(pos.seg, pos.seq, performance.now(), pos.t));
+    }
+}
+
+prevButton.addEventListener("click", () => stepRow(-1));
+nextButton.addEventListener("click", () => stepRow(1));
+playButton.addEventListener("click", togglePlay);
+jumpButton.addEventListener("click", goLive);
+blurOnClick(drawer);
+paintTransport();                   // greyed until there is a recording
 
 function setFilter(text) {
     filterInput.value = text;
@@ -647,18 +745,37 @@ drawerBody.addEventListener("scroll", () => {
 });
 filterInput.addEventListener("input", filterChanged);
 
-// ↑/↓ step through the rows, Esc goes back to live. Unmodified presses only,
-// as for the camera keys, and not while typing (the filter) or inside the
-// sidebar, whose radios and disclosures use these keys themselves. They do
-// work in the drawer: that is where the rows are.
+// The transport's keys (see docs/architecture.md, Keys): unmodified, not in
+// the sidebar or a text field; a focused button keeps Space.
 window.addEventListener("keydown", (event) => {
-    if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
-    if (!["ArrowUp", "ArrowDown", "Escape"].includes(event.key)) return;
+    // Many layouts type \ with AltGr, which Windows reports as Ctrl+Alt: that
+    // \ counts as unmodified (a plain Ctrl+\ or Alt+\ does not).
+    const altGr = event.key === "\\" && !event.metaKey && !event.shiftKey
+        && (event.getModifierState("AltGraph") || (event.ctrlKey && event.altKey));
+    if (!altGr && (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey)) return;
     if (!pos || event.target.closest?.("#sidebar, input, textarea, select")) return;
-    if (event.key === "Escape") {
+    switch (event.key) {
+    case "ArrowLeft": case "ArrowUp":
+        if (!stepRow(-1)) return;
+        break;
+    case "ArrowRight": case "ArrowDown":
+        if (!stepRow(1)) return;
+        break;
+    case " ":
+        if (event.target.closest?.("button")) return;
+        togglePlay();
+        break;
+    case "Home":
+        goOldest();
+        break;
+    case "End": case "Escape":
         if (pos.live) return;
         goLive();
-    } else if (!stepRow(event.key === "ArrowUp" ? -1 : 1)) {
+        break;
+    case "\\":
+        if (!globalThis.KleinTimeline.fit()) return;
+        break;
+    default:
         return;
     }
     event.preventDefault();

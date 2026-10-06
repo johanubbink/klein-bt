@@ -9,16 +9,19 @@ go to ``tests/ui/artifacts/groot2/`` for opening in Groot2. The t11 check skips
 when BehaviorTree.CPP or g++ is missing.
 """
 import json
+import signal
 import time
 import unittest
+import xml.etree.ElementTree as ET
 
-from klein import mock_robot
+from klein import layout, mock_robot
+from klein.groot2_protocol import parse_blackboard
 from tests.harness import btlog_ref
 from tests.harness.model import Model
 from tests.harness.oracles import request_sequence_matches, state_matches, transitions_match
 from tests.harness.probes import ARTIFACTS_DIR, SHOTS, GatewayProbe, WireTap
-from tests.harness.targets import MockTarget, T11Target
-from tests.helpers import equivalent, read_sidecar, sidecar_at
+from tests.harness.targets import MockTarget, T11Target, robot_request
+from tests.helpers import _collect, equivalent, read_sidecar, sidecar_at
 
 
 # The mock steps once per STATUS poll, so polling every 5 ms runs it ~15x
@@ -159,12 +162,12 @@ class MockRecordingTest(SavedRunChecks, unittest.TestCase):
             self.assertTrue(tap.wait_for(
                 lambda t: len(t.requests("T")) >= 3, timeout=15), tap.request_sequence())
             time.sleep(0.3)                     # well short of the next swap
-            # Down for longer than a request timeout, so klein sees an outage. (A
-            # restart quicker than that reaches klein as a new UUID instead: a
-            # new segment in the same run, with no gap.)
-            stopped = time.monotonic()
-            robot.stop()
+            # Down for longer than a request timeout, so klein sees an outage.
+            # Frozen, not killed, so klein's next request reaches the tap
+            # unanswered.
+            robot.proc.send_signal(signal.SIGSTOP)
             time.sleep(OUTAGE)
+            robot.proc.kill()                   # SIGTERM waits for a SIGCONT
             robot.restart()
             self.assertTrue(tap.wait_for(
                 lambda t: len(t.requests("T")) >= 4, timeout=10), gw.log()[-2000:])
@@ -194,12 +197,23 @@ class MockRecordingTest(SavedRunChecks, unittest.TestCase):
         self.assertEqual(layouts[2], layouts[3])
         self.assertEqual([g[2] for g in state["gaps"]], ["outage"])
         self.assertEqual(state["gaps"][0][:2], [segments[2]["t_end"], segments[3]["t_begin"]])
-        # The outage starts where klein last heard from the robot: its last
-        # answered `t` drain before the stop (wall clock, as the mock's is).
-        last_drain = [m["reply"] for m in tap.requests("t")
-                      if "reply" in m and m["reply"]["t"] < stopped][-1]
-        lag = segments[2]["t_end"] - round(last_drain["wall"] * 1e6)
-        self.assertLess(abs(lag), POLL_INTERVAL * 1e6, lag)
+        # The outage starts at klein's last answered `t` drain before the
+        # freeze, stamped on klein's clock and mapped to the robot's through
+        # the `r` round trip; the bounds come from the wire, so a loaded
+        # machine can't push it out.
+        sent = tap.requests("TrSt")             # the status poller's (B is the other's)
+        lost = next(i for i, m in enumerate(sent) if "reply" not in m)   # the freeze
+        k = max(i for i in range(lost) if sent[i]["type"] == "t")
+        drained, after = sent[k]["reply"]["wall"], sent[k + 1]["wall"]
+        a = next(i for i, m in enumerate(sent) if m["type"] == "r"
+                 and m["reply"]["payload"] == str(segments[2]["t_begin"]))
+        # The `r` round trip's bounds: from the FULLTREE reply before it to
+        # the request after it.
+        early = (sent[a]["wall"] - sent[a + 1]["wall"]) / 2
+        late = (sent[a]["reply"]["wall"] - sent[a - 1]["reply"]["wall"]) / 2
+        lag = segments[2]["t_end"] / 1e6 - drained
+        self.assertTrue(early <= lag <= after - drained + late,
+                        (lag, early, after - drained + late))
         self.assertGreaterEqual(segments[3]["t_begin"] - segments[2]["t_end"],
                                 OUTAGE * 1e6)
         self.assertTrue(state["recording"])
@@ -296,6 +310,9 @@ class T11RecordingTest(SavedRunChecks, unittest.TestCase):
             downloads = _download_runs(gw)
             truth = robot.ground_truth()
             seq = tap.request_sequence(ignore="B")
+            root = ET.fromstring(robot.xml)
+            names = layout.extract_blackboard_names(root)
+            boards = parse_blackboard(robot_request(robot.port, "B", ";".join(names).encode())[1])
         self.assertEqual(len(state["segments"]), 1, state["segments"])
         segment = state["segments"][0]
         records = [tuple(r) for r in state["records"]]
@@ -303,7 +320,9 @@ class T11RecordingTest(SavedRunChecks, unittest.TestCase):
         # mission Sequence, uid 1, SUCCESS then IDLE) with nothing after it.
         pairs = [r[1:] for r in records]
         self.assertEqual(pairs[-2:], [(1, 2), (1, 0)], pairs)
-        self.assertGreater(len(records), 35)
+        # Most of the 3.7 s mission: a loaded machine can arm a few ms late
+        # and miss the first transitions.
+        self.assertGreater(records[-1][0] - records[0][0], 3_000_000, records[:3])
         result = transitions_match(records, truth, from_time=segment["t_begin"])
         self.assertTrue(result, result.detail)
         wire = request_sequence_matches(seq, r"TrS(St)+S?")
@@ -312,6 +331,14 @@ class T11RecordingTest(SavedRunChecks, unittest.TestCase):
         # Saved: one run, the robot's FULLTREE XML, replaying to what was recorded.
         self.assertEqual(len(downloads), 1)
         log, changes = self.check_saved_run(downloads[0], state, [segment["id"]], robot.xml)
+        # After a whole mission, every key a node writes is on the board its
+        # binding names, as the robot itself reports it.
+        tree, _ = layout.unroll_tree(root, layout.parse_node_categories(root), 1)
+        written = [b for bindings in _collect(tree, "bindings")
+                   for b in bindings if b["dir"] != "in"]
+        self.assertTrue(written)
+        for b in written:
+            self.assertIn(b["key"], boards[b["board"]], b)
         _keep_for_groot2("t11.btlog", downloads[0][1][2])
         _keep_for_groot2("t11.bb.jsonl", downloads[0][2][2])
 

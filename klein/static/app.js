@@ -63,10 +63,18 @@ let orientation = "vertical";
 
 // Ports — the attributes the tree author wrote on a node in the XML. klein
 // carries them through untouched, so `if`, `num_attempts`, `case_1` and the
-// rest read exactly as they do in the source tree.
-function portSummary(ports) {
-    if (!ports) return "";
-    return Object.entries(ports).map(([key, value]) => `${key}=${value}`).join("  ");
+// rest read exactly as they do in the source tree. The card's line is every
+// `port=value`, two spaces apart; `starts` maps each port to where its value
+// begins in it.
+function portLine(ports) {
+    const starts = new Map();
+    let line = "";
+    for (const [port, value] of Object.entries(ports || {})) {
+        line += (line ? "  " : "") + port + "=";
+        starts.set(port, line.length);
+        line += value;
+    }
+    return { starts, line };
 }
 
 // BehaviorTree.CPP writes name="Inverter" on an unnamed <Inverter>, so a card
@@ -86,6 +94,36 @@ function typeCaption(node) {
 
 function truncate(text, limit) {
     return text.length > limit ? text.slice(0, limit - 1) + "\u2026" : text;
+}
+
+// The port line split into [{text, refs}] whose texts join to the truncated
+// line; each text naming a bound key (a binding's `at`, offsets in its port's
+// value) carries its link refs.
+function portPieces(node) {
+    const { starts, line: full } = portLine(node.ports);
+    const text = truncate(full, maxPortChars);
+    const spans = new Map();     // "start,end" in the line -> [start, end, refs]
+    for (const b of node.bindings || []) {
+        const start = starts.get(b.port);
+        for (const [s, e] of b.at) {
+            const name = `${start + s},${start + e}`;
+            if (!spans.has(name)) spans.set(name, [start + s, start + e, []]);
+            spans.get(name)[2].push(linkOf(b));
+        }
+    }
+    const tokens = [...spans.values()].sort((a, b) => a[0] - b[0]);
+    if (!tokens.length) return [{ text, refs: null }];
+    const cut = text === full ? full.length : maxPortChars - 1;
+    const pieces = [];
+    let from = 0;
+    for (const [start, end, refs] of tokens) {
+        if (start >= cut) break;
+        if (start > from) pieces.push({ text: full.slice(from, start), refs: null });
+        pieces.push({ text: full.slice(start, Math.min(end, cut)), refs });
+        from = Math.min(end, cut);
+    }
+    if (from < text.length) pieces.push({ text: text.slice(from), refs: null });
+    return pieces;
 }
 
 // The node's category, as the robot declared it. The gateway stamps exactly one
@@ -206,12 +244,15 @@ function updateTreeLayout(sourceNode) {
         .data(nodesList, d => d.data.id);
 
     const nodeEnter = nodeSelection.enter().append("g")
-        .each(d => { d._statusKey = null; })   // (re)appeared: force the repaint below
+        // (Re)appeared: force the repaints below.
+        .each(d => { d._statusKey = null; d._linkRole = null; d._pulse = null; })
         .attr("transform", nodeTransform(sourceNode.x0 || 0, sourceNode.y0 || 0))
         .on("click", (event, d) => {
             if (event.defaultPrevented) return;
             toggleFold(d);
-        });
+        })
+        .on("mouseenter", (event, d) => linkCardRows(d, true))
+        .on("mouseleave", (event, d) => linkCardRows(d, false));
 
     // Native tooltip. First child, as SVG wants <title> to be, and on every
     // node: the cards with no ports are the control and decorator nodes whose
@@ -234,6 +275,18 @@ function updateTreeLayout(sourceNode) {
         .attr("height", nodeHeight + 6)
         .attr("rx", 9)
         .attr("ry", 9);
+
+    // A hovered key row's writers (solid) and readers (dashed): an accent
+    // outline just outside the card and its subtree ring, so the status
+    // stroke stays readable underneath. Hidden until a row is hovered.
+    nodeEnter.append("rect")
+        .attr("class", "node-link")
+        .attr("x", -nodeWidth / 2 - 6)
+        .attr("y", -nodeHeight / 2 - 6)
+        .attr("width", nodeWidth + 12)
+        .attr("height", nodeHeight + 12)
+        .attr("rx", 11)
+        .attr("ry", 11);
 
     // Node card background, centered on the node's layout point so the card
     // needs no per-orientation adjustments
@@ -272,11 +325,16 @@ function updateTreeLayout(sourceNode) {
     // Ports the tree author wrote on this node, along the card's bottom edge —
     // what a Precondition actually tests, which case a Switch matched. Blank
     // for a node with no ports; the untruncated set is in the hover title.
+    // A key's name is its own tspan (portPieces), for the key-row hover.
     nodeEnter.append("text")
         .attr("class", "node-ports")
         .attr("x", textX)
         .attr("y", rowPorts)
-        .text(d => truncate(portSummary(d.data.ports), maxPortChars));
+        .selectAll("tspan")
+        .data(d => portPieces(d.data))
+        .join("tspan")
+        .attr("class", p => p.refs ? "port-key" : null)
+        .text(p => p.text);
 
     // UID label (blank when this node carries no UID)
     nodeEnter.append("text")
@@ -302,6 +360,15 @@ function updateTreeLayout(sourceNode) {
         .attr("y", rowName)
         .attr("text-anchor", "middle")
         .text("IDLE");
+
+    // The writer pulse: a dot at the card's corner when a key it writes
+    // changes (see paintPulses).
+    nodeEnter.append("circle")
+        .attr("class", "node-pulse")
+        .attr("cx", nodeWidth / 2 - 4)
+        .attr("cy", -nodeHeight / 2 + 4)
+        .attr("r", 3.5)
+        .on("animationend", function() { this.classList.remove("fire"); });
 
     // Merge + animate to final positions
     const nodeUpdate = nodeEnter.merge(nodeSelection);
@@ -335,8 +402,12 @@ function updateTreeLayout(sourceNode) {
     });
 
     // Cards that just (re)appeared, e.g. by unfolding, show the displayed state
-    // now rather than IDLE until the next frame.
+    // now rather than IDLE until the next frame; and a fold moves an outline
+    // or a pulse to the card that now stands for its node.
     paintStatus(lastStatusMap);
+    paintKeyLink();
+    if (linkedCard) linkCardRows(linkedCard, true);
+    paintPulses();
 }
 
 // Fold or unfold one node: its card's click, and its Timeline row's chevron.
@@ -449,11 +520,15 @@ function paintStatus(telemetryMap) {
 // node it belongs to. The root board opens on load because it holds the
 // mission's own state; the rest stay closed to keep the list scannable.
 //
-// Open/closed state and the last-seen values live outside the DOM so they
-// survive every update frame.
+// Open/closed state lives outside the DOM so it survives every update frame.
 const bbGroupOpen = {};     // board name -> is its body expanded?
-const bbLastValues = {};    // "board key" -> last value, serialized, for the flash
 const bbGroupEls = {};      // board name -> { group, header, toggle, body, count, rows }
+
+// A change's marks (see renderBlackboards), in µs like the recording's times.
+const BB_SAMPLE = 500e3;        // fresh: changed within one 2 Hz sample
+const BB_STREAMING = 4;         // streaming: this many changes in BB_RECENT
+const BB_FADE = 1.8e6;          // the fade's length (styles.css, --fade)
+let bbLastMode = null;          // the mode the panel was last painted in ("frames": no recording)
 
 // Boards in tree order, from the layout — see collectBoards().
 let bbBoardList = [];
@@ -564,6 +639,8 @@ function createBBGroup(info) {
         const open = !bbGroupOpen[info.board];
         bbGroupOpen[info.board] = open;
         body.hidden = !open;
+        // Stop fades on closing, or they replay on opening.
+        for (const row of body.querySelectorAll(".bb-fresh")) row.classList.remove("bb-fresh");
         toggle.classList.toggle("open", open);
         toggle.setAttribute("aria-expanded", String(open));
     });
@@ -571,12 +648,13 @@ function createBBGroup(info) {
 
     group.append(header, body);
     bbGroups.appendChild(group);
-    return { group, header, toggle, body, count, rows: {} };
+    return { board: info.board, group, header, toggle, body, count, rows: {} };
 }
 
 // Rows are buttons because they are disclosures: clicking one unwraps a value
 // too long for the panel and, when the value has a renderer, reveals the
-// labelled breakdown of its fields.
+// labelled breakdown of its fields. Hovering one outlines the nodes that
+// write and read the key on the canvas (linkKey).
 function createBBRow(group, key) {
     const row = document.createElement("button");
     row.type = "button";
@@ -596,11 +674,19 @@ function createBBRow(group, key) {
     detail.className = "bb-detail";
     detail.hidden = true;
 
-    const entry = { row, value: valueEl, detail, text: null, hasDetail: false };
+    // tChange: the change last painted (undefined until the first paint).
+    const entry = { row, value: valueEl, detail, text: null, hasDetail: false,
+                    tChange: undefined };
     row.addEventListener("click", () => {
         const open = !row.classList.contains("expanded");
         row.classList.toggle("expanded", open);
         detail.hidden = !(open && entry.hasDetail);
+    });
+    row.addEventListener("mouseenter", () => linkKey(group.board, key, true));
+    row.addEventListener("mouseleave", () => linkKey(group.board, key, false));
+    // The fade ran out: the change is no longer news.
+    row.addEventListener("animationend", (event) => {
+        if (event.animationName === "fade-out") row.classList.remove("bb-fresh");
     });
 
     group.body.append(row, detail);
@@ -623,19 +709,35 @@ function fillBBDetail(dl, entries) {
     }
 }
 
+// Add cls to el, restarting its animation if one is in flight.
+function restartClass(el, cls) {
+    el.classList.remove(cls);
+    void el.getBoundingClientRect();
+    el.classList.add(cls);
+}
+
 // Reorder children only when the order is actually wrong: re-appending a row
-// restarts its flash animation.
+// restarts its fade.
 function syncBBOrder(container, ordered) {
     const correct = ordered.length === container.children.length
         && ordered.every((el, i) => container.children[i] === el);
     if (!correct) ordered.forEach(el => container.appendChild(el));
 }
 
-// `flash: false` paints without flashing changed rows: for a cursor moving
-// through the past, where every step changes something.
-//
-// `empty` is what the panel says when there are no boards at all.
-function renderBlackboards(boards, { flash = true, empty = "This robot reports no blackboards." } = {}) {
+// `boards` as of time `t` in the blackboard `track` (a segment's, or by
+// default frameTrack, the status frames' at their newest), shown in `mode`
+// ("live", "playing", "paused"). A key changed under one sample ago is fresh,
+// unless streaming; fresh fades while moving, is marked while paused. A mode
+// or source switch only primes the rows; the writers pulse alike. See
+// docs/architecture.md, "Rendering".
+function renderBlackboards(boards, { track = frameTrack, t = track.tLast, mode = "live",
+                                     empty = "This robot reports no blackboards." } = {}) {
+    const moving = mode === "live" || mode === "playing";
+    const painting = track === frameTrack ? "frames" : mode;
+    const animate = moving && painting === bbLastMode && !reducedMotion.matches;
+    const marked = mode === "paused" || reducedMotion.matches;
+    bbLastMode = painting;
+    const markedRefs = [], firedRefs = [];  // for the writer pulse
     // Layout order first, so the panel reads like the canvas. A board the robot
     // reports that the layout never mentioned is still shown, flat at the
     // bottom — cover for a robot whose XML omits the instance paths.
@@ -667,6 +769,8 @@ function renderBlackboards(boards, { flash = true, empty = "This robot reports n
             ? `${name}\nNo values of its own — its ports are remapped to the parent board.`
             : name;
 
+        // A closed board, or the collapsed sidebar, shows no row: nothing fades.
+        const shown = !group.body.hidden && !sidebar.classList.contains("collapsed");
         for (const key of keys) {
             const row = group.rows[key] || (group.rows[key] = createBBRow(group, key));
             const value = entries[key];
@@ -681,17 +785,28 @@ function renderBlackboards(boards, { flash = true, empty = "This robot reports n
                 row.detail.hidden = !(row.hasDetail && row.row.classList.contains("expanded"));
             }
 
-            // Flash on a real change only — not the first time a key is seen.
-            const stateKey = name + " " + key;
-            const serialized = JSON.stringify(value === undefined ? null : value);
-            if (flash && stateKey in bbLastValues && bbLastValues[stateKey] !== serialized) {
-                row.row.classList.remove("bb-changed");
-                void row.row.offsetWidth;        // restart a flash already in flight
-                row.row.classList.add("bb-changed");
-            } else if (!flash) {
-                row.row.classList.remove("bb-changed");     // a live flash still running
+            const change = KleinRecording.bbChange(track, name, key, t);
+            const streaming = change.recent >= BB_STREAMING;
+            const age = change.tChange === null ? Infinity : t - change.tChange;
+            const fresh = age < BB_SAMPLE;
+            const news = fresh && !streaming;
+            // A row's first paint is not a change: the key is just being seen.
+            const isNew = row.tChange !== undefined && change.tChange !== row.tChange;
+            row.tChange = change.tChange;
+            const classes = row.row.classList;
+            classes.toggle("bb-stream", streaming);
+            classes.toggle("bb-mark", marked && news);
+            if (marked && news) markedRefs.push(linkRef(name, key));
+            if (animate && isNew && news) firedRefs.push(linkRef(name, key));
+            if (animate && shown && isNew && news) {
+                restartClass(row.row, "bb-fresh");
+            } else if (!moving || !shown || streaming || reducedMotion.matches
+                       || age >= BB_FADE) {
+                // A fade still running, or one a hidden row never played: an
+                // animation doesn't run under display: none, and would play
+                // on showing, long after the change.
+                classes.remove("bb-fresh");
             }
-            bbLastValues[stateKey] = serialized;
         }
 
         for (const key of Object.keys(group.rows)) {     // keys the robot dropped
@@ -699,7 +814,6 @@ function renderBlackboards(boards, { flash = true, empty = "This robot reports n
                 group.rows[key].row.remove();
                 group.rows[key].detail.remove();
                 delete group.rows[key];
-                delete bbLastValues[name + " " + key];
             }
         }
         syncBBOrder(group.body,
@@ -715,6 +829,8 @@ function renderBlackboards(boards, { flash = true, empty = "This robot reports n
     }
     syncBBOrder(bbGroups, names.map(name => bbGroupEls[name].group));
 
+    setPulses(markedRefs, firedRefs, moving);
+
     bbCount.textContent = names.length ? String(names.length) : "";
     // Per-board dashes cover empty boards; this line is for having none at all.
     bbEmpty.hidden = names.length > 0;
@@ -724,9 +840,9 @@ function renderBlackboards(boards, { flash = true, empty = "This robot reports n
 // A new tree means new boards: drop the old ones rather than leave values that
 // will never update again.
 function resetBlackboards() {
+    frameTrack.clear();
     bbGroups.textContent = "";
     for (const key of Object.keys(bbGroupEls)) delete bbGroupEls[key];
-    for (const key of Object.keys(bbLastValues)) delete bbLastValues[key];
     for (const key of Object.keys(bbGroupOpen)) delete bbGroupOpen[key];
     // The root board carries the mission's own state, so it is the one worth
     // seeing without a click.
@@ -742,8 +858,8 @@ function resetBlackboards() {
 // The shown width lives in --sidebar-width on <html>, so the drawer's left
 // edge and the banner stack's centre follow it in CSS alone; the camera reads
 // sidebarWidth() (visibleViewport). Collapsed, a strip as wide as the
-// drawer's toolbar is tall keeps the fold button, as the collapsed drawer
-// keeps its toolbar. See docs/architecture.md, "The sidebar".
+// drawer's transport row is tall keeps the fold button, as the collapsed drawer
+// keeps its transport row. See docs/architecture.md, "The sidebar".
 const sidebar = document.getElementById("sidebar");
 const SIDEBAR_DEFAULT = 320;                // px
 const SIDEBAR_MIN = 200;                    // px; at most half the window
@@ -790,8 +906,9 @@ const watermark = document.getElementById("watermark");
 
 // The top strip is always kept clear for one banner pill (#banner-stack:
 // 12px from the top, a 34px pill, plus a margin), so the camera never puts
-// the tree under the "Viewing t = …" pill and pausing doesn't move it. A
-// second pill at once may overlap the tree's top for a moment.
+// the tree under a pill (a connection warning, a saved file) and a pill
+// coming or going doesn't move it. A second pill at once may overlap the
+// tree's top for a moment.
 const BANNER_INSET = 12 + 34 + 10;
 
 function visibleViewport() {
@@ -954,8 +1071,7 @@ function pulseNodes(nodes) {
     const wanted = new Set(nodes);
     gContainer.selectAll(".node-rect.focused").classed("focused", false);
     const rects = gContainer.selectAll("g.node").filter(d => wanted.has(d)).select(".node-rect");
-    rects.each(function() { void this.getBoundingClientRect(); });   // restart a pulse in flight
-    rects.classed("focused", true);
+    rects.each(function() { restartClass(this, "focused"); });
     clearTimeout(pulseTimer);
     pulseTimer = setTimeout(
         () => gContainer.selectAll(".node-rect.focused").classed("focused", false), 1100);
@@ -965,6 +1081,141 @@ function pulseNodes(nodes) {
 function highlightNode(node, on) {
     gContainer.selectAll("g.node").filter(d => d === node)
         .select(".node-rect").classed("highlight", on);
+}
+
+// ------------------------------------------------------------------ //
+// Keys and nodes, linked on hover — from the layout's port bindings
+// ------------------------------------------------------------------ //
+// Each node lists the blackboard entries its ports reach (`bindings`, see
+// docs/protocol.md): a hovered key row outlines its writers (out/inout) solid
+// and its readers dashed, and accents the key on their port lines; a hovered
+// card marks its keys' rows.
+// Only the pulse runs per frame.
+function linkRef(board, key) {
+    return board + "\u0000" + key;
+}
+function linkOf(binding) {
+    return linkRef(binding.board, binding.key);
+}
+
+// linkRef -> {writers, readers}: Sets of hierarchy nodes in tree order. A node
+// that both reads and writes an entry is a writer. Built per tree (showTree).
+let bbLinks = new Map();
+
+function indexBindings(root) {
+    const links = new Map();
+    KleinRecording.eachNode(root, (node) => {
+        for (const b of node.data.bindings || []) {
+            const ref = linkOf(b);
+            if (!links.has(ref)) links.set(ref, { writers: new Set(), readers: new Set() });
+            links.get(ref)[b.dir === "in" ? "readers" : "writers"].add(node);
+        }
+    });
+    for (const link of links.values()) for (const node of link.writers) link.readers.delete(node);
+    return links;
+}
+
+// The card that stands for a node: the node's own, or the outermost folded
+// ancestor's when a fold hides it.
+function shownCard(node) {
+    let card = node;
+    for (let a = node.parent; a; a = a.parent) if (a._children) card = a;
+    return card;
+}
+
+let linkedRef = null;           // the key row hovered, as a linkRef
+
+function linkKey(board, key, on) {
+    const ref = linkRef(board, key);
+    if (!on && linkedRef !== ref) return;
+    linkedRef = on ? ref : null;
+    paintKeyLink();
+}
+
+// The hovered key's outlines and port-line accents, onto whichever cards
+// stand for its nodes now (also after a fold: updateTreeLayout).
+function paintKeyLink() {
+    const link = linkedRef && bbLinks.get(linkedRef);
+    const roles = new Map();
+    if (link) {
+        for (const node of link.readers) roles.set(shownCard(node), "read");
+        for (const node of link.writers) roles.set(shownCard(node), "write");   // wins
+    }
+    gContainer.selectAll("g.node").each(function(d) {
+        const role = roles.get(d) || null;
+        if (d._linkRole === role) return;
+        d._linkRole = role;
+        const outline = this.querySelector(".node-link");
+        outline.classList.toggle("write", role === "write");
+        outline.classList.toggle("read", role === "read");
+    });
+    gContainer.selectAll("tspan.port-key")
+        .classed("hl", p => linkedRef !== null && p.refs.includes(linkedRef));
+}
+
+let linkedRows = [];            // the rows a hovered card marked
+let linkedCard = null;          // the card hovered, if any
+
+// A hovered card's keys, marked in the panel. A folded card stands for the
+// nodes it hides too, as their outlines go to it; clicking it to fold or
+// unfold marks them again (updateTreeLayout).
+function linkCardRows(card, on) {
+    for (const row of linkedRows) row.classList.remove("linked");
+    linkedRows = [];
+    linkedCard = on ? card : null;
+    if (!on) return;
+    const nodes = [];
+    if (card._children) KleinRecording.eachNode(card, (node) => nodes.push(node));
+    else nodes.push(card);
+    for (const node of nodes) {
+        for (const b of node.data.bindings || []) {
+            const row = bbGroupEls[b.board]?.rows[b.key]?.row;
+            if (row && !row.classList.contains("linked")) {
+                row.classList.add("linked");
+                linkedRows.push(row);
+            }
+        }
+    }
+}
+
+// The writer pulse: the cards writing a key that just changed, under the
+// panel's own rule (renderBlackboards). `pulseMarked` holds the writers of the
+// keys marked statically (paused, or reduced motion); fire() starts the
+// one-shot fade on the writers of a change seen live or playing.
+let pulseMarked = new Set();
+let pulseFiring = false;        // some card may still be fading
+
+function setPulses(markedRefs, firedRefs, moving) {
+    const marked = new Set();
+    for (const ref of markedRefs) for (const node of bbLinks.get(ref)?.writers || []) marked.add(node);
+    const same = marked.size === pulseMarked.size && [...marked].every(n => pulseMarked.has(n));
+    if (!same) {
+        pulseMarked = marked;
+        paintPulses();
+    }
+    if (pulseFiring && (!moving || reducedMotion.matches)) {
+        gContainer.selectAll(".node-pulse.fire").classed("fire", false);
+        pulseFiring = false;
+    }
+    const fired = new Set();
+    for (const ref of firedRefs) {
+        for (const node of bbLinks.get(ref)?.writers || []) fired.add(shownCard(node));
+    }
+    if (!fired.size) return;
+    pulseFiring = true;
+    gContainer.selectAll("g.node").filter(d => fired.has(d)).select(".node-pulse")
+        .each(function() { restartClass(this, "fire"); });
+}
+
+// The static pulses, onto whichever cards stand for their writers now.
+function paintPulses() {
+    const cards = new Set([...pulseMarked].map(shownCard));
+    gContainer.selectAll("g.node").each(function(d) {
+        const on = cards.has(d);
+        if (d._pulse === on) return;
+        d._pulse = on;
+        this.querySelector(".node-pulse").classList.toggle("mark", on);
+    });
 }
 
 // Camera keys. Two, because there are only two questions the camera is ever
@@ -1007,33 +1258,18 @@ for (const input of document.querySelectorAll('input[name="layout"]')) {
 // message down without knowing what else is on screen. `kind` picks the dot
 // colour and the sort order (see .banner.* in styles.css); `timeout` makes it
 // clear itself. A new kind of message costs one showBanner() call.
-//
-// `action` ({label, onClick}) adds a button, as "Back to live" on the
-// "Viewing t = …" pill; `mono` sets the text in monospace; `live: false`
-// keeps a pill that changes on every key press out of the aria-live stack's
-// announcements.
 const bannerStack = document.getElementById("banner-stack");
 const BANNER_FADE_MS = 450;     // must match the .banner.leaving transition
-const banners = new Map();      // key -> { el, text, button, timers }
+const banners = new Map();      // key -> { el, text, timers }
 
-function showBanner(key, text, { kind = "info", timeout = 0, action = null, mono = false,
-                                 live = true } = {}) {
+function showBanner(key, text, { kind = "info", timeout = 0 } = {}) {
     let entry = banners.get(key);
     if (!entry) {
         const el = bannerStack.appendChild(document.createElement("div"));
         el.dataset.key = key;
-        if (!live) el.setAttribute("aria-live", "off");
         const textEl = el.appendChild(document.createElement("span"));
-        textEl.className = "banner-text" + (mono ? " mono" : "");
-        let button = null;
-        if (action) {
-            button = el.appendChild(document.createElement("button"));
-            button.type = "button";
-            button.className = "banner-action";
-            button.textContent = action.label;
-            button.addEventListener("click", action.onClick);
-        }
-        entry = { el, text: textEl, button, timers: [] };
+        textEl.className = "banner-text";
+        entry = { el, text: textEl, timers: [] };
         banners.set(key, entry);
     }
     entry.timers.forEach(clearTimeout);     // a repeat restarts the clock
@@ -1130,6 +1366,8 @@ KleinTimeline.connect({
 let frameTree = null;
 let frameStatus = {};
 let frameBoards = null;
+// Their blackboard changes over the last BB_RECENT, timed by the gateway (`t`).
+const frameTrack = KleinRecording.createTrack();
 
 // The root id of the tree on the canvas. Node ids are generation-prefixed (see
 // updateTreeLayout), so an equal id is the same tree: a `segment` and a `layout`
@@ -1158,6 +1396,11 @@ function showTree(treeData) {
     tagSubtreeDepth(rootNodeSnapshot);
 
     bbBoardList = collectBoards(rootNodeSnapshot);
+    bbLinks = indexBindings(rootNodeSnapshot);
+    linkedRef = null;
+    linkedRows = [];
+    linkedCard = null;
+    pulseMarked = new Set();
     lastStatusMap = {};      // its uids indexed the tree we just dropped
     lastActiveStatusMap = {};
     resetBlackboards();
@@ -1195,26 +1438,17 @@ function render() {
     const source = recording ? "recording" : "frames";
     if (source !== displaySource) boardsDirty = true;
     displaySource = source;
+    // The past: amber canvas edge and blackboard note (styles.css).
     document.body.classList.toggle("viewing-past", recording && !pos.live);
     // An opened file without a .bb.jsonl sidecar: there is no blackboard at any moment.
     const noBoards = recording && rec.source === "file" && seg.bb.tStart === null;
     document.body.classList.toggle("no-blackboard", noBoards);
-    // The moment shown, first in the banner stack, with the way back.
-    if (recording && !pos.live) {
-        // An opened file has no live to go back to: no button (Esc still
-        // returns to its end).
-        const action = rec.source === "file" ? null
-            : { label: "Back to live", onClick: KleinDrawer.goLive };
-        showBanner("viewing", `Viewing t = ${KleinDrawer.formatTime(pos.t)}`,
-                   { kind: "past", mono: true, live: false, action });
-    } else {
-        hideBanner("viewing");
-    }
     KleinDrawer.update(pos && rec, pos);
 
     const tree = recording ? seg.layout : frameTree;
     if (tree && tree.id !== drawnTreeId) showTree(tree);
-    KleinTimeline.update(recording ? rec : null, pos, rootNodeSnapshot, clock);
+    KleinTimeline.update(recording ? rec : null, pos, rootNodeSnapshot);
+    KleinOverview.update(recording ? rec : null, pos);
     if (!rootNodeSnapshot) return;
 
     lastStatusMap = recording
@@ -1233,22 +1467,22 @@ function render() {
     // is shown belongs to another moment.
     const boards = recording ? KleinRecording.bbAt(seg, pos.live ? Infinity : pos.t)
                              : frameBoards;
-    // Flash only live changes: not moving through the past, and not the jump
-    // back to live from it.
     const live = !recording || pos.live;
+    const mode = live ? "live" : pos.mode;
+    const shown = recording ? { track: seg.bb, t: KleinCursor.shownTime(pos, rec), mode } : { mode };
     if (boards) {
-        renderBlackboards(boards, { flash: live && boardsLive });
+        renderBlackboards(boards, shown);
     } else if (noBoards) {
-        renderBlackboards({}, { flash: false, empty: "No blackboard in this file." });
+        renderBlackboards({}, { ...shown, empty: "No blackboard in this file." });
     } else if (!live) {
         // Before the segment's kept blackboard: dropped by eviction (which
         // cuts the blackboard at the exact cutoff, transitions by whole
         // chunks), or a moment before its first sample.
         const empty = seg.bbDropped ? "Blackboard history from this moment was dropped."
                                     : "No blackboard sample yet at this moment.";
-        renderBlackboards({}, { flash: false, empty });
+        renderBlackboards({}, { ...shown, empty });
     } else if (!boardsLive) {
-        renderBlackboards({}, { flash: false, empty: "Waiting for values…" });
+        renderBlackboards({}, { ...shown, empty: "Waiting for values…" });
     }
     boardsLive = live;
 }
@@ -1287,6 +1521,7 @@ function connectGatewayPipeline() {
         frameTree = null;
         frameStatus = {};
         frameBoards = null;
+        frameTrack.clear();
     };
 
     ws.onclose = () => {
@@ -1325,6 +1560,8 @@ function connectGatewayPipeline() {
 
         else if (message.type === "blackboard") {
             frameBoards = message.data || {};
+            frameTrack.addBoards(message.t, frameBoards);
+            frameTrack.evictBefore(message.t - KleinRecording.BB_RECENT);
             requestRender({ boards: true });
         }
 

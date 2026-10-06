@@ -105,18 +105,26 @@ class Chunk {
     }
 }
 
+// JSON with object keys sorted: equal values compare equal.
+function sortedJson(value) {
+    return JSON.stringify(value, (key, v) => (v && typeof v === "object" && !Array.isArray(v)
+        ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, v[k]])) : v));
+}
+
 // Per-key blackboard changes of one segment, as BlackboardTrack in recording.py.
 class BlackboardTrack {
     constructor() { this.clear(); }
 
     clear() {
         this.tStart = null;
+        this.tLast = null;                  // the newest sample added
         this.boards = new Map();            // board -> time first seen, in that order
         this.keys = new Map();              // "board\0key" -> {board, key, ts: [], values: []}
     }
 
     add(t, changes, removed, boards) {
         if (this.tStart === null) this.tStart = t;
+        this.tLast = t;
         for (const board of boards) if (!this.boards.has(board)) this.boards.set(board, t);
         const put = (board, key, value) => {
             const name = board + "\0" + key;
@@ -127,6 +135,28 @@ class BlackboardTrack {
         };
         for (const [board, key, value] of changes) put(board, key, value);
         for (const [board, key] of removed) put(board, key, REMOVED);
+    }
+
+    // One whole {board: {key: value}} sample, diffed against the newest
+    // values as recording.py's add does: a key missing from a board in the
+    // sample is removed; a board missing from it keeps its keys.
+    addBoards(t, boards) {
+        const changes = [], removed = [];
+        for (const [board, entries] of Object.entries(boards)) {
+            for (const [key, value] of Object.entries(entries)) {
+                const entry = this.keys.get(board + "\0" + key);
+                const last = entry ? entry.values[entry.values.length - 1] : REMOVED;
+                if (last === REMOVED || sortedJson(last) !== sortedJson(value)) {
+                    changes.push([board, key, value]);
+                }
+            }
+        }
+        for (const { board, key, values } of this.keys.values()) {
+            if (board in boards && !(key in boards[board]) && values[values.length - 1] !== REMOVED) {
+                removed.push([board, key]);
+            }
+        }
+        this.add(t, changes, removed, Object.keys(boards));
     }
 
     at(t) {
@@ -508,15 +538,29 @@ function strip(item) {
     return rest;
 }
 
-// The seq one transition before (dir -1) or after (dir +1), or null past the ends.
-function nextSeq(seg, seq, dir) {
-    const next = seq + dir;
-    return next >= seg.startSeq && next <= seg.headSeq ? next : null;
-}
-
 // {board: {key: value}} as of time t, or null before the blackboard's start.
 function bbAt(seg, t) {
     return seg.bb.at(t);
+}
+
+// How one key of a BlackboardTrack last changed as of time t: {tChange, recent}.
+//   tChange  its last change at or before t, or null. A value at or before
+//            the track's start (the first sample, or eviction's base) is
+//            where the history begins, not a change.
+//   recent   the changes in (t - BB_RECENT, t]: many means streaming.
+const BB_RECENT = 3e6;              // µs
+
+function bbChange(track, board, key, t) {
+    const entry = track.keys.get(board + "\0" + key);
+    const out = { tChange: null, recent: 0 };
+    if (!entry || track.tStart === null) return out;
+    const { ts } = entry;
+    const i = bisectRight(ts.length, t, (j) => ts[j]) - 1;
+    if (i < 0 || ts[i] <= track.tStart) return out;
+    out.tChange = ts[i];
+    const from = Math.max(t - BB_RECENT, track.tStart);
+    out.recent = i + 1 - bisectRight(ts.length, from, (j) => ts[j]);
+    return out;
 }
 
 // ------------------------------------------------------------------ //
@@ -613,6 +657,28 @@ function logRowIndex(rows, segId, seq) {
     return rows.count;
 }
 
+// True when two segments ran the same tree (one layout id).
+function sameTree(a, b) {
+    return a.layoutId === b.layoutId;
+}
+
+// The kept segments grouped into tree runs, as their ids: consecutive
+// segments of one layout (a restart or an outage resumes the run, a new tree
+// starts one), as the gateway's Recording.runs(). One .btlog is saved per run.
+function treeRuns(rec) {
+    const runs = [];
+    rec.segments.forEach((s, i) => {
+        if (i > 0 && sameTree(s, rec.segments[i - 1])) runs[runs.length - 1].push(s.id);
+        else runs.push([s.id]);
+    });
+    return runs;
+}
+
+// The gaps that overlap [t0, t1].
+function gapsIn(rec, t0, t1) {
+    return rec.gaps.filter((g) => g.tTo >= t0 && g.tFrom <= t1);
+}
+
 // True once eviction has dropped transitions: a whole segment (ids count up
 // from 0, and only eviction removes one) or a segment's leading chunks (its
 // retained start moved past its begin). The Log and the Timeline then mark
@@ -638,9 +704,10 @@ function describe(rec) {
 }
 
 globalThis.KleinRecording = {
-    decodeState, stateAtSeq, seqAtTime, stateAt, timeAtSeq, recordsRange, intervals, nextSeq,
-    bbAt, describe, logRows, logRowAt, logRowIndex, intervalsAll, timelineMarks,
-    timelineSections, historyDropped, treeName, eachNode,
+    decodeState, stateAtSeq, seqAtTime, stateAt, timeAtSeq, recordsRange, intervals,
+    bbAt, bbChange, BB_RECENT, describe, logRows, logRowAt, logRowIndex, intervalsAll, timelineMarks,
+    timelineSections, historyDropped, gapsIn, treeName, eachNode, sameTree, treeRuns,
     createStore: () => new Store(),
+    createTrack: () => new BlackboardTrack(),
 };
 })();

@@ -6,6 +6,53 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **A transport row** at the top of the drawer, for both tabs and kept when
+  the drawer is folded: |◀ ▶ ▶|, `● Live` (or **Jump to live ⏭** in the
+  past; `● End`/**Jump to end** for an opened file), an overview of the
+  recording and the clock. Stepping follows the filter on both tabs.
+- **An overview of the whole recording** in that row: one slim track from
+  the oldest kept moment to now (an opened file's whole span), with outages
+  hatched, a pink dashed line where the robot started another tree and a
+  knob at the moment shown. Click or drag along it to go to any moment. On
+  the Timeline tab a box on it shows the Timeline's window: drag the box
+  to pan, drag its edges to zoom.
+- **Pause from live.** While live the play button is ❚❚: press it (or
+  Space) to freeze the tree, the blackboard and the clock where they are,
+  then ▶ to play on.
+- **Playback keys.** ←/→ step to the previous/next transition, Space plays
+  or pauses, Home goes to the oldest moment kept, End or Esc goes live (an
+  opened file: its start and end), and `\` (or the new ⤢ button) zooms the
+  Timeline to fit everything kept. Tooltips name the keys.
+- **Blackboard keys linked to the tree.** Hover a key to outline the nodes
+  that write it (solid) and read it (dashed), the key picked out on their
+  port lines (in a subtree's script under the name it has there); hover a node to ring its keys in the panel. A node that
+  writes a key gets a small amber dot when it changes. The layout's nodes
+  now carry `bindings` (port, direction, board, key and where the port
+  names it; see
+  [docs/protocol.md](docs/protocol.md#streaming-the-recording-klein--dashboard)).
+
+### Changed
+- **A softer blackboard change mark:** a thin amber edge and tint that fade
+  out. A key that changes at nearly every sample gets a steady dim edge and
+  a `~`.
+- **Changes are marked in the past too.** Paused on a Log row, a step or
+  the overview, the keys that changed within the last sample keep a steady
+  mark; playing a recording fades them in as they pass. Going back to live
+  doesn't mark what changed meanwhile.
+- **The "Viewing t = …" pill is gone:** in the past the tree gets a thin
+  amber edge and the transport clock says when.
+- **A tidier tab row:** tabs, a compact filter, the Timeline's zoom and a
+  recording pill (`● Recording 10 min · 148 kB`) with **Save** as its right
+  half.
+
+### Fixed
+- **The recording's size caps hold at every moment.** A dashboard
+  connecting just after a blackboard sample could be told sizes slightly
+  over the caps, until the next transitions arrived.
+- **`klein-bt-mock`'s patrol tree** kept `next_waypoint` on the subtree's
+  board; BT.CPP keeps a remapped key on the parent's, so it is there now.
+
 ## [0.6.0] - 2026-10-03
 
 ### Added

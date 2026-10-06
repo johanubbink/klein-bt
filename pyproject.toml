@@ -68,5 +68,6 @@ klein = [
     "static/cursor.js",
     "static/drawer.js",
     "static/timeline.js",
+    "static/overview.js",
     "static/d3.v7.min.js",
 ]

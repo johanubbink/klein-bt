@@ -5,8 +5,9 @@ with the gateway's own model (``GET /debug/state``, ``--debug``) as the
 reference:
 
 * dragging the playhead to 5 times shows, on every card, the model's state
-  at each time;
-* |◀ ▶| visit consecutive seqs;
+  at each time, and the transport row's clock that time;
+* the transport's |◀ ▶| visit consecutive seqs (unfiltered, every record is
+  a row);
 * folding a card folds its rows and a row's chevron folds the card;
   Alt-click folds every other subtree;
 * a Log row click moves the playhead, and dragging the playhead scrolls the
@@ -14,14 +15,15 @@ reference:
 * F with the drawer open scrolls the timeline to the running rows;
 * the filter keeps the rows the Log keeps;
 * zooming keeps the playhead in place, a paused window rebuilds nothing,
-  and a drag on the lanes pans.
+  and a drag on the lanes pans; zoom to fit (⤢ and \\) makes the window the
+  oldest record to the head, paused or live, and \\ does nothing on the Log.
 
 The robot keeps running: windows are read well behind the head (1 s), where
 the browser's mirror and the gateway's dump read after it agree.
 
 ``TimelineAcrossASwapTest``: across a tree swap the other tree's stretch is a
 band, the playhead dragged into it shows that tree's rows, and playing from
-the past reaches the head and goes live.
+the past reaches the head and goes live, where ❚❚ pauses at the head.
 
 ``TimelineReplayTest``: on real t11 timing (the mock replaying the t11
 FileLogger2 fixture), every row's bars, outcome caps and single marks sit
@@ -37,9 +39,9 @@ import unittest
 from pathlib import Path
 
 from tests.harness.model import Model, fmt_time, names
-from tests.harness.probes import BACK_TO_LIVE
+from tests.harness.probes import BACK_TO_LIVE, NEXT_FRAME
 from tests.harness.targets import ReplayTarget
-from tests.ui import DashboardCase
+from tests.ui import OVERVIEW, DashboardCase, overview_t, overview_x
 
 SHOTS = "timeline"
 FIXTURE = Path(__file__).resolve().parent.parent / "fixtures" / "t11_filelogger2.btlog"
@@ -50,13 +52,14 @@ SETTLED_US = 1_000_000          # how far behind the head the browser surely has
 RUNNING, OUTCOMES = 1, (2, 3, 4)
 MARK_SETTLED_US = 300_000       # on t11: how long until a single mark is surely drawn
 
-# The cards, the banner and the Timeline's cursor, read in one task.
+# The cards, the transport's clock and Live / Jump to live button and the
+# Timeline's cursor, read in one task.
 _READ = """() => ({
   cards: [...document.querySelectorAll('#canvas g.node')].map(g => [
     g.__data__.data.uid, g.querySelector('.node-status-text').textContent]),
   past: document.body.classList.contains('viewing-past'),
-  banner: (v => v ? v.querySelector('.banner-text').textContent : null)(
-          document.querySelector('#banner-stack [data-key="viewing"]')),
+  clock: document.getElementById('tr-clock').textContent,
+  state: (j => [j.dataset.state, j.textContent, j.disabled])(document.getElementById('tr-jump')),
   tl: KleinTimeline.debug(),
 })"""
 
@@ -184,7 +187,15 @@ class TimelineTest(DashboardCase):
         tl = self.page.evaluate("() => KleinTimeline.debug()")
         head = self.page.evaluate("() => kleinDebug().head")
         t_end = min(tl["t1"], head) - SETTLED_US
-        targets = [t_end - f * (t_end - tl["t0"]) for f in (0.9, 0.7, 0.5, 0.3, 0.1)]
+        # Five moments, oldest first: each midway between two records at
+        # least 4 px apart, spread over the records (the mock's mission has
+        # 1 s with none, so times spread evenly can share a moment).
+        model = Model(self.gw.require_debug_state())
+        times = sorted({r[0] for r in model.records(max(model.segments))
+                        if tl["t0"] < r[0] < t_end})
+        px = tl["span"] / tl["width"]
+        mids = [(a + b) / 2 for a, b in zip(times, times[1:]) if b - a >= 4 * px]
+        targets = [mids[round(f * (len(mids) - 1))] for f in (0.1, 0.3, 0.5, 0.7, 0.9)]
         mouse = self.page.mouse
         mouse.move(self.x_of(targets[0], tl), self.ruler_y())
         mouse.down()
@@ -200,7 +211,8 @@ class TimelineTest(DashboardCase):
             t = view["tl"]["pos"]["t"]
             self.assertAlmostEqual(self.x_of(t, tl), x, delta=1, msg="the playhead follows the pointer")
             self.assertTrue(view["past"])
-            self.assertEqual(view["banner"], f"Viewing t = {fmt_time(t)}")
+            self.assertEqual(view["clock"], fmt_time(t))
+            self.assertEqual(view["state"], ["past", "Jump to live ⏭︎", False])
             self.assert_cards(view, model.labels(*model.seq_at(t), dict(view["cards"])), f"at {t}")
         self.assertEqual(len({v["tl"]["pos"]["seq"] for _x, v in seen}), 5, "five moments")
 
@@ -209,7 +221,7 @@ class TimelineTest(DashboardCase):
         start = self.read()["tl"]["pos"]
         model = Model(self.gw.require_debug_state())
         seqs = [start["seq"]]
-        for button, n in (("#tl-next", 4), ("#tl-prev", 6)):
+        for button, n in (("#tr-next", 4), ("#tr-prev", 6)):
             for _ in range(n):
                 self.page.click(button)
                 view = self.read()
@@ -356,7 +368,7 @@ class TimelineTest(DashboardCase):
         self.page.click("#tl-zoom-in")
         tl = self.page.evaluate("() => KleinTimeline.debug()")
         self.assertEqual(tl["span"], 2_000_000)
-        self.assertEqual(self.page.text_content("#tl-window"), "2 s window")
+        self.assertEqual(self.page.text_content("#tl-window"), "2 s")
         # The playhead keeps its place on screen.
         x = lambda d: d["left"] + (d["pos"]["t"] - d["t0"]) * d["width"] / d["span"]
         self.assertAlmostEqual(x(tl), x(before), delta=1)
@@ -383,6 +395,157 @@ class TimelineTest(DashboardCase):
             self.page.click("#tl-zoom-out")
         self.assertEqual(self.page.evaluate("() => KleinTimeline.debug().span"), 30_000_000)
 
+        # Zoom to fit, by ⤢, by \ and by \ typed with AltGr (Ctrl+Alt on
+        # Windows; a plain Ctrl+\ or Alt+\ does nothing): the window is the
+        # oldest record to the head, paused or live (then following the head
+        # on). A mouse click on ⤢ or a tab lets go of the focus, so Space
+        # plays. The Log has no window: \ does nothing there.
+        # The newest moment kept, from the mirror's own data: the head or
+        # the newest segment's newest blackboard sample, whichever is later.
+        head = """() => { const r = shownRecording(), b = r.segments.at(-1).bb;
+          return Math.max(r.head, b.tStart ?? -Infinity, ...b.boards.values(),
+                          ...[...b.keys.values()].map((e) => e.ts.at(-1) ?? -Infinity)); }"""
+        span = "() => KleinTimeline.debug().span"
+        try:
+            for live in (False, True):
+                for how in ("button", "\\", "Control+Alt+Backslash"):
+                    with self.subTest(fit=how, live=live):
+                        if live:
+                            self.browser.go_live()
+                        self.page.evaluate("() => KleinTimeline.setWindow(KleinTimeline.getWindow().t1, 2e6)")
+                        for other in ("Control+Backslash", "Alt+Backslash"):
+                            self.page.keyboard.press(other)
+                            self.assertEqual(self.page.evaluate(span), 2e6, other)
+                        h0 = self.page.evaluate(head)
+                        if how == "button":
+                            self.page.click("#tl-fit")
+                            self.assertNotEqual(self.page.evaluate("document.activeElement.id"),
+                                                "tl-fit")
+                        else:
+                            self.page.keyboard.press(how)
+                        tl = self.page.evaluate("() => KleinTimeline.debug()")
+                        h1, t_min = self.page.evaluate(head), self.page.evaluate("() => kleinDebug().tMin")
+                        self.assertEqual(tl["pos"]["live"], live)
+                        self.assertTrue(h0 <= tl["t1"] <= h1, (h0, tl["t1"], h1))
+                        self.assertTrue(200 <= tl["span"] <= 3.6e9)
+                        if live:
+                            self.assertTrue(tl["follow"])
+                            self.assertTrue(h0 - t_min <= tl["span"] <= h1 - t_min)
+                        else:
+                            self.assertEqual(tl["t0"], t_min)
+            self.page.click("#drawer-tab-log")
+            self.assertNotEqual(self.page.evaluate("document.activeElement.id"), "drawer-tab-log")
+            before = self.page.evaluate("() => KleinTimeline.getWindow()")
+            self.page.keyboard.press("\\")
+            self.assertEqual(self.page.evaluate("() => KleinTimeline.getWindow()"), before)
+            self.page.click("#drawer-tab-timeline")
+            self.assertEqual({b: self.page.get_attribute(b, "title")[-3:]
+                              for b in ("#tr-prev", "#tr-next", "#tl-fit")},
+                             {"#tr-prev": "(←)", "#tr-next": "(→)", "#tl-fit": "(\\)"})
+        finally:
+            self.page.evaluate("() => KleinTimeline.setWindow(KleinTimeline.getWindow().t1, 3e7)")
+
+    def test_the_overview_thumb_is_the_window(self):
+        """The overview's thumb covers the Timeline's window however it moves
+        (−/+, Ctrl+wheel, a lane drag), and moves it: its body pans, an edge
+        zooms with the other edge held. Live, the knob is at the right edge."""
+        page, mouse = self.page, self.page.mouse
+
+        def overview(what):
+            self.frame()
+            v = page.evaluate(OVERVIEW)
+            tl, ov, thumb = v["tl"], v["ov"], v["thumb"]
+            self.assertAlmostEqual(thumb["x"], overview_x(v, max(tl["t0"], ov["tMin"])),
+                                   delta=1, msg=what)
+            self.assertAlmostEqual(thumb["x"] + thumb["width"],
+                                   overview_x(v, min(tl["t1"], ov["tMax"])),
+                                   delta=1, msg=what)
+            return v
+
+        # The robot runs on, so the track's span grows during a press: what
+        # a pointer position means lies between the spans before and after.
+        per_px = lambda v: overview_t(v, 1) - overview_t(v, 0)
+        lanes = page.locator("#tl-lanes").bounding_box()
+        y = page.locator("#overview").bounding_box()
+        y = y["y"] + y["height"] / 2
+        try:
+            v = overview("live")
+            self.browser.screenshot("overview", "live")
+            self.assertTrue(v["tl"]["pos"]["live"])
+            self.assertAlmostEqual(v["knob"]["x"] + v["knob"]["width"] / 2,
+                                   v["ov"]["left"] + v["ov"]["width"], delta=1)
+            # A window longer than the recording (a session's first 30 s): the
+            # thumb is the whole track, a click on it still seeks, and its
+            # left edge zooms, the head held.
+            page.evaluate("() => KleinTimeline.setWindow(KleinTimeline.getWindow().t1, 3.6e9)")
+            v = overview("a window longer than the recording")
+            self.assertAlmostEqual(v["thumb"]["width"], v["ov"]["width"], delta=1)
+            at = v["ov"]["left"] + 0.4 * v["ov"]["width"]
+            mouse.click(at, y)
+            after = overview("a click on the thumb")
+            self.assertFalse(after["tl"]["pos"]["live"])
+            self.assertGreaterEqual(after["tl"]["pos"]["t"], overview_t(v, at - 1))
+            self.assertLessEqual(after["tl"]["pos"]["t"], overview_t(after, at + 1))
+            before, x = after, after["thumb"]["x"] + 1
+            self.browser.drag((x, y), (at, y))
+            v = overview("the left edge of a window past the head")
+            self.assertGreaterEqual(v["tl"]["t1"], before["ov"]["tMax"])
+            self.assertLessEqual(v["tl"]["t1"], v["ov"]["tMax"])
+            self.assertGreaterEqual(v["tl"]["t0"], overview_t(before, at - 1))
+            self.assertLessEqual(v["tl"]["t0"], overview_t(v, at + 1))
+            page.evaluate("() => KleinTimeline.setWindow(KleinTimeline.getWindow().t1, 3e7)")
+            self.browser.go_live()
+            for _ in range(5):
+                page.click("#tl-zoom-in")                   # 30 s → 1 s, following the head
+            overview("zoomed in, live")
+            page.click("#tl-zoom-out")                      # 2 s
+            v = overview("zoomed out, live")
+            self.assertLess(v["thumb"]["width"], v["ov"]["width"] / 2)
+            # Paused (left of the thumb, which would pan): the window holds.
+            mouse.click((v["ov"]["left"] + v["thumb"]["x"]) / 2, y)
+            self.assertFalse(overview("paused")["tl"]["pos"]["live"])
+            self.assertNotEqual(page.evaluate("document.activeElement.id"), "overview",
+                                "a press doesn't focus the track: R and F keep working")
+            self.browser.screenshot("overview", "past")
+            mouse.move(lanes["x"] + 700, lanes["y"] + 40)
+            page.keyboard.down("Control")
+            mouse.wheel(0, 200)
+            page.keyboard.up("Control")
+            overview("Ctrl+wheel")
+            self.browser.drag((lanes["x"] + 700, lanes["y"] + 40), (lanes["x"] + 640, lanes["y"] + 40))
+            v = overview("a lane drag")
+            self.browser.screenshot("overview", "zoomed")
+            # The thumb's body pans the window by what it moved...
+            before, thumb = v, v["thumb"]
+            self.browser.drag((thumb["x"] + thumb["width"] / 2, y),
+                              (thumb["x"] + thumb["width"] / 2 + 40, y))
+            v = overview("a thumb drag")
+            moved = v["tl"]["t0"] - before["tl"]["t0"]
+            self.assertGreaterEqual(moved, 39 * per_px(before))
+            self.assertLessEqual(moved, 41 * per_px(v))
+            self.assertEqual(v["tl"]["span"], before["tl"]["span"])
+            # ...an edge zooms it, the other edge held, the edge under the pointer.
+            for edge, dx in (("left", -30), ("right", -50)):
+                before, thumb = v, v["thumb"]
+                x = thumb["x"] + (thumb["width"] if edge == "right" else 0)
+                self.browser.drag((x, y), (x + dx, y))
+                v = overview(f"the {edge} edge dragged")
+                held, moved = ("t1", "t0") if edge == "left" else ("t0", "t1")
+                self.assertAlmostEqual(v["tl"][held], before["tl"][held], delta=1, msg=edge)
+                self.assertGreaterEqual(v["tl"][moved], overview_t(before, x + dx - 1), edge)
+                self.assertLessEqual(v["tl"][moved], overview_t(v, x + dx + 1), edge)
+                self.assertNotEqual(v["tl"]["span"], before["tl"]["span"])
+            # An edge dragged past the other one: the shortest window, that edge held.
+            before, thumb = v, v["thumb"]
+            self.browser.drag((thumb["x"] + thumb["width"], y), (thumb["x"] - 40, y))
+            self.frame()
+            v = page.evaluate(OVERVIEW)                     # the thumb: its 2 px border
+            self.assertEqual(v["tl"]["span"], 200)              # LADDER[0]
+            self.assertAlmostEqual(v["tl"]["t0"], before["tl"]["t0"], delta=1)
+        finally:
+            page.evaluate("() => { const w = KleinTimeline.getWindow();"
+                          " if (w) KleinTimeline.setWindow(w.t1, 30000000); }")
+
 
 class TimelineAcrossASwapTest(DashboardCase):
     """After a tree swap (mock ``--switch-every``): the earlier tree's stretch
@@ -408,6 +571,10 @@ class TimelineAcrossASwapTest(DashboardCase):
                               ".map(b => b.textContent)")
         self.assertTrue(any(text.startswith("tree: ") for text in bands), bands)
         shot(b, "after_tree_swap")
+        # The overview marks where each tree run starts.
+        model = Model(self.gw.require_debug_state())
+        self.assertTrue(self.assert_overview(model, model.state["gaps"], "a swap")[0]["runs"])
+        b.screenshot("overview", "tree_swap")
         # Drag into the previous tree's stretch: its rows (and cards) show.
         dbg = page.evaluate("() => kleinDebug()")
         prev, after = dbg["segments"][-2], dbg["segments"][-1]
@@ -452,19 +619,52 @@ class TimelineAcrossASwapTest(DashboardCase):
             self.frame()
             self.assertTrue(page.evaluate("() => document.body.classList.contains('viewing-past')"))
             started = time.monotonic()
-            page.click("#tl-play")
-            self.frame()
-            self.assertEqual(page.get_attribute("#tl-play", "aria-label"), "Pause")
-            self.assertTrue(page.evaluate("() => document.body.classList.contains('viewing-past')"),
-                            "playing is still the past")
+            # ▶ pressed and the page read in one task, on the frame painted
+            # after it: a read a few round trips later can be at the head.
+            label, state, past = page.evaluate("""async () => {
+              const play = document.getElementById('tr-play');
+              play.click();
+              await (""" + NEXT_FRAME + """)();
+              return [play.getAttribute('aria-label'), (""" + _READ + """)().state[0],
+                      document.body.classList.contains('viewing-past')]; }""")
+            self.assertEqual([label, state], ["Pause", "past"])
+            self.assertTrue(past, "playing is still the past")
             page.wait_for_function("!document.body.classList.contains('viewing-past')",
                                    timeout=3000)
             took = time.monotonic() - started
             self.frame()
             self.assertTrue(page.evaluate("() => KleinTimeline.debug().pos.live"))
-            self.assertTrue(page.is_disabled("#tl-play"))
-            self.assertFalse(page.evaluate("() => banners.has('viewing')"))
+            # Settled: a swap played through just before the head leaves the
+            # old tree's cards fading out beside the new tree's for 250 ms.
+            self.browser.wait_for_nodes(1)
+            view = page.evaluate(_READ)
+            self.assertEqual(view["state"], ["live", "Live", True])
+            shown = Model(self.gw.require_debug_state()).head_time()
+            self.assertEqual(view["clock"], fmt_time(shown), "the head's time (or its sample's)")
             self.assertGreater(took, 0.4, "played at 1x, not jumped")
+            # Live, ❚❚ pauses at the moment shown: the head's state, the same
+            # clock; ▶ from there is at the head, so live again at once.
+            self.assertFalse(page.is_disabled("#tr-play"))
+            self.assertEqual([page.text_content("#tr-play"),
+                              page.get_attribute("#tr-play", "aria-label"),
+                              page.get_attribute("#tr-play", "title")],
+                             ["❚❚", "Pause", "Pause (Space)"])
+            page.click("#tr-play")
+            self.frame()
+            paused = page.evaluate(_READ)
+            pos = paused["tl"]["pos"]
+            last = paused["tl"]["pos"]["seg"]
+            head_seq = page.evaluate("() => kleinDebug().segments.at(-1).headSeq")
+            self.assertEqual((pos["seq"], pos["t"], pos["live"]), (head_seq, shown, False))
+            self.assertEqual(paused["state"], ["past", "Jump to live ⏭︎", False])
+            self.assertEqual(paused["clock"], view["clock"])
+            cards = dict(paused["cards"])
+            self.assertEqual(cards, dict(view["cards"]))
+            self.assertEqual(cards, Model(self.gw.require_debug_state()).labels(last, head_seq, cards))
+            self.assertEqual(page.text_content("#tr-play"), "▶︎")
+            page.click("#tr-play")
+            page.wait_for_function("!document.body.classList.contains('viewing-past')")
+            self.assertEqual(page.evaluate(_READ)["state"], ["live", "Live", True])
         finally:
             robot.proc.send_signal(signal.SIGCONT)
 
@@ -499,8 +699,12 @@ class TimelineReplayTest(DashboardCase):
         # PickLock's caps (its last is ~3.2 s into a mission) and a single
         # mark recorded: arming can land after the first mission's opening
         # marks, and the next mission starts ~5.7 s in.
+        # And four FAILURE marks on the door's section header, which its
+        # test needs (a late arm can miss the first mission's first ones).
         page.wait_for_function("kleinDebug().head - kleinDebug().segments[0].tBegin > 3600000"
-                               " && document.querySelector('#tl-rows .tl-mark')",
+                               " && document.querySelector('#tl-rows .tl-mark')"
+                               " && document.querySelectorAll("
+                               "'#tl-rows .tl-header[data-uid=\"7\"] .tl-sub.s-3').length >= 4",
                                timeout=15000, polling=100)
         # That mark settled: the head well past it.
         page.wait_for_function("(h) => kleinDebug().head >= h",
@@ -563,8 +767,11 @@ class TimelineReplayTest(DashboardCase):
         settled = self.x(self.dump["head"] - MARK_SETTLED_US)
         want = sorted({round(self.x(t)) for uid in inside
                        for t in expected_shapes(self.intervals(uid))[3] if self.x(t) < settled})
-        got = sorted({round((l + r) / 2) for l, r, c in door["subs"]
-                      if "s-3" in c and (l + r) / 2 < settled})
+        # A sub mark is drawn from 1 px left of its time, 3 px wide: its
+        # time is at left + 1 (its centre, half a px later, can fall on the
+        # other side of `settled` than the time).
+        got = sorted({round(l + 1) for l, _r, c in door["subs"]
+                      if "s-3" in c and l + 1 < settled})
         self.assertGreaterEqual(len(want), 4)
         self.assertEqual(len(got), len(want), (got, want))
         for g, w in zip(got, want):
@@ -579,7 +786,7 @@ class TimelineReplayTest(DashboardCase):
         self.page.click(chevron)
         try:
             self.page.wait_for_selector('#tl-rows .tl-row[data-uid="6"]', state="detached")
-            got = sorted(round((l + r) / 2) for l, r, c in next(
+            got = sorted(round(l + 1) for l, _r, c in next(        # its time, as above
                 row for row in self.page.evaluate(_ROW_SHAPES) if row["uid"] == 5)["subs"] if "kid" in c)
         finally:
             self.page.click(chevron)
@@ -595,7 +802,7 @@ class TimelineReplayTest(DashboardCase):
     def test_nested_header_sticks_only_inside_its_section(self):
         page = self.page
         height = page.evaluate("() => document.documentElement.style.getPropertyValue('--drawer-height')")
-        page.evaluate("() => document.documentElement.style.setProperty('--drawer-height', '140px')")
+        page.evaluate("() => document.documentElement.style.setProperty('--drawer-height', '170px')")
         self.frame()
         geometry = """() => {
           const body = document.getElementById('drawer-body');

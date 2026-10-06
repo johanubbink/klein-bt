@@ -7,7 +7,8 @@ eviction drops its oldest chunk:
 
 * the Log's first line and the Timeline's left edge say that history older
   than the kept span was dropped, with the span the recording really keeps
-  (head back to the oldest record, as the chip);
+  (head back to the oldest record, as the recorder pill); zoom to fit (\\) shows
+  exactly that span, and Home pauses at its oldest moment;
 * a paused cursor on a dropped record moves to the oldest kept record (its
   Log row selected) with a pill in the banner stack;
 * scrolled up in the Log, the rows in view stay in view when older rows go;
@@ -95,6 +96,7 @@ class Synthetic:
         self.t = T0
         self.rec.begin_segment(self.layout, T0, bytes(self.layout.size))
         self.rec.add_blackboard(T0, {"MainTree": {"n": 0}})
+        self.bb_t = T0                      # the newest blackboard sample
         self.grow(3000)
         self.streamer.subscribe(object())   # the backfill, then every change
 
@@ -106,6 +108,7 @@ class Synthetic:
             records.append((self.t, self.rng.choice(self.layout.uids), self.rng.choice((1, 2, 3))))
         self.rec.append(records)
         self.rec.add_blackboard(self.t, {"MainTree": {"n": self.t}})
+        self.bb_t = self.t
         self.rec.evict(self.t)
         self.rec.advance_head(self.t)
 
@@ -132,7 +135,7 @@ class EvictionTest(DashboardCase):
         super().setUpClass()
         with cls.gw.watch() as ws:
             cls.tree = ws.wait_for(lambda w: w.of_type("layout"))[0]["data"]
-        # The chip as with a recording robot.
+        # The recorder pill as with a recording robot.
         cls.page.evaluate("() => { recordingSupport = 'on'; }")
 
     def setUp(self):
@@ -172,6 +175,8 @@ class EvictionTest(DashboardCase):
     def test_markers_and_the_rows_in_view_stay(self):
         synth = self.start()
         self.assertIsNone(self.log_view()["dropped"], "nothing dropped yet: no marker")
+        overview = "() => [KleinOverview.debug().tMin, KleinOverview.debug().tMax]"
+        self.assertEqual(self.page.evaluate(overview), [T0, synth.rec.head])
         # Scrolled up: row 1500 at the top.
         self.page.evaluate(f"() => {{ document.getElementById('drawer-body').scrollTop = {1500 * ROW}; }}")
         before = self.log_view()["rows"]
@@ -184,6 +189,9 @@ class EvictionTest(DashboardCase):
         self.feed(synth)
         after = self.log_view()
         self.assertEqual(after["rows"][0]["key"], top_key, "the same rows stay in view")
+        self.assertEqual(self.page.evaluate(overview), [synth.rec.t_min, synth.rec.head],
+                         "the overview's left edge is the oldest kept moment")
+        self.assertGreater(synth.rec.t_min, T0)
         self.assertAlmostEqual(after["rows"][0]["top"], before[0]["top"], delta=1)
 
         # The Log's first line says what was dropped, with the real kept span.
@@ -208,7 +216,7 @@ class EvictionTest(DashboardCase):
             return { text: note.hidden ? null : note.textContent, title: m.title,
                      x: m.getBoundingClientRect().left - track.left }; }""")
         self.assertIsNotNone(mark, "the Timeline marks the dropped edge")
-        self.assertEqual(mark["text"], f"⇤ {note}", "its note, in the controls strip")
+        self.assertEqual(mark["text"], f"⇤ {note}", "its note, beside the axis")
         self.assertEqual(mark["title"], note)
         self.assertAlmostEqual(mark["x"], 0, delta=1)
         debug = self.page.evaluate("KleinTimeline.debug()")
@@ -219,6 +227,21 @@ class EvictionTest(DashboardCase):
         self.frame()
         self.assertEqual(self.page.evaluate("document.querySelectorAll('#tl-bands .tl-dropped').length"), 0)
         self.assertTrue(self.page.evaluate("document.getElementById('tl-dropped-note').hidden"))
+        # Zoom to fit (\): the window is exactly what is kept.
+        self.page.keyboard.press("\\")
+        debug = self.page.evaluate("KleinTimeline.debug()")
+        self.assertEqual((debug["t0"], debug["t1"]),
+                         (synth.rec.t_min, max(synth.rec.head, synth.bb_t)))
+        # Home: paused at the oldest kept moment, its own µs's records applied;
+        # End: live again.
+        self.page.keyboard.press("Home")
+        seg = synth.rec.segments[0]
+        self.assertEqual(self.page.evaluate("clock"),
+                         {"mode": "paused", "seg": seg.id, "seq": seg.seq_at_time(seg.t_start),
+                          "t": seg.t_start})
+        self.assertEqual(seg.t_start, synth.rec.t_min)
+        self.page.keyboard.press("End")
+        self.assertEqual(self.page.evaluate("clock"), {"mode": "live"})
 
     def test_a_whole_dropped_segment_is_marked_too(self):
         """Eviction dropping an ended segment, and nothing of the next one."""
@@ -258,8 +281,8 @@ class EvictionTest(DashboardCase):
         # Its blackboard was cut at the exact cutoff, after that record: dropped.
         self.assertEqual(self.page.text_content("#bb-empty"),
                          "Blackboard history from this moment was dropped.")
-        viewing = self.page.evaluate("""() => document.querySelector('#banner-stack [data-key="viewing"] .banner-text').textContent""")
-        self.assertTrue(viewing.startswith("Viewing t = "))
+        self.assertEqual(self.page.get_attribute("#tr-jump", "data-state"), "past")
+        self.assertTrue(self.page.is_visible("#past-edge"))
         self.browser.screenshot(SHOTS, "clamped_cursor_pill")
         # Once clamped, the cursor stays put: no second notice as more is dropped
         # while it is still kept.

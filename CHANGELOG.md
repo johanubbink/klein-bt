@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-06
+
 ### Added
 - **A transport row** at the top of the drawer, for both tabs and kept when
   the drawer is folded: |◀ ▶ ▶|, `● Live` (or **Jump to live ⏭** in the
@@ -195,7 +197,8 @@ Initial release.
   and the WebSocket.
 - `klein-bt-mock`: a fake Groot2 publisher for running without a robot.
 
-[Unreleased]: https://github.com/johanubbink/klein-bt/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/johanubbink/klein-bt/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/johanubbink/klein-bt/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/johanubbink/klein-bt/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/johanubbink/klein-bt/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/johanubbink/klein-bt/compare/v0.3.0...v0.4.0

@@ -33,8 +33,9 @@ The code:
 - [`klein/static/`](../klein/static/): the dashboard. `app.js` handles state,
   the WebSocket, the tree and the sidebar; `renderers.js` formats blackboard
   values; `recording.js` and `cursor.js` mirror the recording (see
-  [Browser model](#browser-model)); `drawer.js` and `timeline.js` are the
-  drawer and its Timeline tab. D3 is vendored so it works without internet.
+  [Browser model](#browser-model)); `drawer.js`, `timeline.js` and
+  `overview.js` are the drawer, its Timeline tab and its overview. D3 is
+  vendored so it works without internet.
 
 ## Robot side: one socket, two pollers
 
@@ -109,7 +110,9 @@ and why it loses nothing, is in [protocol.md](protocol.md#how-klein-records).
   starts a new run.
 - **Each status cycle** while armed: `S` is broadcast, then `t` is drained.
   The drained offsets plus `t_begin` are appended, eviction runs, and the head
-  moves to the robot's time now.
+  moves to the robot's time now. Each blackboard sample stored runs eviction
+  too, so a dashboard connecting between two drains is never told sizes
+  over the caps.
 - **Overflow**: a drain of exactly 1000 adds an `overflow` gap from the
   previous record to the drain's first, appends the drain and re-arms with the
   same `Layout`: a new segment, same run.
@@ -188,6 +191,34 @@ root uses its tree ID). The gateway collects these names in tree order during
 the handshake and uses that order to sort the robot's unordered reply. Boards
 klein didn't ask for are dropped, because they have no node to attach to (see
 [protocol.md](protocol.md#blackboard-b)).
+
+Each node also gets `bindings`: the `(board, key)` each port reaches, with the
+port's direction (format in
+[protocol.md](protocol.md#streaming-the-recording-klein--dashboard)). While
+unrolling, klein keeps a scope per subtree instance the way BT.CPP builds its
+blackboard (`recursivelyCreateSubtree` in `src/xml_parsing.cpp`) and resolves a
+key as `Blackboard::getEntry` does (`src/blackboard.cpp`):
+
+- `{key}` names `key`; `{=}` and `=` name the port itself
+  (`TreeNode::getRemappedKey`). On a `<SubTree>` only `{=}` does: `=` there is
+  a literal.
+- `@key` is always on the root board.
+- A `<SubTree>` port set to `{outer}` remaps the inner key to the parent's
+  `outer`, recursively upward. A port set to anything else is a literal BT.CPP
+  stores on the subtree's own board, which wins even under `_autoremap`.
+- `_autoremap` sends every other non-`_` key to the parent. A robot's FULLTREE
+  never carries it, though: klein honours it only in hand-written XML, and
+  against a live robot an autoremapped subtree's keys resolve to its own
+  board.
+- Scripts (`Script`/`ScriptCondition` `code`, `Precondition` `if` and the
+  `_skipIf` … `_post` hooks) are scanned with BT.CPP's tokens: a name before
+  `:=` or `=` is written, before `+=` and friends read and written, any other
+  name read. Strings, numbers, `true`/`false` and ALL_CAPS names (enums) are
+  skipped. There is no grammar.
+- Builtins whose plain value is a key name: `SetBlackboard` `output_key` and
+  `UnsetBlackboard` `key` write it, the entry-updated nodes' `entry` reads it.
+- A `<SubTree>` binding's direction is what the nodes inside do with that
+  entry, merged; `"inout"` if none of them touches it.
 
 Node `id`s include a per-handshake generation counter, so two different trees
 never share ids. The dashboard's D3 join is keyed on `id`, so without this a
@@ -272,7 +303,7 @@ seen, as a pure data model (no asyncio, no ZeroMQ). The gateway feeds it (see
 - **Capped flags**: `Recording.transitions_capped` and `blackboard_capped`
   say that a size cap, not the keep window, decides how far back that
   history reaches: set when the cap evicts, cleared once the window's cutoff
-  passes the cut. The drawer's chip shows them.
+  passes the cut. The drawer's recorder pill shows them.
 - **`RobotClock`** maps klein's monotonic clock to robot µs, taking the
   `r start` reply's timestamp as the midpoint of its round trip. Blackboard
   samples are timestamped with it.
@@ -281,9 +312,9 @@ seen, as a pure data model (no asyncio, no ZeroMQ). The gateway feeds it (see
 
 One `websockets` server owns `--port`. It serves the static files over HTTP
 (`/`, `/styles.css`, `/app.js`, `/renderers.js`, `/recording.js`,
-`/cursor.js`, `/drawer.js`, `/timeline.js`, `/d3.v7.min.js`) and upgrades
-`/ws` to a WebSocket. Because both come from the same origin, the page just
-opens `ws://<same host:port>/ws`.
+`/cursor.js`, `/drawer.js`, `/timeline.js`, `/overview.js`,
+`/d3.v7.min.js`) and upgrades `/ws` to a WebSocket. Because both come from
+the same origin, the page just opens `ws://<same host:port>/ws`.
 
 While recording, the same port serves the recording as downloads, per tree
 run or all in one `.zip` ([protocol.md](protocol.md#saving-a-recording) has
@@ -316,7 +347,7 @@ the robot's reachability, then the live stream.
 | --- | --- | --- |
 | `layout` | on connect / re-handshake | the unrolled tree |
 | `status` | 10 Hz | `{uid: {status, from}}` |
-| `blackboard` | 2 Hz | `{board: {key: value}}`, tree order |
+| `blackboard` | 2 Hz | `data`: `{board: {key: value}}`, tree order; `t`: klein's monotonic clock (µs, not robot time) when the reply arrived, to time changes without a recording |
 | `robot` | on change | `{connected, detail, recording}`; `recording` is `"on"`, `"off"` (`--record-buffer 0`), `"unsupported"` (the robot answered `r` with an error) or `"file"` (`--open`: no robot) |
 | `notice` | on a tree swap | `{text}` |
 | `rec`, `segment`, `segment_end`, `gap`, `bb`, `head`, `evict`, `backfill_done`, binary records | backfill on connect, then as the recording changes | the recording; see [protocol.md](protocol.md#streaming-the-recording-klein--dashboard) |
@@ -344,16 +375,22 @@ Python model. That pins the two implementations together.
   `store.recording` is the one recording klein streams. The Python model's
   queries have mirrors here (`stateAtSeq`, `seqAtTime`, `stateAt`, `bbAt`,
   `decodeState`), next to what the cursor, the Log (`logRows`, `logRowAt`)
-  and the Timeline (`intervalsAll`, `timelineMarks`, `timelineSections`)
-  need.
+  the Timeline (`intervalsAll`, `timelineMarks`, `timelineSections`) and
+  the overview (`treeRuns`) need.
 - [`klein/static/cursor.js`](../klein/static/cursor.js) →
   `globalThis.KleinCursor`. A clock is data: `live()`, `pause(segId, seq,
   t?)`, `play(fromSegId, fromSeq, nowMs, t?)` (1× only).
-  `cursorPos(clock, nowMs, recording)` gives `{seg, seq, t, live}`: live is
-  the last segment's head, and playing moves robot time with wall time until
-  it reaches the head. `step` moves a paused clock one seq, across segment
-  boundaries; `evicted` says whether eviction dropped the moment a clock
-  shows.
+  `cursorPos(clock, nowMs, recording)` gives `{seg, seq, t, live, mode}`,
+  `mode` being `"live"`, `"playing"` or `"paused"`: live is the last
+  segment's head, and playing moves robot time with wall time until it
+  reaches the head, where the mode is `"live"`. `shownTime(pos, recording)`
+  is the time a position shows: its own, or live the head's or the newest
+  blackboard sample's, whichever is newer. `headTime(recording)` is that time
+  at the head; the Timeline's window, the overview and the clock all end
+  there. `pauseAt(recording, t)` is a paused clock at robot time `t`, clamped
+  to `[tMin, headTime]` and to its segment's `tStart`; the Timeline's axis,
+  the overview and Home use it. `evicted` says whether eviction dropped the
+  moment a clock shows.
 
 `app.js` routes binary frames and the recording's message types to the store.
 
@@ -388,28 +425,62 @@ decides what is displayed:
 - **Painting.** The same `paintStatus` (strokes and pills, skipping cards
   whose status is unchanged) and `renderBlackboards` draw either source.
   `updateTreeLayout` repaints the displayed state too, so cards revealed by
-  unfolding show it at once. `renderBlackboards(boards, {flash})` flashes
-  changed rows only while live, and not on the jump back to live from the
-  past; painting without flash also stops a flash still running. The board
-  panel is re-rendered only when a blackboard input changed or the cursor
-  moved, not on every `head`.
+  unfolding show it at once. `renderBlackboards(boards, {track, t, mode})`
+  marks changes from a segment's blackboard `track` at time `t` in mode
+  `live`, `playing` or `paused`. `KleinRecording.bbChange(track, board, key,
+  t)` gives a key's last change at or before `t` (`tChange`; a value at or
+  before the blackboard's start is not a change) and the count of changes in
+  `(t − KleinRecording.BB_RECENT, t]` (3 s). A key is *fresh* when it changed
+  within 0.5 s (one sample) and *streaming* with 4+ changes in 3 s; streaming
+  wins (`bb-stream`: a steady dim edge and a `~`). A fresh key fades once
+  (`bb-fresh`, `--fade` in `styles.css`, 1.8 s) live or playing, and is
+  marked statically (`bb-mark`) when paused or with reduced motion.
+  Switching mode only primes the rows, so a jump never animates; closed or
+  hidden rows never start a fade. Without a recording, the same rule runs
+  on a local track of the `blackboard` frames (`addBoards`, at their newest
+  `t`, kept to the last 3 s): timed by the gateway, so a busy browser
+  doesn't change the answer. The board panel is re-rendered only when a
+  blackboard input changed or the cursor moved, not on every `head`.
+- **Keys and nodes.** `showTree` indexes the layout's `bindings` once:
+  `(board, key)` to its writers (`out`, `inout`) and readers (`in`), a node
+  that does both counting as a writer. Hovering a key row outlines the
+  writers' cards solid and the readers' dashed (`rect.node-link`, outside
+  the card, so the status stroke stays readable) and accents the key on
+  their port lines: `.node-ports` is split into tspans (`portPieces`, cut
+  at each binding's `at`) whose text joins to exactly the truncated line,
+  so nothing moves. A node hidden by a fold is outlined on its outermost
+  folded ancestor's card, and a fold or unfold while hovering moves the
+  outline there. Hovering a card rings its keys' rows (`.linked`; a folded
+  card's include the nodes it hides, and folding the hovered card by its
+  click re-rings them).
+  **The writer pulse** follows the row marks:
+  `renderBlackboards` hands `setPulses` the keys it marks statically and
+  the ones whose fade it would start (whether or not their board is open),
+  and a `--changed` dot at the writers' card corner holds (`mark`) or fades
+  once (`fire`, 1.8 s). Streaming keys don't pulse. Only changed cards are
+  written.
 - **An opened file** (`klein-bt --open`) is the same recording source, with
   three differences in wording only: "live" is the file's end, so the
-  "Viewing t = …" banner has **no button** (Esc still returns to the end);
-  without a sidecar the board panel says **No blackboard in this file.** at
-  every moment (`body.no-blackboard`, which also hides the "sampled 2×/s"
-  note); and the chip and the connection line say there is no robot (see
+  drawer says `● End` there and offers **Jump to end** elsewhere (Esc and End
+  return to the end too); without a sidecar the board panel says **No
+  blackboard in this file.** at every moment (`body.no-blackboard`, which
+  also hides the "sampled 2×/s" note); and the recorder pill and the
+  connection line say there is no robot (see [The drawer](#the-drawer)).
+- **The past.** `body.viewing-past` (the cursor isn't live) stops the
+  RUNNING pulse, like `body.telemetry-stale`, shows the blackboard's "sampled
+  2×/s" note, and draws a thin amber edge round the visible canvas (right of
+  the sidebar, above the drawer: `#past-edge`). Which moment is shown is the
+  drawer's clock, beside its **Jump to live** (see
   [The drawer](#the-drawer)).
-- **The pulse.** `body.viewing-past` (the cursor isn't live) stops the RUNNING
-  pulse, like `body.telemetry-stale`, and shows the blackboard's "sampled
-  2×/s" note.
 - **The drawer** (see [The drawer](#the-drawer)): `KleinDrawer.showRecording`
-  and `KleinDrawer.update(rec, pos)` run on every render, then
-  `KleinTimeline.update(rec, pos, hierarchy, clock)` once the cursor's tree is
-  on the canvas. Both move the cursor through one `seek(clock)`
-  (`KleinDrawer.onSeek`, `KleinTimeline.connect`), which sets the clock and
-  asks for a render; the Timeline's chevrons fold the canvas through
-  `toggleFold` / `foldOthers`, the same `toggleFold` a card's click uses.
+  and `KleinDrawer.update(rec, pos)` run on every render (the drawer reads
+  `pos.mode` and keeps no clock of its own), then, once the cursor's tree is
+  on the canvas, `KleinTimeline.update(rec, pos, hierarchy)` and
+  `KleinOverview.update(rec, pos)`. They move the cursor through one
+  `seek(clock)` (`KleinDrawer.onSeek`, `KleinTimeline.connect`; the overview
+  goes through the Timeline), which sets the clock and asks for a render; the
+  Timeline's chevrons fold the canvas through `toggleFold` / `foldOthers`, the
+  same `toggleFold` a card's click uses.
 
 `window.kleinDebug()` is read-only, for the test harness: the mirror's
 `describe(rec)` facts (when there is a recording) plus `displaySource`
@@ -429,6 +500,7 @@ A node card shows each piece of information in its own place:
 | is that still live? | RUNNING cards pulse only while telemetry arrives | `robot` |
 | which subtree is it in? | a pink ring, and a fill that gets lighter and pinker per nesting level | `is_subtree_root` |
 | what kind of node is it? | a tinted glyph before the label | `category` |
+| what does it read and write? | its port line; hovering a key row outlines it (solid: writes, dashed: reads); a corner dot when a key it writes just changed | `bindings` |
 
 When the robot is unreachable, the pulse stops but the colours stay, so you can
 still read the last known state. Type is shown by glyph and name as well as
@@ -446,7 +518,7 @@ full-height pane over the canvas's left edge, and behaves like the drawer
   half the window, and re-clamped when the window resizes. Double-clicking
   the edge, or the fold button in its top-right corner, toggles collapsed and
   back to the chosen width. Collapsed, a 49 px strip keeps the fold button
-  and the edge, as the collapsed drawer keeps its toolbar; dragging the
+  and the edge, as the collapsed drawer keeps its transport row; dragging the
   strip's edge opens it at the dragged width. Width and collapsed state are
   kept in `localStorage` (`klein.sidebar`); without storage it starts at
   320 px every time.
@@ -465,34 +537,102 @@ full-height pane over the canvas's left edge, and behaves like the drawer
 ## The drawer
 
 A bottom drawer ([`klein/static/drawer.js`](../klein/static/drawer.js)) holds
-the recording views: a toolbar with a collapse button, the **Log** and
-**Timeline** tabs, the recording chip, the filter and **Save**, above a
-scrollable body. The tabs share the body; each keeps its own scroll position.
-It opens on the Timeline. It sits beside the sidebar, its left edge following
-the sidebar's width (see [The sidebar](#the-sidebar)).
+the recording views in two 48 px rows over a scrollable body:
 
-- **Height.** Drag the top edge; the height is clamped between the toolbar
-  alone (49 px with the border) and 80% of the window, and re-clamped when
-  the window shrinks. Double-clicking the edge, or the collapse button,
-  toggles collapsed (toolbar only) and back to the chosen height. Height and
-  collapsed state are kept in `localStorage` (`klein.drawer`); without
-  storage the drawer starts at 300 px every time. The shown height is the
-  `--drawer-height` custom property on `<html>`, so the hint line
-  (`#watermark`) rises with it in CSS alone.
-- **The recording chip** says what klein keeps, from the browser's mirror:
-  `Recording · last 10 min · 4.8k transitions · 60 kB`. The window is the
-  span actually kept, head back to the oldest retained record (a slow tree
-  keeps up to a chunk more than `--record-buffer`, a size cap less). Under
-  500 bytes the size reads `<1 kB`; a narrow window drops the cap note
-  first, then the leading "Recording · ", and both carry the full text as a
-  tooltip. The size is the `head` frame's `bytes`, and its `capped` adds a
-  note: `blackboard history: last 3 min (size limit)`, or `transitions: …`.
-  From the `robot` frame's `recording`: with `--record-buffer 0` the chip
-  says `Recording off`, and with a robot that can't record `Recording needs
-  BehaviorTree.CPP ≥ 4.3.3`. An opened file reads `file: t11.btlog · 9 s ·
-  90 transitions · no robot`, with an accent-coloured dot (the sidebar's
-  connection dot too, and no connection warning: there is no robot by
-  design).
+- the **transport row**, shared by both tabs: the collapse button,
+  **|◀ ▶ ▶|**, `● Live` (or, in the past, **Jump to live ⏭**),
+  the overview of the whole recording (taking the space left), then the
+  clock;
+- the **tab row**: the **Log** and **Timeline** tabs, the compact filter
+  right after them, on the Timeline tab its zoom (− window +), and at the far
+  end the recorder pill with **Save** as its right half.
+
+The tabs share the body; each keeps its own scroll position. It opens on
+the Timeline. It sits beside the sidebar, its left edge following the
+sidebar's width (see [The sidebar](#the-sidebar)).
+
+- **Height.** Drag the top edge; the height is clamped between both rows
+  (97 px with the border) and 80% of the window, and re-clamped when the
+  window shrinks. Double-clicking the edge, or the collapse button, toggles
+  collapsed and back to the chosen height. Collapsed, only the transport
+  row shows (49 px with the border, as wide as the sidebar's strip): the
+  tree gets the whole canvas, and the overview, the step and play buttons
+  and Jump to live still move it. Height and collapsed state are kept in
+  `localStorage` (`klein.drawer`); without storage the drawer starts at
+  300 px every time. The shown height is the `--drawer-height` custom
+  property on `<html>`, so the hint line (`#watermark`) and the canvas's
+  amber edge follow it in CSS alone.
+- **The transport.** **|◀** and **▶|** step to the previous/next row of
+  the Log as filtered, whichever tab is shown and folded too (the same rule
+  as ↑/↓, below): with no filter that is consecutive seqs, across segment
+  boundaries. From live, |◀ takes the newest row and ▶| is off. **▶** plays
+  at 1× from the cursor and **❚❚** pauses, from either tab; playing that
+  reaches the head goes live. Live, ❚❚ pauses at the moment shown, so the
+  cards, blackboard and clock stay put: `pause(seg, headSeq, t)` with `t =
+  KleinCursor.shownTime(pos, rec)` as last painted (live shows the newest
+  blackboard sample, so `bbAt(seg, t)` keeps it). ▶ plays on from there. At
+  an opened file's end the button is off.
+  Beside them one button (`#tr-jump`) says where the cursor is: live, a
+  green `● Live`, inert (disabled, but tinted as a state, not greyed); in
+  the past, paused or playing, an amber **Jump to live ⏭** that goes back.
+  For an opened file it reads `● End` at the end and **Jump to end ⏭**
+  elsewhere. It has a fixed width so the overview beside it never moves.
+  Each has a key (its tooltip names it; see Keys below): ←/→ step, Space
+  plays or pauses, End (and Esc) goes live; Home has no button and pauses at
+  the oldest kept moment. The **clock** is the cursor's time to the µs
+  (`14:03:22.201 030`, `KleinDrawer.formatTime`); live, the head's or the
+  newest blackboard sample's, whichever is newer (`shownTime`). Without a
+  recording the buttons are off, and Live and the clock are hidden.
+- **The overview** ([`klein/static/overview.js`](../klein/static/overview.js))
+  is a slim track in the transport row over the whole kept recording,
+  `rec.tMin` (the oldest kept moment, which eviction moves) to the head
+  (`KleinCursor.headTime`: a blackboard sample newer than the last drain
+  counts); for an opened file, its first timestamp to its last record. The
+  part up to the cursor is tinted, and a knob sits at the cursor (at the
+  right edge while live). On it: each gap hatched like the Timeline's bands,
+  and a pink dashed line where each tree run after the first starts
+  (`KleinRecording.treeRuns`, as Save counts them); nothing else is marked.
+  The marks are rebuilt whenever the span, the width or what is kept
+  changes. Pressing or dragging the track moves the shared cursor as the
+  Timeline's axis does (`KleinCursor.pauseAt`). On the Timeline
+  tab a thumb outlines the Timeline's window, clipped to the track (so a
+  window longer than the recording covers all of it) and at least 6 px wide;
+  it follows the head while the window does. Dragging its body pans the
+  window (a click on it without a drag moves the cursor, as on the track);
+  dragging an edge zooms it with the other edge held (the head, for a
+  window reaching past it), between the shortest and the longest window of
+  − and + and inside the recording. A thumb under 16 px only pans; folded,
+  there is no thumb. A mouse press doesn't focus the overview, so R and F
+  keep working; it has no keys of its own. Without a recording
+  (`--record-buffer 0`, or a robot that can't record) it is a bare grey
+  track that ignores presses.
+- **The recorder pill** says what klein keeps, from the browser's mirror:
+  a red dot, `Recording`, and in muted monospace the span kept and its size,
+  `10 min · 60 kB`; its tooltip is the whole summary,
+  `Recording · last 10 min · 4.8k transitions · 60 kB`
+  (`KleinDrawer.summary`). The span is the one actually kept, head back to
+  the oldest retained record (a slow tree keeps up to a chunk more than
+  `--record-buffer`, a size cap less). Under 500 bytes the size reads
+  `<1 kB`. The size is the `head` frame's `bytes`, and its `capped` adds a
+  note left of the pill: `blackboard history: last 3 min (size limit)`, or
+  `transitions: …`. From the `robot` frame's `recording`: with
+  `--record-buffer 0` the pill is grey and says `Recording off
+  (--record-buffer 0)`, and with a robot that can't record `Recording needs
+  BehaviorTree.CPP ≥ 4.3.3`. An opened file reads `file: t11.btlog` and its
+  span (`9 s`), with an accent-coloured dot (the sidebar's connection dot
+  too, and no connection warning: there is no robot by design); its tooltip
+  `file: t11.btlog · 9 s · 90 transitions · no robot`.
+- **A narrow drawer** (≤ 820 px, a 1140 px window with the sidebar open):
+  both rows stay on one line. The tabs and the filter narrow and the clock
+  drops its last three digits (the µs); then, as space runs out, the cap note
+  gives way first, then the pill's `Recording` label; the pill's numbers,
+  Save, the zoom and the transport buttons keep their size, and the
+  overview takes what is left. The tooltips keep the full text.
+- **A very narrow drawer** (≤ 480 px, an 800 px window with the sidebar
+  open; works down to a 700 px window): the clock drops its ms too
+  (`14:03:22`), the zoom its window length and the recorder pill its numbers
+  (dot and Save stay), and the overview may shrink to 24 px. Neither row runs
+  past the drawer's edge, so the page never scrolls sideways.
 - **The Log tab** lists one row per retained transition, oldest first:
   time, Δ, subtree, node, from → to. Time is the robot's time of day to the
   µs (`14:03:22.201 030`). Δ is the gap to the row above as listed (`16 µs`,
@@ -515,13 +655,14 @@ the sidebar's width (see [The sidebar](#the-sidebar)).
 - **Dropped history.** Once eviction has dropped transitions
   (`historyDropped`), the Log's first line, hatched like the Timeline's
   not-recorded bands, reads "Transitions older than the kept 10 min were
-  dropped", with the span actually kept (as the chip's), and the rows sit
-  one line lower. The Timeline marks the same edge: its window never starts
-  before the oldest record, so when panned or zoomed out to it, a dashed
-  edge at the axis's left end, with the same note (`⇤ Transitions older…`)
-  at the left of the controls strip. While nothing was dropped neither
-  shows.
-- **Save** (toolbar, after the filter) is one download of everything kept:
+  dropped", with the span actually kept (as the recorder pill's), and the
+  rows sit one line lower. The Timeline marks the same edge: its window never
+  starts before the oldest record, so when panned or zoomed out to it, a
+  dashed edge at the axis's left end, with the same note (`⇤ Transitions
+  older…`, cut to fit, the whole text its tooltip) in the name column beside
+  the axis. While nothing was dropped neither shows.
+- **Save** (the recorder pill's right half, past a hairline) is one
+  download of everything kept:
   it fetches `/log.zip` as a blob and saves it through an `<a download>`
   under the name in the gateway's `Content-Disposition`, which is how the
   pill afterwards ("Saved klein_2026-10-02_12-36-26.zip", for 4 s) knows the
@@ -529,38 +670,40 @@ the sidebar's width (see [The sidebar](#the-sidebar)).
   counts the tree runs in the mirror (segments split where the layout
   changes, as `Recording.runs()`): "Save everything kept as one .zip · 3 tree
   runs". It is disabled until the mirror has a head ("Nothing recorded yet")
-  and while the chip is grey (recording off or unsupported; the tooltip is
-  then the chip's text). If the fetch fails, the pill reads "Save failed".
-- **The filter** (toolbar, shared by both tabs) keeps the rows whose node
-  name or subtree name contains its text, ignoring case: `door` matches the
-  `DoorClosed` subtree's rows and `IsDoorClosed`. Clicking a row's subtree
-  name fills it in.
+  and while the pill is grey (recording off or unsupported; the tooltip is
+  then the pill's). If the fetch fails, the pill reads "Save failed".
+- **The filter** (tab row, right after the tabs, shared by both) keeps the
+  rows whose node name or subtree name contains its text, ignoring case:
+  `door` matches the `DoorClosed` subtree's rows and `IsDoorClosed`. Clicking
+  a row's subtree name fills it in.
 - **The shared cursor.** Clicking a row pauses the cursor just after that
   transition, at `(seg, seq + 1)`: the tree shows `stateAtSeq`, and the
-  blackboard `bbAt` at the row's time, without flashing, with one note that
+  blackboard `bbAt` at the row's time, nothing fading but the keys fresh at
+  that time marked statically (see Painting above), with one note that
   the blackboard is sampled 2×/s. A moment before its segment's first sample
   shows no boards, only "No blackboard sample yet at this moment"; a moment
   whose blackboard history eviction dropped (it is cut at the exact cutoff,
   transitions only by whole chunks, so the oldest kept rows can be older)
   says "Blackboard history from this moment was dropped." instead
   (`Segment.bbDropped` in the mirror). Live keeps what it shows. The row is
-  highlighted, and the first pill of the banner stack (see
-  [Banners](#banners)) says `Viewing t = 14:03:22.201 030` with a **Back to
-  live** button. Recording goes on underneath. When eviction drops the
-  moment shown (`KleinCursor.evicted`), the cursor pauses just after the
-  oldest kept record, its Log row selected, and a pill says so for 6 s:
-  "Older than the kept 10 min: moved to the oldest kept transition".
-  **↑/↓** step to the previous/next row as listed: with no filter that is
-  consecutive seqs, across segment boundaries; with one, the previous/next
-  matching transition. From live, ↑ takes the newest row; at either end the
-  cursor stays. **Esc** goes back to live and scrolls to the newest row.
+  highlighted, the transport row's clock says `14:03:22.201 030` beside
+  **Jump to live**, and the canvas gets its amber edge. Recording goes on
+  underneath. When eviction drops the moment shown (`KleinCursor.evicted`),
+  the cursor pauses just after the oldest kept record, its Log row selected,
+  and a pill says so for 6 s: "Older than the kept 10 min: moved to the oldest
+  kept transition". **↑/↓** (as ←/→ and the transport's |◀ ▶|) step to the
+  previous/next row as listed: with no filter that is consecutive seqs, across
+  segment boundaries; with one, the previous/next matching transition. From
+  live, ↑ takes the newest row; at either end the cursor stays. **Esc**,
+  **End** or **Jump to live** goes back to live and scrolls to the newest row.
   When the cursor moves elsewhere (the Timeline's playhead, stepping,
   playing), the Log scrolls its row into view (the next listed row when the
-  filter hides it), at once or when the tab is shown again; going live by
-  any route follows the newest row again.
+  filter hides it), at once or when the tab is shown again; going live by any
+  route follows the newest row again.
 - **The Timeline tab** (`klein/static/timeline.js`) has a row per node of
   the tree on the canvas (the cursor's segment's tree), in tree order, under
-  a strip of controls and a time axis that stay at the top. A 206 px name
+  a time axis that stays at the top (its zoom is in the tab row, its
+  stepping and playing in the transport row). A 206 px name
   column (chevron, the card's glyph, name; a header adds `N nodes`, a folded
   row `+N`) is followed by the axis.
   - **Sections.** One per subtree: the root opens the main tree's (its header
@@ -611,45 +754,59 @@ the sidebar's width (see [The sidebar](#the-sidebar)).
     head or before the oldest record; one longer than the recording starts
     at the oldest record and the head fills it. While live it follows the
     head, until you pan or zoom it off the head (back onto the head, or back
-    to live, follows again).
+    to live, follows again). **⤢** (or `\`) zooms to fit: the window becomes
+    everything kept, `rec.tMin` to the head, its length kept within the
+    ladder's 200 µs and 1 h (`clampWindow`); while live it then follows the
+    head at that length, so the oldest moment drifts off its left edge.
   - **The playhead** is the shared cursor. Pressing the axis pauses there,
     and dragging scrubs: the cursor is paused at that time to the µs,
     `pause(seg, seqAtTime(seg, t), t)` in the segment holding it, so the
-    tree shows `state_at(t)` and the banner that time, and the playhead stays
+    tree shows `state_at(t)` and the clock that time, and the playhead stays
     under the pointer between transitions. A click on the lanes without a
-    drag does the same. **|◀ ▶|** step one transition (`step`, as ↑/↓
-    without a filter), **▶** plays at 1× from the cursor, and **❚❚** pauses;
-    playing that reaches the head goes live. (A live robot's head moves at 1×
-    too, so playing keeps its distance until the robot stops.) A cursor
-    moved elsewhere (a Log row, a step, playing) that leaves the window
-    re-centres the window on it.
+    drag does the same. Stepping and playing are the transport row's (see
+    The transport, above). A cursor moved elsewhere (a Log row, a step,
+    playing) that leaves the window re-centres the window on it.
   - **F** with the drawer open on the Timeline also scrolls the first row of
     the running frontier into view, under the axis and its section's header.
 - **Keys.** The camera keys ignore presses inside the drawer, as inside the
-  sidebar (F scrolls the Timeline only when pressed outside it). ↑/↓/Esc are
-  unmodified presses too, and work anywhere except the sidebar (its radios
-  and disclosures use them) and text fields (the filter).
+  sidebar (F scrolls the Timeline only when pressed outside it). The
+  cursor's keys are one window `keydown` handler in drawer.js, each doing
+  what its button does, in either tab and folded:
+
+  | Key | Does | Button |
+  |---|---|---|
+  | ← / → (and ↑ / ↓) | previous / next transition as filtered | \|◀ / ▶\| |
+  | Space | play / pause (live: pause there; an opened file's end: nothing) | ▶ / ❚❚ |
+  | Home | pause at the oldest kept moment: `rec.tMin`, the records of that µs applied (an opened file: its first moment) | — |
+  | End, Esc | go live (an opened file: its end) | Jump to live / end |
+  | `\` | zoom the Timeline to fit; on the Timeline tab only, the Log has no window | ⤢ |
+
+  Unmodified presses only, except `\` typed with AltGr (reported as
+  Ctrl+Alt on Windows). Not in the sidebar or text fields. A focused button
+  keeps Space. A key that acts is `preventDefault`ed so the drawer doesn't
+  scroll; one with nothing to do (→ or ↓ from live, End or Esc while live,
+  `\` on the Log) is left to the browser. Without a recording they do
+  nothing. A mouse click on any drawer button, or on the sidebar's fold
+  button, releases the focus, so the keys (and R, F) work at once.
 
 ## Banners
 
 Every message over the canvas is a pill in one stack (`#banner-stack`),
 12 px from the top and centred over the visible canvas: right of the
 sidebar at its current width (its 49 px strip when collapsed).
-`showBanner(key, text, {kind, timeout, action, mono, live})` in `app.js` adds
-or replaces the pill for `key`; `hideBanner(key)` removes it. A pill's kind
-is its dot colour and its place in the stack:
+`showBanner(key, text, {kind, timeout})` in `app.js` adds or replaces the
+pill for `key`; `hideBanner(key)` removes it. A pill's kind is its dot
+colour and its place in the stack:
 
 | kind | dot | order | used for |
 | --- | --- | --- | --- |
-| `past` | pale amber | first | `Viewing t = …` (monospace time, a **Back to live** button) while the cursor is in the past |
 | `error` | red (`--color-FAILURE`) | then | the klein gateway is unreachable; "Save failed" |
 | `warn` | amber (`--color-RUNNING`) | then | the robot is unreachable |
 | `info` | blue (`--accent`) | last | notices, e.g. "The robot loaded a new behaviour tree — reloaded." (fades after 4 s), "Saved klein_….zip", or the cursor moved off a dropped moment (6 s) |
 
 The stack is an `aria-live="polite"` status region, so new pills are
-announced; the `Viewing t = …` pill is `aria-live="off"`, since it changes on
-every step. The stack lets pointer events through to the canvas except on its
-buttons.
+announced. It lets pointer events through to the canvas. The moment shown
+is in the drawer's transport row.
 
 ## The camera
 
@@ -660,9 +817,9 @@ child is, so only the frontier tells you what the robot is actually doing. A
 
 Both aim at `visibleViewport()`, the part of the canvas you can see: right of
 the sidebar (`sidebarWidth()`), below a 56 px strip kept clear for one banner
-pill (always, so the tree never sits under the "Viewing t = …" pill and
-pausing doesn't move the camera; a second pill at once may overlap the tree's
-top for a moment), and above the drawer (precisely, above the hint line that
+pill (always, so the tree never sits under a pill and a pill coming or going
+doesn't move the camera; a second pill at once may overlap the tree's top for
+a moment), and above the drawer (precisely, above the hint line that
 rides on the drawer). `R` scales the whole unfolded tree to fit it, never
 past 1:1, with the tree's top edge at the top and centred across (vertical
 layout), or its left edge at the left and centred down (horizontal). It is

@@ -78,12 +78,13 @@ from .groot2_protocol import (
 # the DoorClosed board further down does not list it), and a node with more
 # ports than fit on a card (PassThroughDoor), for the truncation and the hover
 # tooltip. Deliberately left bare: the control nodes, OpenDoor and SmashDoor.
+# (The fixture groot2_mock.btlog pins this XML, so tryOpen has no _onSuccess here.)
 #
 # The <TreeNodesModel> at the end declares each node's category. A real reply
 # lists every registered node, ~45 builtins included; the mock lists only the
-# types this tree uses. These are the real CrossDoor registrations from
-# BehaviorTree.CPP/sample_nodes/crossdoor_nodes.cpp:63-74 — SmashDoor is a
-# Condition while the equally childless OpenDoor is an Action, which is why a
+# types this tree uses. These are the real CrossDoor registrations
+# (sample_nodes/crossdoor_nodes.cpp :: CrossDoor::registerNodes): SmashDoor is
+# a Condition while the equally childless OpenDoor is an Action, which is why a
 # category cannot be inferred from the tree's shape. All five categories appear,
 # so a robot-free run exercises every style the dashboard draws.
 CROSSDOOR_XML = """<root BTCPP_format="4" main_tree_to_execute="MainTree">
@@ -337,9 +338,9 @@ def _crossdoor_blackboard(tick):
             "door_open": bb["door_open"],
             "mission_phase": bb["mission_phase"],
             "tick": t,
-            # Advances every tick, so at least one row always flashes on update.
+            # Advances every tick: a streaming row, marked steadily.
             "robot_position": [round(robot_x, 2), 0.5, 1.57],
-            # Static: proves unchanged rows stay quiet while their neighbours flash.
+            # Static: proves unchanged rows stay quiet while their neighbours change.
             "target_pose": {"__type": "Pose2D", "x": 3.0, "y": 0.5, "theta": 1.57},
             "last_error": None,             # unset -> renders "(not shown)"
             "path": {
@@ -374,18 +375,20 @@ def _crossdoor_blackboard(tick):
 # root. It reuses UIDs 1-6, which is the point: before klein learned to watch
 # the tree UUID, these UIDs' statuses landed on CrossDoor's cards, so Script and
 # UpdatePosition lit up with a patrol robot's telemetry. It keeps one <SubTree>
-# so nested boards and the subtree region rendering stay exercised.
+# so nested boards and the subtree region rendering stay exercised, with the
+# other two remap kinds: ``waypoint`` points at the parent's ``next_waypoint``,
+# ``dwell_msec`` is a literal stored on the subtree's own board.
 PATROL_XML = """<root BTCPP_format="4" main_tree_to_execute="PatrolTree">
   <BehaviorTree ID="PatrolTree" _fullpath="PatrolTree">
     <ReactiveSequence name="ReactiveSequence" _uid="1">
       <BatteryOk name="BatteryOk" min_percent="20" _uid="2"/>
-      <SubTree ID="VisitWaypoints" waypoint="{next_waypoint}" _uid="3" _fullpath="VisitWaypoints::3"/>
+      <SubTree ID="VisitWaypoints" waypoint="{next_waypoint}" dwell_msec="1500" _uid="3" _fullpath="VisitWaypoints::3"/>
     </ReactiveSequence>
   </BehaviorTree>
   <BehaviorTree ID="VisitWaypoints" _fullpath="VisitWaypoints::3">
     <SequenceWithMemory name="visitAll" _uid="4">
       <MoveTo name="MoveTo" goal="{waypoint}" speed="0.4" _uid="5"/>
-      <Wait name="Dwell" msec="1500" _uid="6"/>
+      <Wait name="Dwell" msec="{dwell_msec}" _uid="6"/>
     </SequenceWithMemory>
   </BehaviorTree>
   <TreeNodesModel>
@@ -450,11 +453,15 @@ def _patrol_blackboard(tick):
         "PatrolTree": {
             "battery_pct": bb["battery_pct"],
             "patrol_leg": bb["patrol_leg"],
+            # The subtree reads it as {waypoint}: a remapped key lives on the
+            # parent's board (blackboard.cpp :: getEntry, createEntryImpl).
+            "next_waypoint": bb["next_waypoint"],
             "waypoints": list(PATROL_WAYPOINTS),
             "_debug_internal": "must never reach the dashboard",
         },
+        # Only the <SubTree> port set to a literal: BT.CPP stores it on the
+        # subtree's own board (xml_parsing.cpp :: recursivelyCreateSubtree).
         "VisitWaypoints::3": {
-            "next_waypoint": bb["next_waypoint"],
             "dwell_msec": 1500,
         },
     }

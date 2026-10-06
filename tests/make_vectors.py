@@ -10,7 +10,7 @@ vectors feed both frame lists into a ``KleinRecording.createStore()`` under gjs
 
 Functions the Python model has (``state_at_seq``, ``seq_at_time``,
 ``iter_records``, ``BlackboardTrack.at``) give their own expectations; the
-rest (``intervals``, ``nextSeq``, ``timeAtSeq``, the cursor) are written out
+rest (``intervals``, ``timeAtSeq``, the cursor) are written out
 here in Python from their definitions in docs/architecture.md, "Browser
 model".
 
@@ -30,8 +30,9 @@ from pathlib import Path
 from unittest import mock
 
 from klein import recording
-from klein.recording import Recording, apply_transition, decode_state
+from klein.recording import BlackboardTrack, Recording, apply_transition, decode_state
 from klein.streaming import Streamer
+from tests.harness.model import BB_RECENT, Model
 from tests.helpers import layout
 
 STATIC = Path(__file__).resolve().parents[1] / "klein" / "static"
@@ -162,11 +163,6 @@ def time_at_seq(segment, seq):
     return next(segment.iter_records(seq - 1, seq))[1]
 
 
-def next_seq(segment, seq, direction):
-    n = seq + direction
-    return n if segment.start_seq <= n <= segment.head_seq else None
-
-
 def intervals(segment, uid, t0, t1):
     t0 = max(t0, segment.t_start)
     if t0 > t1:
@@ -188,7 +184,7 @@ def intervals(segment, uid, t0, t1):
 def _head_pos(rec):
     last = rec.segments[-1]
     return {"seg": last.id, "seq": last.head_seq,
-            "t": rec.head if rec.head is not None else last.t_begin, "live": True}
+            "t": rec.head if rec.head is not None else last.t_begin, "live": True, "mode": "live"}
 
 
 def _retained(rec, seg_id, seq):
@@ -209,7 +205,7 @@ def cursor_pos(clock, now_ms, rec):
     t0 = (clock["t"] if "t" in clock and (kept or clock["mode"] == "playing")
           else time_at_seq(start, from_seq))
     if clock["mode"] == "paused":
-        return {"seg": start.id, "seq": from_seq, "t": t0, "live": False}
+        return {"seg": start.id, "seq": from_seq, "t": t0, "live": False, "mode": "paused"}
     t = t0 + (now_ms - clock["startMs"]) * 1000
     if rec.head is not None and t >= rec.head:
         return _head_pos(rec)
@@ -220,7 +216,7 @@ def cursor_pos(clock, now_ms, rec):
     seq = segment.start_seq if t < segment.t_start else segment.seq_at_time(t)
     if segment is start:
         seq = max(seq, from_seq)
-    return {"seg": segment.id, "seq": seq, "t": t, "live": False}
+    return {"seg": segment.id, "seq": seq, "t": t, "live": False, "mode": "playing"}
 
 
 def evicted(clock, now_ms, rec):
@@ -238,20 +234,6 @@ def evicted(clock, now_ms, rec):
 def history_dropped(rec):
     first = rec.segments[0] if rec.segments else None
     return first is not None and (first.id > 0 or first.t_start > first.t_begin)
-
-
-def step(clock, rec, direction, now_ms=0):
-    pos = cursor_pos(clock, now_ms, rec)
-    segment = next(s for s in rec.segments if s.id == pos["seg"])
-    seq = next_seq(segment, pos["seq"], direction)
-    if seq is not None:
-        return {"mode": "paused", "seg": segment.id, "seq": seq}
-    i = rec.segments.index(segment) + direction
-    if not 0 <= i < len(rec.segments):
-        return {"mode": "paused", "seg": segment.id, "seq": pos["seq"]}
-    neighbour = rec.segments[i]
-    return {"mode": "paused", "seg": neighbour.id,
-            "seq": neighbour.start_seq if direction > 0 else neighbour.head_seq}
 
 
 # --------------------------------------------------------------------------- #
@@ -335,10 +317,6 @@ def _store_cases(name, frames, rec):
                 cases.append({"name": f"{seg}: intervals uid {uid} {t0 - T0}..{t1 - T0}",
                               "call": "KleinRecording.intervals", "args": [ref, uid, t0, t1],
                               "expect": intervals(s, uid, t0, t1)})
-        for seq in (s.start_seq, s.start_seq + 1, s.head_seq - 1, s.head_seq):
-            for d in (-1, 1):
-                cases.append({"name": f"{seg}: nextSeq {seq} {d:+}", "call": "KleinRecording.nextSeq",
-                              "args": [ref, seq, d], "expect": next_seq(s, seq, d)})
         track = s.blackboard
         samples = sorted({t for t, *_ in track.changes()} | set(track.boards.values()))
         for t in sorted({t + d for t in samples for d in (-1, 0, 1)} | {end}):
@@ -385,30 +363,150 @@ def _cursor_cases(name, rec):
             cases.append({"name": f"{name} cursor {i}: evicted at {now}",
                           "call": "KleinCursor.evicted", "args": [clock, now, ref],
                           "expect": evicted(clock, now, rec)})
-        for d in (-1, 1):
-            cases.append({"name": f"{name} cursor {i}: step {d:+}", "call": "KleinCursor.step",
-                          "args": [clock, ref, d, 1001], "expect": step(clock, rec, d, 1001)})
-    # Stepping walks consecutive positions from the start to the head.
-    clock, walk = {"mode": "paused", "seg": s0.id, "seq": s0.start_seq}, []
-    while True:
-        walk.append(clock)
-        following = step(clock, rec, 1)
-        if following == clock:
-            break
-        clock = following
-    for i, clock in enumerate(walk[:-1]):
-        cases.append({"name": f"{name} walk {i}", "call": "KleinCursor.step",
-                      "args": [clock, ref, 1], "expect": walk[i + 1]})
-        cases.append({"name": f"{name} walk back {i}", "call": "KleinCursor.step",
-                      "args": [walk[i + 1], ref, -1], "expect": clock})
     return cases
+
+
+# --------------------------------------------------------------------------- #
+# bbChange, expected from the harness Model (not from klein)
+# --------------------------------------------------------------------------- #
+SEC = 1_000_000
+# (seconds after T0, boards): every sample whole, as the gateway polls them.
+# Main/n changes at every sample from 1.5 s (streaming), Sub/goal is removed
+# and set again, Main/k removed and set again, Main/late appears mid-way.
+BB_SAMPLES = [
+    (0.0, {"Main": {"phase": "a", "n": 0, "k": 1}, "Sub": {"goal": "door"}}),
+    (0.5, {"Main": {"phase": "a", "n": 0, "k": 1}, "Sub": {"goal": "door"}}),
+    (1.0, {"Main": {"phase": "b", "n": 0, "k": 1}, "Sub": {"goal": "door"}}),
+    *[(1.5 + i / 2, {"Main": {"phase": "b", "n": i + 1, "k": 1}, "Sub": {"goal": "door"}})
+      for i in range(5)],
+    (4.0, {"Main": {"phase": "b", "n": 5, "k": 1}, "Sub": {}}),
+    (4.5, {"Main": {"phase": "b", "n": 5}, "Sub": {}}),
+    (5.0, {"Main": {"phase": "b", "n": 5}, "Sub": {"goal": {"x": 1}}}),
+    (5.5, {"Main": {"phase": "b", "n": 5, "k": 2, "late": "new"}, "Sub": {"goal": {"x": 1}}}),
+    (6.0, {"Main": {"phase": "c", "n": 5, "k": 2, "late": "new"}, "Sub": {"goal": {"x": 1}}}),
+]
+BB_KEYS = [("Main", "phase"), ("Main", "n"), ("Main", "k"), ("Main", "late"),
+           ("Sub", "goal"), ("Sub", "nope")]
+
+
+def _bb_change_cases(name, evict_before=None):
+    """The BB_SAMPLES recording streamed into a store, then (with
+    ``evict_before``, seconds) evicted up to that time; each key's
+    ``bbChange`` around every sample, at the 3 s boundaries and at live t
+    (the newest change), expected from ``Model.bb_change``."""
+    keep = 10 * SEC
+    rec = Recording(keep_us=keep)
+    frames = []
+    Streamer(rec, lambda clients, f: frames.append(f)).subscribe(name)
+    tree = _layout(1, [1, 2])
+    rec.begin_segment(tree, T0, bytearray(tree.size))
+    for dt, boards in BB_SAMPLES:
+        rec.add_blackboard(T0 + int(dt * SEC), boards)
+        rec.advance_head(T0 + int(dt * SEC))
+    if evict_before is not None:
+        rec.evict(T0 + int(evict_before * SEC) + keep)
+    # The /debug/state blackboard entry, which is all bb_change reads.
+    model = Model({"segments": [], "records": [], "blackboard": [
+        {"seg": s.id, "t_start": s.blackboard.t_start, "boards": dict(s.blackboard.boards),
+         "changes": [list(c) for c in s.blackboard.changes()]} for s in rec.segments]})
+    seg = rec.segments[0].id
+    cases = store_cases(name, frames)
+    cases.append({"name": f"{name}: segment", "call": f"${name}_rec.segment", "args": [seg],
+                  "save": f"{name}_seg"})
+    cases.append({"name": f"{name}: its track", "get": f"${name}_seg.bb", "save": f"{name}_track"})
+    samples = [T0 + int(dt * SEC) for dt, _ in BB_SAMPLES]
+    times = sorted({t + d for t in samples for d in (-1, 0, 1)}
+                   | {T0 + int(4.5 * SEC) - 1, T0 + int(4.5 * SEC) + 1,  # n's (t - 3 s, t]
+                      T0 + 7 * SEC})
+    for t in times:
+        for board, key in BB_KEYS:
+            t_change, recent = model.bb_change(seg, board, key, t)
+            expect = {"tChange": t_change, "recent": recent}
+            cases.append({"name": f"{name}: bbChange {board}/{key} at {(t - T0) / SEC:+}",
+                          "call": "KleinRecording.bbChange",
+                          "args": [{"$ref": f"{name}_track"}, board, key, t], "expect": expect})
+    return cases
+
+
+# The status frames' samples without a recording: BB_SAMPLES (a change, a
+# removal, a key streaming at 2 Hz), then a new board and a gap of 2.5 s.
+BB_FRAMES = BB_SAMPLES + [
+    (6.5, {"Main": {"phase": "c", "n": 5, "k": 2, "late": "new"}, "Sub": {"goal": {"x": 1}},
+           "Late": {"x": 1}}),
+    (7.0, {"Main": {"phase": "c", "n": 5, "k": 2, "late": "new"}, "Sub": {"goal": {"x": 1}},
+           "Late": {"x": 2}}),
+    (9.5, {"Main": {"phase": "d", "n": 5, "k": 2, "late": "new"}, "Sub": {"goal": {"x": 1}},
+           "Late": {"x": 2}}),
+]
+
+
+def _model(track, seg=0):
+    """A Model of one Python track, as its /debug/state blackboard entry."""
+    return Model({"segments": [], "records": [], "blackboard": [
+        {"seg": seg, "t_start": track.t_start, "boards": dict(track.boards),
+         "changes": [list(c) for c in track.changes()]}]})
+
+
+def bb_frame_vectors():
+    """BB_FRAMES fed whole into a track by ``addBoards`` and evicted to the
+    last BB_RECENT, as the dashboard does without a recording; after each,
+    every key's ``bbChange`` and the boards at the newest sample, expected
+    from the harness Model of the same samples in a Python track."""
+    cases = [{"name": "frames: a track", "call": "KleinRecording.createTrack", "save": "frames"}]
+    track = BlackboardTrack()
+    for i, (dt, boards) in enumerate(BB_FRAMES):
+        t = T0 + int(dt * SEC)
+        track.add(t, boards)
+        track.evict_before(t - BB_RECENT)
+        model = _model(track)
+        at = f"at {(t - T0) / SEC:+}"
+        cases.append({"name": f"frames {i}: addBoards", "call": "$frames.addBoards",
+                      "args": [t, boards], "save": f"frames_{i}"})
+        cases.append({"name": f"frames {i}: evictBefore", "call": "$frames.evictBefore",
+                      "args": [t - BB_RECENT], "save": f"frames_{i}_evict"})
+        cases.append({"name": f"frames: boards {at}", "call": "$frames.at", "args": [t],
+                      "expect": model.bb_at(0, t)})
+        for board, key in BB_KEYS + [("Late", "x")]:
+            t_change, recent = model.bb_change(0, board, key, t)
+            cases.append({"name": f"frames: bbChange {board}/{key} {at}",
+                          "call": "KleinRecording.bbChange",
+                          "args": [{"$ref": "frames"}, board, key, t],
+                          "expect": {"tChange": t_change, "recent": recent}})
+    return cases
+
+
+def bb_change_vectors():
+    """Whole and after an eviction that cuts between Main/k's removal and
+    its return and keeps Sub/goal's set value as the base (not a change)."""
+    cases = (_bb_change_cases("bb") + _bb_change_cases("bb_evicted", evict_before=5.2)
+             + bb_frame_vectors())
+    return {"module": [str(STATIC / "recording.js")], "cases": cases}
+
+
+# --------------------------------------------------------------------------- #
+# Tree runs, expected from the harness Model
+# --------------------------------------------------------------------------- #
+def dump(rec):
+    """What ``GET /debug/state`` dumps of rec's segments and records: all
+    the Model needs for tree runs."""
+    return {"segments": [{"id": s.id, "t_begin": s.t_begin, "start_seq": s.start_seq,
+                          "head_seq": s.head_seq, "start_state": list(s.state_at_seq(s.start_seq)),
+                          "layout_id": s.layout.generation} for s in rec.segments],
+            "records": [[ts, uid, status] for s in rec.segments
+                        for _seq, ts, uid, status in s.iter_records(s.start_seq, s.head_seq)]}
+
+
+def _tree_run_cases(name, rec):
+    return [{"name": f"{name}: treeRuns", "call": "KleinRecording.treeRuns",
+             "args": [{"$ref": f"{name}_rec"}], "expect": Model(dump(rec)).runs()}]
 
 
 def vectors():
     with mock.patch.object(recording, "CHUNK_SIZE", CHUNK_SIZE):
         rec, live, late = build()
         cases = (_store_cases("live", live, rec) + _store_cases("late", late, rec)
-                 + _cursor_cases("live", rec) + _cursor_cases("late", rec))
+                 + _cursor_cases("live", rec) + _cursor_cases("late", rec)
+                 + _tree_run_cases("live", rec) + _tree_run_cases("late", rec))
     return {"module": [str(STATIC / "recording.js"), str(STATIC / "cursor.js")],
             "cases": cases}
 

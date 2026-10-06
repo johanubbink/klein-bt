@@ -14,6 +14,10 @@
     --color-SKIPPED: #2563eb;
     --color-TRANSITION: #475569;
 
+    /* A blackboard value that just changed: the RUNNING amber, softened toward
+       the text so a tinted value stays as readable as its neighbours. */
+    --changed: color-mix(in srgb, var(--color-RUNNING) 60%, var(--text-main));
+
     /* Node type ink — the *category* channel. Deliberately pale (L .50-.68)
        where every status colour above is mid-tone (L .06-.28), so a type colour
        and a status colour can never be read as each other even side by side.
@@ -49,8 +53,11 @@
        collapsed), which the drawer and the banner stack sit right of. */
     --sidebar-width: 320px;
     /* Set by drawer.js: the drawer's height, which the hint line
-       (#watermark) rises by. This is the toolbar alone, until it runs. */
+       (#watermark) rises by. Initially the collapsed height. */
     --drawer-height: 49px;
+    /* A change's fade: the blackboard row's and the writer pulse's
+       (app.js BB_FADE). */
+    --fade: 1.8s;
 }
 
 body, html {
@@ -86,7 +93,7 @@ body, html {
    overlays rather than insets so the canvas keeps the whole viewport. It
    behaves like the drawer: its width is --sidebar-width (app.js), dragged on
    the right edge, and collapsed it leaves a 49 px strip with its fold button,
-   as the collapsed drawer leaves its toolbar. Above the drawer (z-index), so
+   as the collapsed drawer leaves its transport row. Above the drawer (z-index), so
    the edge's grip stays whole where they meet. */
 #sidebar {
     position: absolute;
@@ -433,6 +440,7 @@ body.no-blackboard #bb-past-note { display: none; }     /* an opened file withou
 .bb-group-body { padding: 1px 0 5px 16px; }
 
 .bb-row {
+    position: relative;     /* for the change edge */
     display: flex;
     gap: 10px;
     width: 100%;
@@ -448,6 +456,8 @@ body.no-blackboard #bb-past-note { display: none; }     /* an opened file withou
     cursor: pointer;
 }
 .bb-row:hover { background: rgba(255, 255, 255, 0.05); }
+/* A hovered card's keys: an accent ring, no fill (a fill is a change mark's). */
+.bb-row.linked { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent); }
 .bb-row:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 
 /* A shared minimum lines the values up into a scannable column, while an
@@ -498,16 +508,45 @@ body.no-blackboard #bb-past-note { display: none; }     /* an opened file withou
     color: var(--text-muted);
 }
 
-/* A value that just changed flashes once, in the same amber the tree uses for
-   RUNNING — the reader's eye is already trained on it. */
-@keyframes bb-flash {
-    from { background-color: rgba(217, 119, 6, 0.5); }
-    to   { background-color: transparent; }
+/* A value that just changed: a 2 px edge left of the row and the value
+   tinted --changed, the amber the tree uses for RUNNING. Live or playing, both
+   fade out once (bb-fresh); paused on a moment, they hold while the change is
+   under one sample old (bb-mark). A key that changes at nearly every sample
+   (bb-stream) is not news each time: a steady dim edge and a "~" instead. */
+.bb-row::before {
+    content: "";
+    position: absolute;
+    left: -5px; top: 3px; bottom: 3px;     /* in the group's indent, clear of the key */
+    width: 2px;
+    border-radius: 1px;
+    background: var(--changed);
+    opacity: 0;
 }
-.bb-row.bb-changed { animation: bb-flash 0.8s ease-out; }
+.bb-row.bb-mark::before { opacity: 1; }
+.bb-row.bb-mark .bb-value { color: var(--changed); }
+.bb-row.bb-stream::before { opacity: 0.35; }
+/* The "~" column is kept on every row, so a key that starts streaming doesn't
+   truncate its value further, and it stays clear of a value filling its cell. */
+.bb-row::after {
+    content: "";
+    flex: 0 0 1ch;
+    margin-left: -4px;
+    color: var(--text-muted);
+}
+.bb-row.bb-stream::after { content: "~"; }
+@keyframes fade-out {
+    from { opacity: 1; }
+    to   { opacity: 0; }
+}
+@keyframes bb-fresh-text {
+    from { color: var(--changed); }
+}
+.bb-row.bb-fresh::before { animation: fade-out var(--fade) ease-in; }
+.bb-row.bb-fresh .bb-value { animation: bb-fresh-text var(--fade) ease-in; }
 
 @media (prefers-reduced-motion: reduce) {
-    .bb-row.bb-changed { animation: none; }
+    .bb-row.bb-fresh::before, .bb-row.bb-fresh .bb-value { animation: none; }
+    .node-pulse.fire { animation: none; }
     .bb-chevron, .segmented span { transition: none; }
     .fold-chevron { transition: none; }
     .node-rect { transition: none; }
@@ -555,7 +594,6 @@ body.no-blackboard #bb-past-note { display: none; }     /* an opened file withou
     box-shadow: 0 2px 10px -4px var(--bg-color);
     animation: banner-in 0.18s ease-out;
 }
-.banner:has(.banner-action) { padding-right: 5px; }
 .banner::before {
     content: "";
     flex-shrink: 0;
@@ -565,20 +603,6 @@ body.no-blackboard #bb-past-note { display: none; }     /* an opened file withou
     border-radius: 50%;
     background-color: var(--banner-dot, var(--text-muted));
 }
-.banner-text.mono { font-family: ui-monospace, "DejaVu Sans Mono", monospace; white-space: nowrap; }
-.banner-action {
-    pointer-events: auto;       /* the stack lets clicks through; its buttons don't */
-    height: 24px;
-    padding: 0 12px;
-    font: inherit;
-    color: inherit;
-    background: color-mix(in srgb, var(--text-main) 10%, var(--panel-bg));
-    border: 0;
-    border-radius: 999px;
-    cursor: pointer;
-}
-.banner-action:hover { background: color-mix(in srgb, var(--text-main) 18%, var(--panel-bg)); }
-.banner-action:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 /* Set by showBanner() before the element is removed, so a self-clearing banner
    fades rather than vanishing. */
 .banner.leaving {
@@ -587,9 +611,8 @@ body.no-blackboard #bb-past-note { display: none; }     /* an opened file withou
 }
 
 /* The kinds. A new one is two declarations: a dot colour, and where it sorts —
-   `order` keeps the moment being viewed first, then problems above passing
-   notes however they happened to arrive. */
-.banner.past  { --banner-dot: color-mix(in srgb, var(--color-RUNNING) 45%, var(--text-main)); order: -1; }
+   `order` keeps problems above passing notes however they happened to
+   arrive. */
 .banner.error { --banner-dot: var(--color-FAILURE); order: 0; }
 .banner.warn  { --banner-dot: var(--color-RUNNING); order: 0; }
 .banner.info  { --banner-dot: var(--accent);        order: 1; }
@@ -598,6 +621,22 @@ body.no-blackboard #bb-past-note { display: none; }     /* an opened file withou
     from { opacity: 0; transform: translateY(4px); }
     to   { opacity: 1; transform: none; }
 }
+
+/* Viewing the past (body.viewing-past, app.js): a thin amber edge round the
+   visible canvas, right of the sidebar and above the drawer. The drawer's
+   transport row says which moment. */
+#past-edge {
+    display: none;
+    position: absolute;
+    top: 0;
+    left: var(--sidebar-width);
+    right: 0;
+    bottom: var(--drawer-height);
+    z-index: 5;
+    pointer-events: none;
+    box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--color-RUNNING) 70%, transparent);
+}
+body.viewing-past #past-edge { display: block; }
 
 /* SVG Graph Component Styling */
 svg {
@@ -647,6 +686,22 @@ body.viewing-past .status-pill.running { animation: none; }
 /* Hovering a board row in the panel: say which card it belongs to. The stroke
    is set inline by paintStatus, so this has to shout to be heard. */
 .node-rect.highlight { stroke: var(--accent) !important; stroke-width: 4px; }
+
+/* Hovering a key row in the panel: its writers' outline is solid, its
+   readers' dashed, just outside the card so the status stroke still shows. */
+.node-link { fill: none; stroke: var(--accent); stroke-width: 2px; opacity: 0; pointer-events: none; }
+.node-link.write { opacity: 1; }
+.node-link.read { opacity: 1; stroke-dasharray: 6 4; }
+/* ...and the key itself on their port line: ink only, so nothing moves. */
+.node-ports .port-key.hl { fill: var(--accent); }
+
+/* The writer pulse: a --changed dot at the card's corner when a key the node
+   writes just changed. It fades like the row's mark while live or playing and
+   holds while paused (app.js, setPulses). A dot, never a stroke: on the
+   canvas amber already means RUNNING. */
+.node-pulse { fill: var(--changed); opacity: 0; pointer-events: none; }
+.node-pulse.mark { opacity: 1; }
+.node-pulse.fire { animation: fade-out var(--fade) ease-in; }
 
 /* Node Text Elements */
 .node-name { font-size: 13px; font-weight: 500; fill: #ffffff; }
@@ -744,7 +799,7 @@ body.viewing-past .status-pill.running { animation: none; }
 /* ------------------------------------------------------------------ */
 /* Beside the sidebar rather than under it, so the blackboards keep their full
    height; its left edge follows --sidebar-width. Its height is
-   --drawer-height (drawer.js): from the toolbar alone to 80% of the window. */
+   --drawer-height (drawer.js): from the transport row alone to 80% of the window. */
 #drawer {
     position: absolute;
     left: var(--sidebar-width);
@@ -782,9 +837,14 @@ body.viewing-past .status-pill.running { animation: none; }
 #drawer-handle::after { top: 3px; left: 50%; width: 36px; height: 4px; margin-left: -18px; }
 #drawer-handle:hover::after, #sidebar-handle:hover::after { background: var(--text-muted); }
 
-#drawer-toolbar {
+/* The drawer's two rows. The transport row, the collapsed strip on its
+   own: fold, |◀ ▶ ▶|, Live or Jump to live, the overview (overview.js)
+   taking what is left, then the clock. The tab row: the tabs, the filter,
+   the Timeline's zoom and, at the far end, the recorder pill; hidden while
+   the drawer is collapsed. */
+#drawer-transport, #drawer-toolbar {
     flex-shrink: 0;
-    height: 48px;
+    height: 48px;               /* drawer.js TAB_ROW_HEIGHT */
     box-sizing: border-box;
     padding: 0 16px;
     display: flex;
@@ -793,6 +853,155 @@ body.viewing-past .status-pill.running { animation: none; }
     border-bottom: 1px solid var(--border-color);
     white-space: nowrap;
 }
+#drawer.collapsed #drawer-toolbar { display: none; }
+.transport-buttons { display: flex; flex-shrink: 0; gap: 4px; }
+/* Small square buttons: the transport's and the Timeline's zoom. */
+.transport-buttons button, #tl-zoom button {
+    min-width: 30px;
+    height: 28px;
+    padding: 0 6px;
+    font-family: var(--font-symbol);
+    font-size: 12px;
+    color: var(--text-main);
+    background: var(--subtree-fill-0);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    cursor: pointer;
+}
+/* ▶ and ❚❚ in one width, so pausing (live too) doesn't shift the overview. */
+#tr-play { width: 36px; padding: 0; }
+.transport-buttons button:hover:not(:disabled), #tl-zoom button:hover:not(:disabled) {
+    border-color: var(--text-muted);
+}
+.transport-buttons button:disabled, #tl-zoom button:disabled { color: var(--color-IDLE); cursor: default; }
+.transport-buttons button:focus-visible, #tl-zoom button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+}
+/* Where the cursor is, beside the buttons, in one button of one width (the
+   longest label's), so nothing beside it moves: an inert green "● Live" (or
+   "● End" for an opened file), or in the past an amber "Jump to live ⏭"
+   that goes back. */
+#tr-jump {
+    flex-shrink: 0;
+    width: 100px;               /* "Jump to live ⏭", the longest */
+    height: 28px;
+    box-sizing: border-box;
+    padding: 0 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    font: inherit;
+    font-size: 0.75rem;
+    white-space: nowrap;
+    border-radius: 999px;
+    border: 1px solid transparent;
+}
+#tr-jump[data-state="live"], #tr-jump[data-state="end"] {
+    cursor: default;
+    color: color-mix(in srgb, var(--color-SUCCESS) 45%, var(--text-main));
+    background: color-mix(in srgb, var(--color-SUCCESS) 16%, var(--panel-bg));
+}
+#tr-jump[data-state="live"]::before, #tr-jump[data-state="end"]::before {
+    content: "";
+    flex-shrink: 0;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--color-SUCCESS);
+}
+#tr-jump[data-state="past"] {
+    cursor: pointer;
+    color: var(--changed);
+    background: color-mix(in srgb, var(--color-RUNNING) 18%, var(--panel-bg));
+    border-color: color-mix(in srgb, var(--color-RUNNING) 45%, var(--panel-bg));
+}
+#tr-jump[data-state="past"]:hover { background: color-mix(in srgb, var(--color-RUNNING) 28%, var(--panel-bg)); }
+#tr-jump:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+#tr-clock {
+    flex-shrink: 0;
+    font-family: ui-monospace, "DejaVu Sans Mono", monospace;
+    font-size: 12px;
+    color: var(--text-main);
+}
+/* The overview (overview.js): the whole kept recording on a slim track in
+   the transport row. Its marks sit on the track: hatched gaps and a pink
+   dashed line where a new tree run starts; then the Timeline's window (the
+   thumb) and the cursor's knob. */
+#overview {
+    position: relative;
+    flex: 1;
+    min-width: 24px;
+    align-self: stretch;
+    cursor: pointer;
+    touch-action: none;
+}
+#ov-track {
+    position: absolute;
+    left: 6px;                  /* the knob's radius: it fits at either end */
+    right: 6px;
+    top: calc(50% - 4px);
+    height: 8px;
+    border-radius: 4px;
+    overflow: hidden;
+    background: var(--border-color);
+}
+#ov-played {
+    height: 100%;
+    background: color-mix(in srgb, var(--accent) 55%, var(--panel-bg));
+}
+#ov-marks { position: absolute; inset: 0; pointer-events: none; }
+#ov-marks i { position: absolute; }
+.ov-gap {
+    top: calc(50% - 8px);
+    height: 16px;
+    box-sizing: border-box;
+    background: var(--hatch), var(--panel-bg);
+    border-left: 1px dashed var(--color-IDLE);
+    border-right: 1px dashed var(--color-IDLE);
+}
+.ov-run {
+    top: calc(50% - 10px);
+    height: 20px;
+    border-left: 2px dashed var(--type-SubTree);
+}
+#ov-thumb {
+    position: absolute;
+    top: calc(50% - 10px);
+    height: 20px;
+    box-sizing: border-box;
+    border: 1px solid color-mix(in srgb, var(--text-main) 70%, transparent);
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--text-main) 8%, transparent);
+    cursor: grab;
+}
+#ov-thumb:active { cursor: grabbing; }
+.ov-edge {
+    position: absolute;
+    top: -2px;
+    bottom: -2px;
+    width: 8px;
+    cursor: ew-resize;
+}
+.ov-edge[data-edge="left"] { left: -5px; }
+.ov-edge[data-edge="right"] { right: -5px; }
+#ov-thumb.narrow .ov-edge { pointer-events: none; }  /* too narrow to tell body from edge */
+#ov-knob {
+    position: absolute;
+    top: calc(50% - 6px);
+    width: 12px;
+    height: 12px;
+    margin-left: -6px;
+    box-sizing: border-box;
+    border-radius: 50%;
+    background: var(--text-main);
+    border: 2px solid var(--accent);
+    pointer-events: none;
+}
+#ov-knob.live { background: var(--accent); }
+#overview.empty { cursor: default; }
+#overview.empty #ov-track { background: color-mix(in srgb, var(--color-IDLE) 30%, var(--panel-bg)); }
 
 /* The fold button, the drawer's and the sidebar's alike: a chevron pointing
    the way the panel folds, turned round while it is collapsed. */
@@ -840,65 +1049,10 @@ body.viewing-past .status-pill.running { animation: none; }
 }
 .drawer-tabs [role="tab"]:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
-/* The recording chip: red while klein records (the universal "rec" dot),
-   grey when it can't or won't. Both are tints of the status palette. */
-#drawer-chip {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
-    padding: 4px 10px;
-    border-radius: 999px;
-    font-size: 0.75rem;
-    color: color-mix(in srgb, var(--color-FAILURE) 25%, var(--text-main));
-    background: color-mix(in srgb, var(--color-FAILURE) 18%, var(--panel-bg));
-}
-.drawer-chip-dot {
-    flex-shrink: 0;
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--color-FAILURE);
-}
-/* Narrow windows: the leading "Recording · " gives way long before the
-   numbers after it (and the note beside the chip before either). */
-#drawer-chip-text { display: flex; min-width: 0; }
-.drawer-chip-label, .drawer-chip-stats { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.drawer-chip-label { flex-shrink: 1000; white-space: pre; }     /* keep its trailing space */
-#drawer-chip[data-state="off"] {
-    color: var(--text-muted);
-    background: color-mix(in srgb, var(--color-IDLE) 15%, var(--panel-bg));
-}
-#drawer-chip[data-state="off"] .drawer-chip-dot { background: var(--color-IDLE); }
-/* An opened file: not recording, and nothing wrong either. */
-#drawer-chip[data-state="file"] {
-    color: var(--text-main);
-    background: color-mix(in srgb, var(--accent) 15%, var(--panel-bg));
-}
-#drawer-chip[data-state="file"] .drawer-chip-dot { background: var(--accent); }
-
-/* A size cap, not the time window, decided how far back a history goes. */
-#drawer-note {
-    min-width: 0;
-    flex-shrink: 100000;        /* the first to give way; the full text is its title */
-    overflow: hidden;
-    text-overflow: ellipsis;
-    font-size: 0.75rem;
-    color: var(--color-RUNNING);    /* the warn colour, as on the banners */
-}
-
-/* The filter both tabs share, at the toolbar's far end. */
-#drawer-filter-label {
-    margin-left: auto;
-    flex-shrink: 0;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 0.75rem;
-    color: var(--text-muted);
-}
+/* The filter both tabs share, compact, right after the tabs. */
+#drawer-filter-label { flex-shrink: 0; display: flex; }
 #drawer-filter {
-    width: 150px;
+    width: 110px;
     height: 28px;
     box-sizing: border-box;
     padding: 0 8px;
@@ -912,31 +1066,128 @@ body.viewing-past .status-pill.running { animation: none; }
 #drawer-filter:focus { outline: none; border-color: var(--accent); }
 #drawer-filter:not(:placeholder-shown) { border-color: var(--accent); }
 
-/* Save, after the filter: a plain button. */
+/* The Timeline's window length, between its zoom buttons (Timeline tab only). */
+#tl-zoom { display: flex; flex-shrink: 0; align-items: center; gap: 6px; }
+#tl-window {
+    min-width: 4.5em;
+    text-align: center;
+    font-family: ui-monospace, "DejaVu Sans Mono", monospace;
+    font-size: 12px;
+    color: color-mix(in srgb, var(--text-muted) 50%, var(--text-main));
+}
+
+/* A size cap, not the time window, decided how far back a history goes. */
+#drawer-note {
+    margin-left: auto;
+    min-width: 0;
+    flex-shrink: 100000;        /* the first to give way; the full text is its title */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 0.75rem;
+    color: var(--color-RUNNING);    /* the warn colour, as on the banners */
+}
+
+/* The recorder pill, at the row's far end: red while klein records (the
+   universal "rec" dot), grey when it can't or won't, the accent for an opened
+   file; all tints of the palette. Save is its right half, past a hairline. */
+#drawer-recorder {
+    margin-left: auto;
+    min-width: 0;
+    height: 28px;
+    display: flex;
+    align-items: stretch;
+    border-radius: 999px;
+    overflow: hidden;
+    font-size: 0.75rem;
+    --pill-ink: color-mix(in srgb, var(--color-FAILURE) 25%, var(--text-main));
+    --pill-bg: color-mix(in srgb, var(--color-FAILURE) 18%, var(--panel-bg));
+    --pill-dot: var(--color-FAILURE);
+    color: var(--pill-ink);
+    background: var(--pill-bg);
+}
+#drawer-note:not([hidden]) + #drawer-recorder { margin-left: 0; }
+#drawer-recorder:has(#drawer-chip[data-state="off"]) {
+    --pill-ink: var(--text-muted);
+    --pill-bg: color-mix(in srgb, var(--color-IDLE) 15%, var(--panel-bg));
+    --pill-dot: var(--color-IDLE);
+}
+/* An opened file: not recording, and nothing wrong either. */
+#drawer-recorder:has(#drawer-chip[data-state="file"]) {
+    --pill-ink: var(--text-main);
+    --pill-bg: color-mix(in srgb, var(--accent) 15%, var(--panel-bg));
+    --pill-dot: var(--accent);
+}
+#drawer-chip {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    padding: 0 10px 0 12px;
+}
+.drawer-chip-dot {
+    flex-shrink: 0;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--pill-dot);
+}
+/* Narrow windows: the label gives way long before the numbers after it
+   (and the note beside the pill before either). */
+#drawer-chip-text { display: flex; gap: 8px; min-width: 0; overflow: hidden; }
+.drawer-chip-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.drawer-chip-label:empty { display: none; }
+.drawer-chip-stats {
+    flex-shrink: 0;             /* never ellipsised: a squeezed label goes first */
+    font-family: ui-monospace, "DejaVu Sans Mono", monospace;
+    font-size: 11px;
+    color: color-mix(in srgb, var(--pill-ink) 70%, var(--text-muted));
+}
+/* Recording off: its reason in plain text, ellipsised when squeezed. */
+#drawer-chip[data-state="off"] .drawer-chip-stats {
+    flex-shrink: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-family: inherit;
+    font-size: inherit;
+}
+
 #drawer-save {
     flex-shrink: 0;
-    height: 28px;
-    padding: 0 12px;
+    padding: 0 12px 0 10px;
     font: inherit;
-    font-size: 0.75rem;
     color: var(--text-main);
-    background: var(--subtree-fill-0);
-    border: 1px solid var(--border-color);
-    border-radius: 6px;
+    background: none;
+    border: 0;
+    border-left: 1px solid color-mix(in srgb, var(--pill-ink) 30%, transparent);
     cursor: pointer;
 }
-#drawer-save:hover:not(:disabled) { border-color: var(--accent); }
+#drawer-save:hover:not(:disabled) { background: color-mix(in srgb, var(--text-main) 10%, transparent); }
 #drawer-save:disabled { color: var(--color-IDLE); cursor: default; }
-#drawer-save:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+#drawer-save:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
-/* A narrow drawer (1000 px with the sidebar): the word "Filter" goes (the
-   input keeps it as its title) and the filter narrows, so the chip keeps
-   its numbers next to Save. */
+/* A narrow drawer (≤ 820 px: a 1140 px window with the sidebar): the tabs
+   and the filter narrow, then (flex) the cap note goes, then the pill's
+   label; the clock drops its µs. The pill's numbers and the zoom stay. */
 #drawer { container: drawer / inline-size; }
 @container drawer (max-width: 820px) {
-    .drawer-word { display: none; }
-    #drawer-filter { width: 120px; }
+    #drawer-transport, #drawer-toolbar { gap: 8px; padding: 0 12px; }
+    .drawer-tabs [role="tab"] { padding: 0 10px; }
+    #drawer-filter { width: 90px; }
+    .tr-micro { display: none; }
 }
+/* A very narrow one (≤ 480 px: a 800 px window with the sidebar): the clock
+   drops its ms too, the window's length its label and the recorder pill its
+   numbers, so neither row runs past the drawer's edge. */
+@container drawer (max-width: 480px) {
+    #drawer-transport, #drawer-toolbar { gap: 6px; }
+    .transport-buttons { gap: 2px; }
+    .tr-ms, #tl-window, #drawer-chip-text { display: none; }
+    .drawer-tabs [role="tab"] { padding: 0 6px; }
+    #drawer-filter { width: 72px; }
+}
+/* Whatever is still too wide is cut at the row's end, never scrolled to. */
+#drawer-transport, #drawer-toolbar { overflow: hidden; }
 
 #drawer-body {
     position: relative;         /* the offsetParent drawer.js measures rows from */
@@ -1039,16 +1290,15 @@ body.viewing-past .status-pill.running { animation: none; }
 }
 
 /* ---- Timeline tab -------------------------------------------------------
-   A name column (--tl-label) and a time axis. The controls and
-   the axis stay at the top of the scrolling body; under them each section's
-   header row sticks while its section scrolls by (a nested one covers its
+   A name column (--tl-label) and a time axis. The axis stays at the top
+   of the scrolling body; under it each section's header row sticks while its section scrolls by (a nested one covers its
    parent's). Bars are RUNNING spans, capped in the outcome's colour; a
    single mark is an outcome reached in the tick it started. Every colour is
    a palette token, tinted toward the panel or the text with color-mix. */
 #drawer-timeline {
     --tl-label: 206px;              /* the name column; the axis starts here */
     --tl-pad: 16px;                 /* right of the axis */
-    --tl-head: 60px;                /* the controls (38) and the axis (22) */
+    --tl-head: 23px;                /* the axis (#tl-ruler: 22 and its border) */
     --tl-run: color-mix(in srgb, var(--color-RUNNING) 80%, var(--panel-bg));
     --tl-playhead: color-mix(in srgb, var(--color-RUNNING) 45%, var(--text-main));
     position: relative;
@@ -1059,41 +1309,6 @@ body.viewing-past .status-pill.running { animation: none; }
     z-index: 4;
     background: var(--panel-bg);
 }
-.tl-controls {
-    height: 38px;
-    box-sizing: border-box;
-    padding: 0 16px;
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: 10px;
-    border-bottom: 1px solid var(--subtree-fill-0);
-    font-size: 12px;
-    color: var(--text-muted);
-}
-.tl-controls button {
-    min-width: 28px;
-    height: 26px;
-    padding: 0 6px;
-    font-family: var(--font-symbol);
-    font-size: 12px;
-    color: var(--text-main);
-    background: var(--subtree-fill-0);
-    border: 1px solid var(--border-color);
-    border-radius: 6px;
-    cursor: pointer;
-}
-.tl-controls button:hover:not(:disabled) { border-color: var(--text-muted); }
-.tl-controls button:disabled { color: var(--color-IDLE); cursor: default; }
-.tl-controls button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-#tl-prev { margin-left: 8px; }
-#tl-window {
-    min-width: 7.5em;
-    text-align: center;
-    font-family: ui-monospace, "DejaVu Sans Mono", monospace;
-    color: color-mix(in srgb, var(--text-muted) 50%, var(--text-main));
-}
-
 /* The axis: press or drag anywhere on it to move the playhead. */
 #tl-ruler {
     position: relative;
@@ -1185,7 +1400,7 @@ body.viewing-past .status-pill.running { animation: none; }
 
 /* The left edge of the kept history once eviction dropped some (drawer.js
    droppedNote): a dashed edge over the rows; its note (#tl-dropped-note)
-   sits in the controls strip, clear of the bars. */
+   sits in the name column beside the axis, clear of the bars. */
 .tl-dropped {
     position: absolute;
     top: 0;
@@ -1196,8 +1411,14 @@ body.viewing-past .status-pill.running { animation: none; }
         color-mix(in srgb, var(--color-IDLE) 18%, transparent), transparent);
 }
 #tl-dropped-note {
-    margin-right: auto;         /* left of the controls, which keep the right */
-    min-width: 0;
+    position: absolute;
+    z-index: 1;
+    top: 0;
+    left: 16px;
+    width: calc(var(--tl-label) - 24px);
+    height: 22px;
+    line-height: 22px;
+    pointer-events: auto;
     font-size: 11px;
     font-style: italic;
     white-space: nowrap;

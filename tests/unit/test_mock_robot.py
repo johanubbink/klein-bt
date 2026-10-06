@@ -398,6 +398,15 @@ class EveryTreeTest(unittest.TestCase):
                 self.assertEqual(list(tree.blackboard(0)), tree.blackboard_names)
                 self.assertEqual(layout.extract_blackboard_names(root),
                                  tree.blackboard_names)
+                # Each key a node reads or writes is served on the board BT.CPP
+                # would keep it on (remapped keys on the parent's).
+                boards = tree.blackboard(0)
+                nodes = [gw.tree_structure]
+                while nodes:
+                    node = nodes.pop()
+                    nodes.extend(node["children"])
+                    for b in node["bindings"]:
+                        self.assertIn(b["key"], boards[b["board"]], (node["uid"], b))
 
                 # Every node type is declared in the model, in the shared vocabulary.
                 model = layout.parse_node_categories(root)

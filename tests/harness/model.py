@@ -2,8 +2,8 @@
 dump, and the dashboard's wording, both written out here from their rules.
 
 ``Model(dump)`` re-derives from the dump alone what each segment holds at any
-seq or time, the blackboard at a time, a node's intervals and (given each
-segment's layout) the Log's rows. The UI tests compare the browser with it,
+seq or time, the blackboard at a time, a node's intervals, the tree runs,
+and (given each segment's layout) the Log's rows. The UI tests compare the browser with it,
 the integration tests a saved file. Like the rest of the harness it imports
 nothing from klein.
 """
@@ -14,6 +14,12 @@ from decimal import ROUND_HALF_UP, Decimal
 
 STATUS = ["IDLE", "RUNNING", "SUCCESS", "FAILURE", "SKIPPED"]
 IDLE_TRANSITION = 10
+
+# The blackboard panel's change marks (µs): fresh within one 2 Hz sample,
+# streaming at BB_STREAMING changes within BB_RECENT.
+BB_SAMPLE = 500_000
+BB_RECENT = 3_000_000
+BB_STREAMING = 4
 
 
 def apply(state, uid, status):
@@ -116,6 +122,17 @@ class Model:
             if layouts is not None:
                 self.names[s["id"]] = names(layouts[str(s["id"])])
 
+    def head_time(self):
+        """The newest moment live shows: the head, or the newest sample of the
+        newest segment's blackboard (its start, a board first seen or a
+        change), whichever is later. The overview and the Timeline end there."""
+        newest = max(self.segments)
+        e = next((b for b in self.state["blackboard"] if b["seg"] == newest), None)
+        times = [self.state["head"]]
+        if e and e["t_start"] is not None:
+            times += [e["t_start"], *e["boards"].values(), *(c[0] for c in e["changes"])]
+        return max(times)
+
     def records(self, seg):
         return self.segments[seg][1]
 
@@ -188,6 +205,41 @@ class Model:
         for (board, key), text in last.items():
             if text is not None:
                 out[board][key] = json.loads(text)
+        return out
+
+    def bb_change(self, seg, board, key, t):
+        """``bbChange``: ``(t_change, recent)`` of one key as of t. A change
+        is a kept change after the blackboard's start (the first sample, and
+        the base eviction keeps, are where the history begins); ``t_change``
+        is the last at or before t, else None. ``recent`` counts the changes
+        in (t - 3 s, t]."""
+        e = next(b for b in self.state["blackboard"] if b["seg"] == seg)
+        mine = [ts for ts, b, k, _text in e["changes"] if (b, k) == (board, key) and ts <= t]
+        if not mine or e["t_start"] is None or mine[-1] <= e["t_start"]:
+            return None, 0
+        recent = sum(1 for ts in mine if ts > max(t - BB_RECENT, e["t_start"]))
+        return mine[-1], recent
+
+    def bb_fresh(self, seg, t):
+        """The ``(board, key)``s the panel marks at t: changed within one
+        sample (0.5 s) and not streaming (4+ changes in 3 s). A key unset
+        at t has no row to mark."""
+        shown = self.bb_at(seg, t) or {}
+        out = set()
+        for board, key in {(b, k) for b, keys in shown.items() for k in keys}:
+            t_change, recent = self.bb_change(seg, board, key, t)
+            if t_change is not None and t - t_change < BB_SAMPLE and recent < BB_STREAMING:
+                out.add((board, key))
+        return out
+
+    def runs(self):
+        """``treeRuns``: the segment ids, grouped where the tree changes."""
+        out = []
+        for s, _records in self.segments.values():
+            if out and self.segments[out[-1][-1]][0]["layout_id"] == s["layout_id"]:
+                out[-1].append(s["id"])
+            else:
+                out.append([s["id"]])
         return out
 
     def intervals(self, seg, uid, t0, t1):

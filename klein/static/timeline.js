@@ -36,10 +36,13 @@ const MAX_WINDOW_RECORDS = 20_000;
 const drawer = document.getElementById("drawer");
 const drawerBody = document.getElementById("drawer-body");
 const panel = document.getElementById("drawer-timeline");
-const tab = document.getElementById("drawer-tab-timeline");
 const filterInput = document.getElementById("drawer-filter");
+// The window's length and its zoom, in the drawer's tab row.
 const windowLabel = document.getElementById("tl-window");
-const playButton = document.getElementById("tl-play");
+const zoomGroup = document.getElementById("tl-zoom");
+const zoomIn = document.getElementById("tl-zoom-in");
+const zoomOut = document.getElementById("tl-zoom-out");
+const fitButton = document.getElementById("tl-fit");
 const ruler = document.getElementById("tl-ruler");
 const rulerTrack = document.getElementById("tl-ruler-track");
 const grip = document.getElementById("tl-grip");
@@ -51,12 +54,12 @@ const empty = document.getElementById("tl-empty");
 const droppedNoteEl = document.getElementById("tl-dropped-note");
 const tooManyEl = document.getElementById("tl-too-many");
 
-// app.js: move the shared cursor, fold the canvas, and the cards' glyphs.
-let hooks = { seek() {}, toggleFold() {}, foldOthers() {}, glyphFor: () => "" };
+// app.js: move the shared cursor, fold the canvas, and the cards' glyphs;
+// overview.js: the window moved (its thumb).
+let hooks = { seek() {}, toggleFold() {}, foldOthers() {}, glyphFor: () => "", windowMoved() {} };
 let rec = null;                     // what update() was last given
 let pos = null;
 let root = null;                    // the canvas's d3 hierarchy (its fold state)
-let clock = null;
 let span = DEFAULT_SPAN;            // the window: (t1 - span, t1], robot µs
 let t1 = null;
 let follow = true;                  // while live, the window's right edge is the head
@@ -70,9 +73,9 @@ let barsTimer = null;
 let barsT1 = null;                  // the window's right edge the bars were last drawn for
 let rowEls = [];                    // [{el, track, item}] in tree order
 
+// The window's right end live (KleinCursor.headTime).
 function head() {
-    const last = rec.segments[rec.segments.length - 1];
-    return rec.head !== null ? rec.head : last.tBegin;
+    return C.headTime(rec);
 }
 
 // The axis: px from the track's left edge to µs and back, for the window shown.
@@ -216,7 +219,7 @@ function collect(seg, t0, withBars) {
         const next = rec.segments[i + 1];
         const end = s.tEnd !== null ? s.tEnd : next ? next.tBegin : head();
         if (end < t0 || s.tBegin > t1) return;
-        if (s.layoutId !== seg.layoutId) {
+        if (!R.sameTree(s, seg)) {
             const name = R.treeName(s.layout);
             const same = name === R.treeName(seg.layout);
             bands.push({ from: s.tBegin, to: end, kind: "tree", label: name,
@@ -227,10 +230,8 @@ function collect(seg, t0, withBars) {
         const all = R.intervalsAll(s, s.uids, t0, Math.min(t1, end));
         for (const uid of s.uids) add(uid, R.timelineMarks(all[uid]));
     });
-    for (const gap of rec.gaps) {
-        if (gap.tTo >= t0 && gap.tFrom <= t1) {
-            bands.push({ from: gap.tFrom, to: gap.tTo, kind: "gap", label: gap.kind });
-        }
+    for (const gap of R.gapsIn(rec, t0, t1)) {
+        bands.push({ from: gap.tFrom, to: gap.tTo, kind: "gap", label: gap.kind });
     }
     return { per, bands };
 }
@@ -325,7 +326,7 @@ function paintBars() {
     });
     // Where the kept history starts, once eviction dropped some: the window
     // can't go further left, so this is its left edge when panned there. A
-    // dashed edge over the rows, its note in the controls strip above them.
+    // dashed edge over the rows, its note in the name column beside the axis.
     const edge = Boolean(dropped) && rec.tMin >= t0 && rec.tMin <= t1;
     if (edge) {
         const mark = bandsEl.appendChild(document.createElement("div"));
@@ -335,6 +336,7 @@ function paintBars() {
     }
     droppedNoteEl.hidden = !edge;
     droppedNoteEl.textContent = edge ? `⇤ ${dropped}` : "";
+    droppedNoteEl.title = edge ? dropped : "";      // cut to fit the name column
     // The axis.
     const step = tickStep();
     const ticks = [];
@@ -347,7 +349,7 @@ function paintBars() {
         el.textContent = formatTick(t, step);
         t += step;
     }
-    windowLabel.textContent = `${formatWindow(span)} window`;
+    windowLabel.textContent = formatWindow(span);
     void lanes.offsetHeight;        // lay the new bars out now, so that counts too
     const now = performance.now();
     nextBarsAt = now + BUSY_FACTOR * (now - started);
@@ -368,7 +370,6 @@ function paint() {
         const filter = filterInput.value.trim();
         empty.textContent = filter && pos ? `No nodes match “${filter}”.`
                                           : rec ? "No transitions recorded yet." : "Nothing recorded.";
-        playButton.disabled = true;
         return;
     }
     if (t1 === null || (pos.live && follow)) t1 = head();
@@ -379,32 +380,28 @@ function paint() {
     clampWindow();
     paintBars();
 
-    const x = xOf(pos.t);
+    const x = xOf(C.shownTime(pos, rec));     // live: at head()
     const visible = x >= -1 && x <= trackWidth() + 1;
     playhead.hidden = grip.hidden = !visible;
     playhead.style.left = grip.style.left = `${x.toFixed(2)}px`;
     playhead.classList.toggle("live", pos.live);
-
-    const playing = clock && clock.mode === "playing";
-    playButton.disabled = pos.live;
-    // Written only when it changes: a new text node on every frame would
-    // have the browser lay the drawer out again each time.
-    const glyph = playing ? "❚❚" : "▶︎";
-    if (playButton.textContent !== glyph) playButton.textContent = glyph;
-    playButton.setAttribute("aria-label", playing ? "Pause" : "Play at 1×");
-    playButton.title = playing ? "Pause" : "Play at 1× (reaching the head goes live)";
 }
 
 // What the dashboard shows, from app.js's render(): the recording (null
-// without one), the cursor's position, the canvas's hierarchy and the clock.
-function update(recording, position, hierarchy, clk) {
+// without one), the cursor's position and the canvas's hierarchy.
+function update(recording, position, hierarchy) {
     rec = recording || null;
     pos = rec ? position : null;
     root = hierarchy || null;
-    clock = clk;
     if (pos && pos.live && !wasLive) follow = true;
     wasLive = !pos || pos.live;
+    showZoom();
     paint();
+}
+
+// The zoom (− window +): on the Timeline's tab, with something recorded.
+function showZoom() {
+    zoomGroup.hidden = panel.hidden || !pos;
 }
 
 // After the reader moved the window: follow the head again only if they
@@ -414,6 +411,24 @@ function windowMoved() {
     follow = pos.live && t1 >= head();
     nextBarsAt = 0;                 // the reader's own move: rebuild at once
     paint();
+    hooks.windowMoved();
+}
+
+// The window as last painted, for the overview's thumb: {t0, t1, span,
+// min, max} (min and max: the shortest and longest span), or null before
+// the Timeline has painted one.
+function getWindow() {
+    return t1 === null || !pos ? null
+        : { t0: t1 - span, t1, span, min: LADDER[0], max: LADDER[LADDER.length - 1] };
+}
+
+// Move the window to (t1 - span, t1], as the reader's own move (the
+// overview's thumb). Clamped as always.
+function setWindow(right, newSpan) {
+    if (!pos || t1 === null) return;
+    t1 = right;
+    span = newSpan;
+    windowMoved();
 }
 
 // Change the window length, keeping the time at anchor where it is on screen.
@@ -437,14 +452,20 @@ function zoomStep(dir) {
     zoomTo(next, anchor);
 }
 
-// Move the cursor to robot time t (to the µs): paused in the segment that
-// holds t, just after the last transition at or before it, at t itself.
+// Zoom to fit (⤢, and \ in drawer.js): the window is everything kept, the
+// oldest record to the head, within LADDER's limits (clampWindow); it
+// follows the head again while live. Returns false when the Timeline isn't
+// shown.
+function fit() {
+    if (!pos || panel.hidden) return false;
+    t1 = head();
+    span = t1 - rec.tMin;
+    windowMoved();
+    return true;
+}
+
 function seekTime(t) {
-    t = Math.min(Math.max(Math.round(t), rec.tMin), head());
-    let seg = rec.segments[0];
-    for (const s of rec.segments) if (s.tBegin <= t) seg = s;
-    t = Math.max(t, seg.tStart);
-    hooks.seek(C.pause(seg.id, R.seqAtTime(seg, t), t));
+    hooks.seek(C.pauseAt(rec, t));
 }
 
 // The ruler: press to put the playhead there, drag to scrub.
@@ -506,20 +527,16 @@ panel.addEventListener("wheel", (event) => {
     }
 }, { passive: false });
 
-document.getElementById("tl-zoom-in").addEventListener("click", () => zoomStep(-1));
-document.getElementById("tl-zoom-out").addEventListener("click", () => zoomStep(1));
-document.getElementById("tl-prev").addEventListener("click", () => {
-    if (pos) hooks.seek(C.step(clock, rec, -1, performance.now()));
-});
-document.getElementById("tl-next").addEventListener("click", () => {
-    if (pos) hooks.seek(C.step(clock, rec, 1, performance.now()));
-});
-playButton.addEventListener("click", () => {
-    if (!pos || pos.live) return;
-    hooks.seek(clock.mode === "playing" ? C.pause(pos.seg, pos.seq, pos.t)
-                                        : C.play(pos.seg, pos.seq, performance.now(), pos.t));
-});
-tab.addEventListener("click", paint);
+zoomIn.addEventListener("click", () => zoomStep(-1));
+zoomOut.addEventListener("click", () => zoomStep(1));
+fitButton.addEventListener("click", fit);
+// After drawer.js's own handler has switched the panels.
+for (const t of drawer.querySelectorAll('[role="tab"]')) {
+    t.addEventListener("click", () => {
+        showZoom();
+        paint();
+    });
+}
 filterInput.addEventListener("input", paint);
 window.addEventListener("resize", () => {
     barsKey = null;
@@ -550,7 +567,7 @@ function debug() {
 }
 
 globalThis.KleinTimeline = {
-    update, revealRows, debug,
+    update, revealRows, debug, getWindow, setWindow, seekTime, fit,
     connect: (h) => { hooks = { ...hooks, ...h }; },
 };
 })();

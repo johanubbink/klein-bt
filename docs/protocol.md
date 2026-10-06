@@ -384,6 +384,37 @@ records into, and one told `"unsupported"` has the end of the last one.
 | `evict` | eviction changed the recording's extent, and at the end of every backfill | `t_min` (earliest retained time, or `null`), `segments`: `[[seg, start_seq, t_start, bb_t_start]]` for every retained segment (`Recording.extent()`). The browser drops segments not listed, chunks before `start_seq`, blackboard changes before `bb_t_start` (keeping each key's base, as `BlackboardTrack.evict_before`; `null` clears it), and gaps ending before `t_min`. Nothing is recomputed |
 | `backfill_done` | end of a backfill | — |
 
+**The layout tree** (the `layout` frame's `data`, a `segment`'s `layout`) is
+one node object per unrolled node, built by
+[`klein/layout.py`](../klein/layout.py): `id`, `uid`, `type`, `category`,
+`name`, `ports` (the attributes the author wrote) and `children`. A `<SubTree>`
+node also has `subtree_id`, `is_subtree_root` and `board` (its instance's
+blackboard); the root has `board` and `root_tree_id`. Every node has
+`bindings`, the blackboard entries its ports reach:
+
+```json
+"bindings": [
+  {"port": "_onSuccess", "dir": "out", "board": "MainTree", "key": "door_open", "at": [[0, 9]]}
+]
+```
+
+- `board` is a blackboard name exactly as the `blackboard` frame names it
+  (the `_fullpath`, or the tree ID for the root), and `board` + `key` is the
+  entry the robot actually holds, after remapping (see
+  [architecture.md](architecture.md#subtree-unrolling)). Private (`_`) keys can
+  appear, though the panel hides them.
+- `dir` is `"in"`, `"out"` or `"inout"`. It comes from the robot's
+  `<TreeNodesModel>`: each entry's `input_port`, `output_port` and
+  `inout_port` children (`addNodeModelToXML` in `src/xml_parsing.cpp`). A port
+  the model lacks is `"inout"`.
+- There is one binding per (`port`, `board`, `key`); a script that reads and
+  writes a key gets one `"inout"` binding. A port set to a literal has none.
+- `at` is `[[start, end], …]`, sorted: the character offsets in the port's
+  value of the text naming the key. A `{key}` (and a `<SubTree>` remap's
+  `{outer}`): the braces; `=` or `{=}`: the value; a key-name port: the value
+  trimmed; a script: each name (`door_open` in `door_open:=true`), as written
+  inside a subtree even when it is remapped to another name outside.
+
 **Binary records frame**, little-endian; one per chunk touched by a drain (a
 drain that fills a chunk and starts the next sends two). The header is
 `<BIIIqH`, 23 bytes:

@@ -46,9 +46,14 @@ is up; it keeps retrying until the robot appears.
 - Press `R` to see the whole tree again, or `F` to jump to whatever is running.
 - Hover a node to see its ports.
 - **Layout** switches between a vertical and a horizontal tree.
-- The **Blackboards** list shows every subtree's values. Click a row to expand
-  it, or hover a board to find its node in the tree. See
+- The **Blackboards** list shows every subtree's values. A value that just
+  changed gets a thin amber edge that fades; a key that changes all the time
+  (a position, a counter) gets a steady dim edge and a `~` instead. Click a
+  row to expand it, or hover a board to find its node in the tree. See
   [docs/blackboards.md](docs/blackboards.md) for how values are shown.
+- Hover a key to see which nodes use it: writers outlined solid, readers
+  dashed. Hover a node to ring its keys. Writers get a small amber dot when
+  the key changes.
 - Drag the side panel's right edge to make it wider or narrower, or fold it
   away with its `◂` button (or a double-click on the edge) for more room.
   klein remembers both.
@@ -63,20 +68,42 @@ blackboard included, and keeps the last 10 minutes. Change that with
 from Groot2 against the same robot at the same time: each would get only
 some of the transitions.
 
-![A saved recording opened with klein-bt --open: the playhead is dragged back through PickLock's failed attempts, stepped, moved by a Log row, then played](assets/klein-replay.gif)
+![klein rewinding a live robot: scrub, step, hover a key, play, back to live](assets/klein-rewind.gif)
 
-The drawer under the tree shows the recording:
+The drawer under the tree shows the recording. Its top row works in every
+tab, even with the drawer folded:
+
+- |◀ ▶| step to the previous or next transition, and ▶ plays at 1×.
+  While live it reads ❚❚: press it to freeze the tree, the blackboard and
+  the clock right where they are.
+- The green **● Live** says you are live. In the past it turns into
+  **Jump to live**, which takes you back; the tree gets a thin amber edge,
+  and the clock beside the bar says which moment you see. Changes are marked
+  in the past too: stepping or clicking shows which values just changed.
+- The bar is the whole recording, from the oldest moment kept to now.
+  Click or drag it to go anywhere. Hatched stretches are outages, and a pink
+  dashed line marks where the robot started another tree. On the Timeline
+  tab a box on it shows the Timeline's window: drag it to pan, or drag its
+  edges to zoom.
+- The keys: ←/→ step, Space plays or pauses, Home goes to the oldest moment
+  kept, End or Esc goes live, and `\` zooms the Timeline to fit everything
+  kept (also its ⤢ button).
+
+Below it are two tabs, a filter and the recording pill:
 
 - **Log**: every transition. Click a row to see the tree and blackboard at
-  that moment; Esc goes back to live.
+  that moment.
 - **Timeline**: each node's running time as bars, so every retry shows. Drag
-  the playhead to go back in time, step with |◀ ▶|, play with ▶.
-- **Save**: downloads one `.zip` with a `.btlog` per tree run (Groot2 opens
-  these) and its blackboard in a `.bb.jsonl` beside it.
+  the playhead to go back in time; − and + change the window.
+- The **Filter** beside the tabs narrows both tabs, and stepping, to the
+  nodes and subtrees you name.
+- **Save**, on the recording pill (`● Recording 10 min · 148 kB`),
+  downloads one `.zip` with a `.btlog` per tree run (Groot2 opens these)
+  and its blackboard in a `.bb.jsonl` beside it.
 
 `klein-bt --open FILE.btlog` shows a saved recording without a robot, in the
-same Log and Timeline. Unzip a saved `.zip` first; the `.bb.jsonl` beside the
-file brings its blackboard along.
+same Log and Timeline; **Jump to end** takes you to its end. Unzip a saved
+`.zip` first; the `.bb.jsonl` beside the file brings its blackboard along.
 
 ## Set up your robot
 

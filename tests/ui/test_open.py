@@ -5,12 +5,18 @@ a ``.bb.jsonl`` sidecar (``tests.helpers.t11_sidecar``), and the dashboard is
 checked in a real browser against the file itself, read by the harness's
 independent reader, and against Python's ``state_at`` on the same file:
 
-* the chip says "file: … · no robot", with no connection warning;
+* the recorder pill says "file: …" (its tooltip "… · no robot"), with no
+  connection warning;
 * the Log lists exactly the file's records (time, node, from → to);
 * every position a stepped cursor reaches shows Python's state on the cards,
-  and the sidecar's values on the blackboard panel; the board with no lines
-  (DoorClosed::7) shows "—";
-* dragging the sidebar redraws the Timeline, though a file sends nothing more.
+  the sidecar's values on the blackboard panel, and the writer pulse on
+  exactly the writers of the keys changed within a sample; the board with no lines
+  (DoorClosed::7) shows "—"; Home goes to the file's first moment (Python's
+  state there), and Esc, End and the transport's "Jump to end" return to
+  the file's last state ("● End"), where ▶ is off (nothing to pause);
+* dragging the sidebar redraws the Timeline, though a file sends nothing more;
+* hovering every key row and card links exactly what the layout's bindings
+  name.
 
 A file opened without its sidecar is checked in ``test_save_ui``. Skipped when
 Playwright is missing.
@@ -22,9 +28,10 @@ from pathlib import Path
 
 from klein.recording import decode_state
 from tests.harness import btlog_ref
+from tests.harness.model import BB_SAMPLE, Model
 from tests.harness.probes import GatewayProbe
 from tests.helpers import T11_BOARDS, T11_SIDECAR, opened, sidecar_at, t11_sidecar
-from tests.ui import DashboardCase
+from tests.ui import PULSES, DashboardCase, links
 
 SHOTS = "open"                      # screenshot group (KLEIN_SHOTS=1)
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
@@ -43,9 +50,8 @@ _READ_VIEW = """() => {
   const empty = document.getElementById('bb-empty');
   return { pos, boards, counts, empty: empty.hidden ? null : empty.textContent,
            pastNote: getComputedStyle(document.getElementById('bb-past-note')).display !== 'none',
-           banner: (v => v ? (v.querySelector('.banner-action') || {textContent: 'no button'})
-                             .textContent : null)(
-                   document.querySelector('#banner-stack [data-key="viewing"]')) };
+           pulses: (""" + PULSES + """)(),
+           state: (j => [j.dataset.state, j.textContent, j.disabled])(document.getElementById('tr-jump')) };
 }"""
 
 # Every Log row, as the Log computes it (the DOM holds only the rows in view).
@@ -53,7 +59,8 @@ _ALL_ROWS = """() => { const R = KleinRecording, rows = R.logRows(shownRecording
   return Array.from({length: rows.count}, (_, i) => { const r = R.logRowAt(rows, i);
     return [r.seg, r.seq, r.t, r.uid, r.from, r.to]; }); }"""
 
-_CHIP = """() => ({ text: document.getElementById('drawer-chip-text').textContent,
+_CHIP = """() => ({ text: document.getElementById('drawer-chip').title,
+  shown: [...document.querySelectorAll('#drawer-chip-text > span')].map(e => e.textContent),
   state: document.getElementById('drawer-chip').dataset.state,
   conn: document.getElementById('conn-text').textContent,
   dot: document.getElementById('conn-dot').className,
@@ -104,17 +111,41 @@ class OpenFileTest(DashboardCase):
         self.assertEqual(view["boards"], self.browser.value_summaries(boards),
                          f"panel at +{t - self.first} us")
         self.assertEqual(view["counts"]["DoorClosed::7"], "—")
+        # Paused, the writers of every key changed within a sample (the
+        # first sample is no change; none streams) hold the static pulse.
+        at = t - self.first
+        fresh = {("MainTree", line["key"]) for line in T11_SIDECAR
+                 if 0 < line["t"] <= at and at - line["t"] < BB_SAMPLE
+                 and line["key"] in boards["MainTree"]}
+        roles = links(self.segment.layout.tree)[0]
+        writers = set() if pos["live"] else {
+            uid for ref in fresh for uid, role in roles.get(ref, {}).items() if role == "write"}
+        self.assertEqual([set(view["pulses"][0]), view["pulses"][1]], [writers, []],
+                         f"pulses at +{at} us")
 
-    # -- the chip -------------------------------------------------------- #
+    # -- the recorder pill ----------------------------------------------- #
     def test_the_chip_says_file_and_no_robot_and_nothing_warns(self):
         chip = self.page.evaluate(_CHIP)
         span = (self.records[-1][0] - self.first) // 1_000_000
         self.assertEqual(chip["text"], f"file: {T11.name} · {span} s · "
                                        f"{len(self.records)} transitions · no robot")
+        self.assertEqual(chip["shown"], [f"file: {T11.name}", f"{span} s"])
         self.assertEqual(chip["state"], "file")
         self.assertEqual(chip["conn"], f"No robot — viewing {T11.name}")
         self.assertEqual(chip["dot"], "dot file")
         self.assertNotIn("connection", chip["banners"])
+
+    def test_the_overview_spans_the_file(self):
+        """From the file's first timestamp to its last record (or its
+        sidecar's last line, if later), nothing marked on it (one tree run,
+        no gaps)."""
+        model = Model({"segments": [{"id": 0, "t_begin": self.first, "start_seq": 0,
+                                     "head_seq": len(self.records), "layout_id": 1}],
+                       "records": [list(r) for r in self.records]})
+        v, _x = self.assert_overview(model, [], "the file")
+        end = max(self.records[-1][0], self.first + max(line["t"] for line in T11_SIDECAR))
+        self.assertEqual((v["ov"]["tMin"], v["ov"]["tMax"]), (self.first, end))
+        self.assertEqual((v["gaps"], v["runs"]), ([], []))
 
     # -- the Log --------------------------------------------------------- #
     def test_the_log_lists_exactly_the_files_records(self):
@@ -136,7 +167,8 @@ class OpenFileTest(DashboardCase):
         self.page.click('#log-rows .log-row[data-seq="0"]:not([hidden])')
         view = self.view()
         self.assertEqual(view["pos"]["seq"], 1)
-        self.assertEqual(view["banner"], "no button")
+        self.assertEqual(view["state"], ["past", "Jump to end ⏭︎", False],
+                         "a file has no live: its end")
         self.assertTrue(view["pastNote"])
         seen = []
         while not seen or view["pos"]["seq"] != seen[-1]:   # the last row: it stays put
@@ -145,13 +177,52 @@ class OpenFileTest(DashboardCase):
             self.browser.key("ArrowDown")
             view = self.view()
         self.assertEqual(seen, list(range(1, len(self.records) + 1)))
-        # Back to the end (Esc): "live" is the file's last state.
-        self.browser.key("Escape")
+        # Home: the file's first moment, Python's state_at there.
+        self.browser.key("Home")
         view = self.view()
-        self.assertTrue(view["pos"]["live"])
-        self.assertEqual(view["pos"]["seq"], len(self.records))
-        self.assertIsNone(view["banner"])
+        self.assertEqual((view["pos"]["seq"], view["pos"]["t"], view["pos"]["live"]),
+                         (self.segment.seq_at_time(self.segment.t_start), self.segment.t_start,
+                          False))
         self.assert_view_at(view)
+        # A tab switch or a filter edit keeps the paused cursor playable: a
+        # file sends no frames, so nothing else would tell the transport it
+        # isn't live.
+        for edit in ("tabs", "filter"):
+            if edit == "tabs":
+                self.page.click("#drawer-tab-timeline")
+                self.page.click("#drawer-tab-log")
+            else:
+                self.page.fill("#drawer-filter", "x")
+                self.page.fill("#drawer-filter", "")
+            self.page.click("#tr-play")
+            self.page.wait_for_function(
+                "document.getElementById('tr-play').getAttribute('aria-label') === 'Pause'",
+                timeout=3000)
+            self.page.click("#tr-play")
+        # Back to the end (Esc, End and Jump to end): "live" is the file's
+        # last state.
+        for how in ("Escape", "End", "#tr-jump"):
+            if how != "Escape":                     # (Esc: from Home)
+                self.page.click("#tr-prev")         # from the end: the last row
+                self.assertEqual(self.view()["pos"]["seq"], len(self.records))
+                self.assertFalse(self.view()["pos"]["live"])
+            if how == "#tr-jump":
+                self.page.click(how)
+            else:
+                self.browser.key(how)
+            view = self.view()
+            self.assertTrue(view["pos"]["live"], how)
+            self.assertEqual(view["pos"]["seq"], len(self.records), how)
+            self.assertEqual(view["state"], ["end", "End", True], how)
+            self.assert_view_at(view)
+        # At the end nothing advances, so nothing pauses: ▶ is off, Space does nothing.
+        self.assertTrue(self.page.is_disabled("#tr-play"))
+        self.browser.key(" ")
+        self.assertTrue(self.view()["pos"]["live"])
+
+    def test_hovering_links_keys_and_cards(self):
+        layout = self.segment.layout.tree
+        self.assert_hover_links(layout)     # folded: test_render's live one
 
     def test_a_sidebar_drag_redraws_the_timeline(self):
         # A file sends nothing more, so only the drag itself can ask for the

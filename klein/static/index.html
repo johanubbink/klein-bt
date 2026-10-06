@@ -11,7 +11,8 @@
 <body>
 
     <!-- Width and collapse in app.js ("Sidebar"); collapsed, only the fold
-         button and the edge stay, a strip as wide as the drawer's toolbar is tall. -->
+         button and the edge stay, a strip as wide as the drawer's transport
+         row is tall. -->
     <aside id="sidebar">
         <div id="sidebar-handle" role="separator" aria-orientation="vertical"
              aria-label="Resize the panel" title="Drag to resize · double-click to collapse"></div>
@@ -91,29 +92,66 @@
     <section id="drawer" aria-label="Log and timeline">
         <div id="drawer-handle" role="separator" aria-orientation="horizontal"
              aria-label="Resize the drawer" title="Drag to resize · double-click to collapse"></div>
-        <div id="drawer-toolbar">
+        <!-- The transport row: the only row left when the drawer is collapsed. -->
+        <div id="drawer-transport">
             <button id="drawer-collapse" type="button" aria-expanded="true"
                     aria-controls="drawer-body" title="Collapse drawer">
                 <span class="fold-chevron" aria-hidden="true">▾</span><span class="sr-only">Collapse drawer</span>
             </button>
+            <div class="transport-buttons" role="group" aria-label="Playback">
+                <button id="tr-prev" type="button" aria-label="Previous transition"
+                        title="Previous transition (←)">|◀&#xFE0E;</button>
+                <button id="tr-play" type="button" aria-label="Play at 1×">▶&#xFE0E;</button>
+                <button id="tr-next" type="button" aria-label="Next transition"
+                        title="Next transition (→)">▶&#xFE0E;|</button>
+            </div>
+            <!-- "● Live" (inert), or "Jump to live ⏭" in the past; "● End" /
+                 "Jump to end ⏭" for an opened file. One fixed width. -->
+            <button id="tr-jump" type="button" data-state="none" hidden></button>
+            <div id="overview" title="Click or drag to move the cursor">
+                <div id="ov-track"><div id="ov-played"></div></div>
+                <div id="ov-marks"></div>
+                <div id="ov-thumb" hidden title="The Timeline's window · drag to pan, drag an edge to zoom">
+                    <div class="ov-edge" data-edge="left"></div><div class="ov-edge" data-edge="right"></div>
+                </div>
+                <div id="ov-knob"></div>
+            </div>
+            <!-- The cursor's time; a narrow drawer drops the µs, then the ms. -->
+            <span id="tr-clock" title="The moment shown"><span class="tr-main"></span><span class="tr-ms"></span><span class="tr-micro"></span></span>
+        </div>
+        <div id="drawer-toolbar">
             <div class="drawer-tabs" role="tablist" aria-label="View">
                 <button id="drawer-tab-log" type="button" role="tab" aria-selected="false"
                         aria-controls="drawer-log">Log</button>
                 <button id="drawer-tab-timeline" type="button" role="tab" aria-selected="true"
                         aria-controls="drawer-timeline">Timeline</button>
             </div>
-            <span id="drawer-chip" data-state="on">
-                <span class="drawer-chip-dot" aria-hidden="true"></span><span id="drawer-chip-text"><span class="drawer-chip-label">Recording · </span><span class="drawer-chip-stats">waiting for the robot</span></span>
-            </span>
-            <span id="drawer-note" hidden></span>
             <!-- One filter for both tabs: node and subtree names. -->
-            <label id="drawer-filter-label"><span class="drawer-word">Filter</span>
-                <input id="drawer-filter" type="search" placeholder="node or subtree"
+            <label id="drawer-filter-label"><span class="sr-only">Filter</span>
+                <input id="drawer-filter" type="search" placeholder="⌕ Filter"
                        title="Filter by node or subtree name"
                        autocomplete="off" spellcheck="false">
             </label>
-            <!-- Save: everything kept as one .zip (drawer.js). Greyed out with recording off. -->
-            <button id="drawer-save" type="button" disabled>Save</button>
+            <!-- The Timeline's window length, on its tab only (timeline.js). -->
+            <div id="tl-zoom" role="group" aria-label="Timeline window">
+                <button id="tl-zoom-out" type="button" aria-label="Zoom out"
+                        title="Zoom out · Ctrl+wheel zooms, Shift+wheel or drag pans">−</button>
+                <span id="tl-window" title="The Timeline's window"></span>
+                <button id="tl-zoom-in" type="button" aria-label="Zoom in"
+                        title="Zoom in · Ctrl+wheel zooms, Shift+wheel or drag pans">+</button>
+                <button id="tl-fit" type="button" aria-label="Zoom to fit"
+                        title="Zoom to fit: everything kept (\)">⤢</button>
+            </div>
+            <span id="drawer-note" hidden></span>
+            <!-- The recorder pill: what is kept, and Save (everything kept as
+                 one .zip, drawer.js) as its right half. Greyed out with
+                 recording off. -->
+            <div id="drawer-recorder">
+                <span id="drawer-chip" data-state="on">
+                    <span class="drawer-chip-dot" aria-hidden="true"></span><span id="drawer-chip-text"><span class="drawer-chip-label">Recording</span><span class="drawer-chip-stats">waiting for the robot</span></span>
+                </span>
+                <button id="drawer-save" type="button" disabled>Save</button>
+            </div>
         </div>
         <div id="drawer-body">
             <!-- Only the rows in view exist (drawer.js); #log-rows is as tall
@@ -125,25 +163,14 @@
                 <div id="log-rows"><div id="log-dropped" hidden></div></div>
                 <p id="log-empty" hidden></p>
             </div>
-            <!-- Filled by timeline.js: the axis and its controls stay at the
-                 top, then a section per subtree, each header sticking while
-                 its section scrolls under it. -->
+            <!-- Filled by timeline.js: the axis stays at the top, then a
+                 section per subtree, each header sticking while its section
+                 scrolls under it. -->
             <div id="drawer-timeline" role="tabpanel" aria-labelledby="drawer-tab-timeline">
                 <div class="tl-head">
-                    <div class="tl-controls">
-                        <!-- Where the kept history starts, when it is in the window. -->
-                        <span id="tl-dropped-note" hidden></span>
-                        <button id="tl-zoom-out" type="button" aria-label="Zoom out"
-                                title="Zoom out · Ctrl+wheel zooms, Shift+wheel or drag pans">−</button>
-                        <span id="tl-window"></span>
-                        <button id="tl-zoom-in" type="button" aria-label="Zoom in"
-                                title="Zoom in · Ctrl+wheel zooms, Shift+wheel or drag pans">+</button>
-                        <button id="tl-prev" type="button" aria-label="Previous transition"
-                                title="Previous transition">|◀&#xFE0E;</button>
-                        <button id="tl-next" type="button" aria-label="Next transition"
-                                title="Next transition">▶&#xFE0E;|</button>
-                        <button id="tl-play" type="button" aria-label="Play at 1×">▶&#xFE0E;</button>
-                    </div>
+                    <!-- Where the kept history starts, when it is in the window:
+                         in the name column, beside the axis. -->
+                    <span id="tl-dropped-note" hidden></span>
                     <div id="tl-ruler" title="Click or drag to move the playhead">
                         <div id="tl-ruler-track"></div>
                         <div id="tl-grip" hidden></div>
@@ -169,12 +196,16 @@
         <kbd>F</kbd> Find the action | <kbd>R</kbd> Reset view</div>
 
     <svg id="canvas"></svg>
+    <!-- While the cursor is in the past (body.viewing-past): an amber edge
+         round the visible canvas. -->
+    <div id="past-edge" aria-hidden="true"></div>
 
     <script src="/renderers.js"></script>
     <script src="/recording.js"></script>
     <script src="/cursor.js"></script>
     <script src="/drawer.js"></script>
     <script src="/timeline.js"></script>
+    <script src="/overview.js"></script>
     <script src="/app.js"></script>
 </body>
 </html>

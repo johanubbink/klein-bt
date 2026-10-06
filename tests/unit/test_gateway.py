@@ -12,6 +12,7 @@ import io
 import json
 import socket
 import sys
+import time
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -19,7 +20,7 @@ from unittest import mock
 
 import msgpack
 
-from klein import cli, gateway, layout, mock_robot
+from klein import btlog, cli, gateway, layout, mock_robot
 from klein.cli import _port_available
 from klein.gateway import KleinGateway
 from klein.groot2_protocol import (REQ_FULLTREE, REQ_STATUS, TRANSITION_BUFFER_MAX,
@@ -189,6 +190,266 @@ class PortsTest(GatewayTestCase):
                     + node + '</BehaviorTree></root>')
                 self.assertEqual(list(self.gw.tree_structure["ports"].items()), expected)
 
+    def bindings(self, xml):
+        """``{uid: [(port, dir, board, key)]}`` for every node with a binding."""
+        self.gw._parse_layout(xml)
+        found = {}
+
+        def walk(node):
+            if node["bindings"]:
+                found[node["uid"]] = [(b["port"], b["dir"], b["board"], b["key"])
+                                      for b in node["bindings"]]
+            for child in node["children"]:
+                walk(child)
+        walk(self.gw.tree_structure)
+        return found
+
+    def test_bindings_resolve_to_the_board_holding_the_key(self):
+        # References below are BehaviorTree.CPP files. The directions come from
+        # each model's input_port/output_port/inout_port (xml_parsing.cpp :: addNodeModelToXML).
+        t11 = (Path(__file__).parents[1] / "fixtures" / "t11_filelogger2.btlog").read_bytes()
+        cases = {
+            "crossdoor (mock)": (mock_robot.CROSSDOOR.xml, {
+                # Script code: `x:=` writes x (script_node.h :: loadExecutor, operators.hpp :: ExprAssignment).
+                2: [("code", "out", "MainTree", "door_open")],
+                3: [("pos", "out", "MainTree", "robot_position")],
+                # A hook reads its bare names on the node's own board (bt_factory.cpp :: instantiateTreeNode).
+                6: [("_skipIf", "in", "MainTree", "door_open")],
+                # A {key} remap names the parent's key (xml_parsing.cpp :: recursivelyCreateSubtree);
+                # nothing inside writes or reads it, so the direction is unknown.
+                7: [("door_open", "inout", "MainTree", "door_open")],
+                # Not remapped: created on the subtree's own board (Blackboard::createEntryImpl).
+                11: [("_onSuccess", "out", "DoorClosed::7", "lock_status")],
+                # speed="0.35", timeout_ms="2500" are literals: no entry.
+                13: [("goal", "in", "MainTree", "goal")],
+            }),
+            "patrol (mock)": (mock_robot.PATROL.xml, {
+                # The remap's direction is what the subtree does with it: MoveTo reads.
+                3: [("waypoint", "in", "PatrolTree", "next_waypoint")],
+                # {waypoint} is remapped, so it lives on the parent (Blackboard::createEntryImpl).
+                5: [("goal", "in", "PatrolTree", "next_waypoint")],
+                # dwell_msec="1500" on the SubTree is a literal stored on the
+                # subtree's board (recursivelyCreateSubtree), and found there first
+                # (Blackboard::getEntry).
+                6: [("msec", "in", "VisitWaypoints::3", "dwell_msec")],
+            }),
+            "t11 (real FULLTREE)": (btlog.read_btlog(t11).xml, {
+                2: [("code", "out", "MainTree", "door_open")],
+                3: [("pos", "out", "MainTree", "pos_2D"),
+                    ("vec_double", "out", "MainTree", "doubles"),
+                    ("vec_string", "out", "MainTree", "strings"),
+                    ("waypoints", "out", "MainTree", "waypoints")],
+                # The inner _onSuccess writes door_open, so the remap is out.
+                7: [("door_open", "out", "MainTree", "door_open")],
+                8: [("_onSuccess", "out", "MainTree", "door_open")],
+            }),
+            "remap kinds": (REMAP_KINDS_XML, {
+                2: [("code", "out", "Main", k) for k in ("a", "b", "c", "root_k", "target", "speed")],
+                3: [("x", "inout", "Main", "a")],
+                # x := x + 1 reads and writes; x is remapped to {a}.
+                5: [("code", "inout", "Main", "a"),
+                    # _autoremap sends b to the parent (Blackboard::getEntry, createEntryImpl)...
+                    ("code", "inout", "Main", "b"),
+                    # ...but never a private key (blackboard.cpp :: IsPrivateKey).
+                    ("code", "out", "Inner::3", "_p"),
+                    ("code", "out", "Main", "lit2"),
+                    # A literal port stays local even with _autoremap (recursivelyCreateSubtree).
+                    ("code", "in", "Inner::3", "lit")],
+                # `=` assigns; `==` compares (script_tokenizer.cpp matchTwoCharOp).
+                6: [("code", "out", "Main", "c"), ("code", "in", "Inner::3", "num"),
+                    ("_skipIf", "in", "Main", "b")],
+                # {@k} goes to the root board (Blackboard::getEntry); {=} is {port}
+                # (recursivelyCreateSubtree); z="=" is a literal on a SubTree.
+                7: [("w", "out", "Main", "root_k"), ("y", "out", "Main", "y")],
+                9: [("code", "out", "Main", "y"), ("code", "out", "Main", "root_k"),
+                    ("code", "out", "Main", "g"), ("code", "out", "Inner2::7", "target"),
+                    ("code", "out", "Inner2::7", "speed")],
+                # {=} and = on an ordinary node are the port's own name
+                # (TreeNode::getRemappedKey); label="plain" is a literal.
+                10: [("target", "in", "Inner2::7", "target"),
+                     ("speed", "in", "Inner2::7", "speed"),
+                     ("note", "out", "Main", "g")],
+                # output_key holds a key name (set_blackboard_node.h tick).
+                11: [("output_key", "out", "Main", "sb"), ("value", "in", "Main", "a")],
+            }),
+            "hooks and key-name ports": (HOOKS_XML, {
+                2: [("code", "out", "Main", k) for k in ("k", "e", "u", "f1", "f2")],
+                # A SubTree's hooks run on the parent's board: they go into its
+                # config, whose blackboard is the parent's (XMLParser::PImpl::createNodeFromXML).
+                3: [("_skipIf", "in", "Main", "k"), ("_while", "in", "Main", "k"),
+                    ("_onSuccess", "out", "Main", "done")],
+                4: [("code", "out", "S::3", "inner")],
+                5: [("code", "in", "Main", "k")],
+                6: [("if", "in", "Main", "e")],           # else="FAILURE" is a literal
+                7: [("_failureIf", "in", "Main", "f1"), ("_successIf", "in", "Main", "f2"),
+                    ("_onHalted", "out", "Main", "hh"), ("_onFailure", "out", "Main", "ff"),
+                    ("_post", "out", "Main", "pp")],
+                # Plain key names (unset_blackboard_node.h, updated_action.cpp,
+                # updated_decorator.cpp).
+                8: [("key", "out", "Main", "u")],
+                10: [("entry", "in", "Main", "k")],
+                11: [("entry", "in", "Main", "e")],
+                15: [("entry", "in", "Main", "k")],
+            }),
+        }
+        for label, (xml, expected) in cases.items():
+            with self.subTest(label):
+                self.assertEqual(self.bindings(xml), expected)
+
+    def test_script_references(self):
+        cases = [
+            ("door_open:=false", [("door_open", "out")]),
+            ("a = b == c", [("a", "out"), ("b", "in"), ("c", "in")]),
+            ("n += 1; m != 2 && m >= 0", [("n", "inout"), ("m", "in"), ("m", "in")]),
+            # Strings, numbers, booleans and ALL_CAPS enums are not keys.
+            ("msg := 'x := y'; ok := true", [("msg", "out"), ("ok", "out")]),
+            ("state == RUNNING ? 0x1F : 2.5e3", [("state", "in")]),
+            ("@g := 3foo", [("@g", "out")]),
+        ]
+        for code, expected in cases:
+            with self.subTest(code):
+                self.assertEqual([r[:2] for r in layout.script_references(code)], expected)
+
+    def test_each_binding_says_where_its_port_names_the_key(self):
+        """``at``: the braces of a {key} or a remap's {outer}, a whole `=` or
+        {=}, a key-name port trimmed, and each name in a script, also inside a
+        subtree whose two names are remapped to other keys outside."""
+        self.gw._parse_layout(SPANS_XML)
+        found = {}
+
+        def walk(node):
+            for b in node["bindings"]:
+                found.setdefault(node["uid"], []).append((b["port"], b["key"], b["at"]))
+            for child in node["children"]:
+                walk(child)
+        walk(self.gw.tree_structure)
+        self.assertEqual(found, {
+            2: [("p", "a", [[1, 4]]), ("q", "b", [[0, 3]])],
+            3: [("code", "a", [[0, 1], [9, 10]]), ("code", "b", [[5, 6]])],
+            4: [("output_key", "sb", [[1, 3]]), ("value", "a", [[0, 3]])],
+            5: [("target", "target", [[0, 1]]), ("speed", "speed", [[0, 3]])],
+        })
+
+    def test_binding_spans_name_their_key_in_every_tree(self):
+        """In every mock tree and fixture: each span lies within its port's
+        value and reads as a name, {name}, @name, = or {=}; on the node's own
+        board that name (less an @) is the key (= and {=}: the port)."""
+        trees = {name: tree.xml for name, tree in mock_robot.TREES.items()}
+        for path in sorted((Path(__file__).parents[1] / "fixtures").glob("*.btlog")):
+            trees[path.name] = btlog.read_btlog(path.read_bytes()).xml
+        trees.update(remap_kinds=REMAP_KINDS_XML, hooks=HOOKS_XML, spans=SPANS_XML)
+        for label, xml in trees.items():
+            self.gw._parse_layout(xml)
+            spans = 0
+
+            def walk(node, board):
+                nonlocal spans
+                for b in node["bindings"]:
+                    value = node["ports"][b["port"]]
+                    for start, end in b["at"]:
+                        spans += 1
+                        with self.subTest(label, uid=node["uid"], binding=b):
+                            self.assertTrue(0 <= start < end <= len(value))
+                            name = value[start:end]
+                            if name[:1] == "{" and name[-1:] == "}":
+                                name = name[1:-1]
+                            self.assertRegex(name, r"^(=|@?[A-Za-z_]\w*)$")
+                            if b["board"] == board:
+                                self.assertEqual(b["key"], b["port"] if name == "=" else name.lstrip("@"))
+                inner = node.get("board", board) if node.get("is_subtree_root") else board
+                for child in node["children"]:
+                    walk(child, inner)
+            walk(self.gw.tree_structure, self.gw.tree_structure["board"])
+            self.assertGreater(spans, 0, label)
+
+
+# Real BehaviorTree.CPP 4 FULLTREE output (WriteTreeToXML, after createTree;
+# names dropped) for a tree using every remap kind. Running it, BT.CPP held
+# exactly these keys: "" (Main): a b c g lit2 root_k sb speed target y;
+# Inner::3: _p lit num; Inner2::7: speed target z (z is an unread literal).
+# Two edits: FULLTREE drops `_autoremap` (a reserved attribute,
+# basic_types.cpp :: IsReservedAttribute), so it is put back here, and the SetBlackboard model is
+# copied from the builtins t11 publishes. Root Script's target:= and speed:=
+# land on Main, Inner2's on Inner2::7: no autoremap there.
+REMAP_KINDS_XML = """<root BTCPP_format="4">
+  <BehaviorTree ID="Main" _fullpath="">
+    <Sequence _uid="1">
+      <Script _uid="2" code="a:=1; b:=2; c:=3; root_k:=7; target:='t'; speed:='s'"/>
+      <SubTree ID="Inner" _fullpath="Inner::3" _uid="3" _autoremap="true" num="5" lit="hello" x="{a}"/>
+      <SubTree ID="Inner2" _fullpath="Inner2::7" _uid="7" w="{@root_k}" z="=" y="{=}"/>
+      <SetBlackboard _uid="11" output_key="sb" value="{a}"/>
+    </Sequence>
+  </BehaviorTree>
+  <BehaviorTree ID="Inner" _fullpath="Inner::3">
+    <Sequence _uid="4">
+      <Script _uid="5" code="x := x + 1; b := b + 1; _p := 1; lit2 := lit"/>
+      <Script _uid="6" code="c = num" _skipIf="b == 99"/>
+    </Sequence>
+  </BehaviorTree>
+  <BehaviorTree ID="Inner2" _fullpath="Inner2::7">
+    <Sequence _uid="8">
+      <Script _uid="9" code="y := 1; w := 4; @g := 3; target := 'u'; speed := 'v'"/>
+      <Report _uid="10" target="{=}" speed="=" label="plain" note="{@g}"/>
+    </Sequence>
+  </BehaviorTree>
+  <TreeNodesModel>
+    <Action ID="Report">
+      <input_port name="label" type="std::string"/>
+      <input_port name="speed" type="std::string"/>
+      <output_port name="note" type="int"/>
+      <input_port name="target" type="std::string"/>
+    </Action>
+    <Action ID="SetBlackboard">
+      <inout_port name="output_key" type="BT::AnyTypeAllowed"/>
+      <input_port name="value" type="BT::AnyTypeAllowed"/>
+    </Action>
+  </TreeNodesModel>
+</root>"""
+
+
+# A subtree's script names two keys remapped to other names outside, beside a
+# {key} with an outer space, a key-name port with spaces, `=` and {=}.
+SPANS_XML = """<root BTCPP_format="4">
+  <BehaviorTree ID="Main" _fullpath="">
+    <Sequence _uid="1">
+      <SubTree ID="S" _fullpath="S::2" _uid="2" p=" {a}" q="{b}"/>
+      <SetBlackboard _uid="4" output_key=" sb " value="{a}"/>
+      <Report _uid="5" target="=" speed="{=}"/>
+    </Sequence>
+  </BehaviorTree>
+  <BehaviorTree ID="S" _fullpath="S::2">
+    <Script _uid="3" code="p := q + p"/>
+  </BehaviorTree>
+</root>"""
+
+
+# Real BehaviorTree.CPP 4 FULLTREE output for every hook and the builtins whose
+# port holds a script or a key name (names and <TreeNodesModel> dropped).
+# After a run BT.CPP held "" (Main): done e f1 f2 k pp; S::3: inner (u was
+# unset; _onHalted and _onFailure never ran).
+HOOKS_XML = """<root BTCPP_format="4">
+  <BehaviorTree ID="Main" _fullpath="">
+    <Sequence _uid="1">
+      <Script _uid="2" code="k:=1; e:=0; u:=1; f1:=false; f2:=false"/>
+      <SubTree ID="S" _fullpath="S::3" _uid="3" _skipIf="k == 9" _while="k &lt; 5" _onSuccess="done := true"/>
+      <ScriptCondition _uid="5" code="k != 0"/>
+      <Precondition _uid="6" if="e == 0" else="FAILURE">
+        <AlwaysSuccess _uid="7" _failureIf="f1" _successIf="f2" _onHalted="hh := 1" _onFailure="ff := 1" _post="pp := 1"/>
+      </Precondition>
+      <UnsetBlackboard _uid="8" key="u"/>
+      <ForceSuccess _uid="9"><WasEntryUpdated _uid="10" entry="k"/></ForceSuccess>
+      <SkipUnlessUpdated _uid="11" entry="e"><AlwaysSuccess _uid="12"/></SkipUnlessUpdated>
+      <ForceSuccess _uid="13">
+        <Timeout _uid="14" msec="5">
+          <WaitValueUpdate _uid="15" entry="k"><AlwaysSuccess _uid="16"/></WaitValueUpdate>
+        </Timeout>
+      </ForceSuccess>
+    </Sequence>
+  </BehaviorTree>
+  <BehaviorTree ID="S" _fullpath="S::3">
+    <Script _uid="4" code="inner := 1"/>
+  </BehaviorTree>
+</root>"""
 
 MODEL_LESS_XML = """<root BTCPP_format="4" main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
@@ -321,7 +582,7 @@ class StaticAssetsTest(GatewayTestCase):
     def test_recording_model_scripts_served_and_packaged(self):
         pyproject = (Path(__file__).resolve().parents[2] / "pyproject.toml").read_text()
         html = self.gw._static["/index.html"][0].decode()
-        for name in ("recording.js", "cursor.js", "drawer.js", "timeline.js"):
+        for name in ("recording.js", "cursor.js", "drawer.js", "timeline.js", "overview.js"):
             with self.subTest(name):
                 r = self.request(f"/{name}")
                 self.assertEqual(r.status_code, 200)
@@ -814,11 +1075,11 @@ class RecordingGatewayTest(unittest.IsolatedAsyncioTestCase):
     pollers with ``_request`` stubbed by ``FakeRobot``. No dashboard is
     connected in any of these: a recording gateway polls regardless."""
 
-    def make_gateway(self, record=True):
+    def make_gateway(self, record=True, **caps):
         patch = mock.patch.object(gateway, "POLL_INTERVAL", 0)
         patch.start()
         self.addCleanup(patch.stop)
-        return new_gateway(self, recording=Recording() if record else None)
+        return new_gateway(self, recording=Recording(**caps) if record else None)
 
     async def run_gateway(self, gw, robot, blackboard=False):
         """Handshake, then the status poller (and optionally the blackboard
@@ -873,13 +1134,34 @@ class RecordingGatewayTest(unittest.IsolatedAsyncioTestCase):
     async def test_blackboard_polls_interleave_and_are_recorded(self):
         gw = self.make_gateway()
         robot = FakeRobot(limit=30)
-        await self.run_gateway(gw, robot, blackboard=True)
+        gw.clients = {object()}
+        frames = await self.run_gateway(gw, robot, blackboard=True)
         seq = self.seq(robot)
         self.assertIn("B", seq)
         self.assertRegex(seq.replace("B", ""), r"^TrS(St)+S?$")
         track = gw.recording.segments[0].blackboard
         self.assertIsNotNone(track.t_start)
         self.assertEqual(set(track.at(gw.recording.head + 10**6)), {"MainTree"})
+        # Each frame is stamped with klein's clock when its reply arrived.
+        ts = [f["t"] for f in frames if f["type"] == "blackboard"]
+        self.assertGreater(len(ts), 1)
+        self.assertEqual(ts, sorted(ts))
+        self.assertLess(ts[0], ts[-1])
+        self.assertLessEqual(ts[-1], time.monotonic() * 1e6)
+
+    async def test_a_blackboard_sample_is_evicted_at_once(self):
+        """Over the blackboard cap, a sample is evicted when it is stored, not
+        at the next drain: whatever runs between (a dashboard connecting and
+        getting its backfill's sizes) never sees more than the cap."""
+        cap = 6                             # bytes: the base "n" and a change or two
+        gw = self.make_gateway(bb_max_bytes=cap)
+        robot = FakeRobot(limit=40)
+        seen = []
+        robot.on_request = {n: lambda _r: seen.append(gw.recording.bytes_used()[1])
+                            for n in range(1, 41)}
+        await self.run_gateway(gw, robot, blackboard=True)
+        self.assertTrue(gw.recording.blackboard_capped)
+        self.assertLessEqual(max(seen), cap, seen)
 
     async def test_a_tree_swap_starts_a_segment_with_a_new_layout(self):
         gw = self.make_gateway()

@@ -1,13 +1,13 @@
 """The two panels around the canvas, the bottom drawer and the left sidebar, and
-the camera that frames the canvas between them; and the drawer's recording chip.
+the camera that frames the canvas between them; and the drawer's recorder pill.
 
 Checked in a real browser (Playwright) against the mock robot. Each panel
 drags to resize within its clamps, keeps its size and collapsed state across a
 reload, collapses by double-click or its fold button, and falls back to its
 default when storage throws; R and F frame the space the panels leave, and
-banners stay over it. The chip shows the kept recording, its size-limit
-notes, and keeps its numbers in a narrow window. Skipped when Playwright is
-missing.
+banners stay over it. The recorder pill shows the kept recording (its tooltip
+the whole summary), its size-limit notes, and keeps its numbers in a narrow
+window. Skipped when Playwright is missing.
 """
 import re
 import unittest
@@ -20,13 +20,14 @@ from tests.ui import DashboardCase
 
 SHOTS = "drawer"                    # screenshot group (KLEIN_SHOTS=1)
 WIDTH, HEIGHT = 1400, 900
-MIN_HEIGHT = 49                     # the 48 px toolbar plus the drawer's top border
-STRIP = 49                          # the collapsed sidebar: as wide as that toolbar is tall
+MIN_HEIGHT = 49                     # the 48 px transport row plus the drawer's top border: collapsed
+TAB_ROW = 48                        # the tab row under it, shown only expanded
+STRIP = 49                          # the collapsed sidebar: as wide as that row is tall
 
 # Per panel: its default, sizes to drag to, the clamps (and a drag past each),
 # a smaller window and the clamp there, its handle, fold button and collapsed size.
 PANELS = {
-    "drawer": dict(default=300, sizes=(200, 450, 650), min=MIN_HEIGHT, under=10,
+    "drawer": dict(default=300, sizes=(200, 450, 650), min=MIN_HEIGHT + TAB_ROW, under=10,
                    max=int(HEIGHT * 0.8), over=HEIGHT - 5, small=(WIDTH, 600), small_max=480,
                    handle="#drawer-handle", button="#drawer-collapse", collapsed=MIN_HEIGHT,
                    kept=350, dragged=250),
@@ -231,6 +232,9 @@ class PanelsTest(_PanelsCase):
                 g = self.assert_size(panel, p["collapsed"], "collapsed")
                 self.assertTrue(g["collapsed"][panel])
                 self.assertEqual(b.page.get_attribute(p["button"], "aria-expanded"), "false")
+                if panel == "drawer":               # the strip is the transport row alone
+                    self.assertTrue(b.page.is_visible("#drawer-transport"))
+                    self.assertFalse(b.page.is_visible("#drawer-toolbar"))
                 if panel == "sidebar":              # the strip keeps only the fold button
                     self.assertFalse(b.page.is_visible("#sidebar-header"))
                     self.assertFalse(b.page.is_visible("#bb-panel"))
@@ -401,17 +405,21 @@ class CameraTest(_PanelsCase):
 
 
 class ChipTest(_PanelsCase):
-    """The drawer's recording chip."""
+    """The drawer's recorder pill (#drawer-chip and Save)."""
 
     def test_the_chip_shows_the_kept_recording(self):
         b = self.browser
-        b.page.wait_for_function("document.getElementById('drawer-chip-text').textContent"
+        b.page.wait_for_function("document.getElementById('drawer-chip').title"
                                  ".includes('transitions')")
-        text, count, note = b.page.evaluate(
-            "() => [document.getElementById('drawer-chip-text').textContent,"
+        text, shown, count, note = b.page.evaluate(
+            "() => [document.getElementById('drawer-chip').title,"
+            " [...document.querySelectorAll('#drawer-chip-text > span')].map(e => e.textContent),"
             " window.kleinDebug().segments.reduce((n, s) => n + s.headSeq - s.startSeq, 0),"
             " document.getElementById('drawer-note').hidden]")
         self.assertRegex(text, r"^Recording · last \d+ s · \d+(\.\d)?k? transitions · \d+ kB$")
+        # The pill itself: the span kept and the size, as in the tooltip.
+        span, size = re.match(r"Recording · last (\d+ s) · .* · (\d+ kB)$", text).groups()
+        self.assertEqual(shown, ["Recording", f"{span} · {size}"])
         shown = re.search(r"· ([\d.]+)(k?) transitions", text)
         self.assertAlmostEqual(float(shown.group(1)) * (1000 if shown.group(2) else 1), count,
                                delta=max(30, count * 0.06))     # a few polls apart
@@ -464,8 +472,9 @@ class ChipTest(_PanelsCase):
         ])
 
     def test_a_narrow_window_keeps_the_chips_numbers(self):
-        """At 1000 px with the sidebar shown, a capped chip loses its note first
-        and then "Recording · ", never the numbers; the titles hold it all."""
+        """At 1000 px with the sidebar shown, a capped pill loses its note first
+        and then "Recording", never the numbers; the titles hold it all. Both
+        drawer rows stay on one line, nothing overlapping."""
         b = self.browser
         b.page.set_viewport_size({"width": 1000, "height": HEIGHT})
         try:
@@ -491,27 +500,70 @@ class ChipTest(_PanelsCase):
                 chipTitle: document.getElementById('drawer-chip').title,
                 noteTitle: note.title, noteHidden: note.hidden,
                 text: document.getElementById('drawer-chip-text').textContent,
+                // Every item of both rows: its box, in order.
+                rows: ['drawer-transport', 'drawer-toolbar'].map(id =>
+                  [...document.getElementById(id).querySelectorAll(':scope > :not([hidden])')]
+                    .map(e => box(e).toJSON())),
               };
             }""")
             b.screenshot(SHOTS, "narrow_1000_capped")
+            # At 700 px (a 380 px drawer) both rows still fit, in both tabs,
+            # live and in the past: the page never scrolls sideways.
+            b.page.set_viewport_size({"width": 700, "height": HEIGHT})
+            fits = b.page.evaluate(_FITS)
         finally:
             b.page.reload()
             b.page.set_viewport_size({"width": WIDTH, "height": HEIGHT})
-        self.assertEqual(chip["statsText"], "last 10 min · 3.5M transitions · 244 MB")
+        for tab, past, page_width, window, rows in fits:
+            with self.subTest(tab=tab, past=past):
+                self.assertLessEqual(page_width, window, "the page scrolls sideways")
+                for content, room in rows:
+                    self.assertLessEqual(content, room, "a drawer row runs past its edge")
+        self.assertEqual(chip["statsText"], "10 min · 244 MB")
         self.assertFalse(chip["statsCut"], "the numbers were cut off")
         self.assertLessEqual(chip["chipRight"], chip["drawerRight"])
-        self.assertEqual(chip["text"], "Recording · last 10 min · 3.5M transitions · 244 MB")
-        self.assertEqual(chip["chipTitle"], chip["text"])
+        self.assertEqual(chip["text"], "Recording10 min · 244 MB")
+        self.assertEqual(chip["chipTitle"], "Recording · last 10 min · 3.5M transitions · 244 MB")
+        for row in chip["rows"]:
+            for a, b_ in zip(row, row[1:]):
+                self.assertLessEqual(a["right"], b_["left"] + 0.5, "side by side, no overlap")
+                self.assertAlmostEqual(a["top"] + a["height"] / 2, b_["top"] + b_["height"] / 2,
+                                       delta=1, msg="on one line")
+            self.assertLessEqual(row[-1]["right"], chip["drawerRight"])
         self.assertFalse(chip["noteHidden"])
         self.assertEqual(chip["noteTitle"], "transitions: last 10 min (size limit) · "
                                             "blackboard history: last 3 min (size limit)")
+
+
+# Per tab, live and paused: the page's scroll width, the window's, and each
+# drawer row's content width (its last item's right edge too) and room.
+_FITS = """async () => {
+  const frame = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  const out = [];
+  for (const tab of ['timeline', 'log']) {
+    document.getElementById('drawer-tab-' + tab).click();
+    for (const past of [false, true]) {
+      const s = recordingStore.recording.segments.at(-1);
+      seek(past ? KleinCursor.pause(s.id, s.headSeq - 1) : KleinCursor.live());
+      await frame();
+      out.push([tab, past, document.scrollingElement.scrollWidth, innerWidth,
+        ['drawer-transport', 'drawer-toolbar'].map(id => {
+          const row = document.getElementById(id), r = row.getBoundingClientRect();
+          const items = [...row.querySelectorAll(':scope > :not([hidden])')];
+          const right = Math.max(...items.map(e => e.getBoundingClientRect().right));
+          return [Math.max(row.scrollWidth, right - r.left), row.clientWidth];
+        })]);
+    }
+  }
+  return out;
+}"""
 
 
 # -- size limits ------------------------------------------------------------ #
 _CHIP = """() => {
   const rec = recordingStore.recording;
   return {
-    text: document.getElementById('drawer-chip-text').textContent,
+    text: document.getElementById('drawer-chip').title,
     note: document.getElementById('drawer-note').textContent,
     noteHidden: document.getElementById('drawer-note').hidden,
     head: rec ? rec.head : null, tMin: rec ? rec.tMin : null,
@@ -549,6 +601,13 @@ class ForcedCapTest(DashboardCase):
     def make_gateway(cls, robot_port):
         return CappedGatewayProbe(robot_port, debug=True)
 
+    @staticmethod
+    def expected_note(chip):
+        """Both "(size limit)" notes, worded from the store as ``_CHIP`` read it."""
+        bb_since = min(t for t in chip["bbStarts"] if t is not None)
+        return (f"transitions: last {fmt_span(chip['head'] - chip['tMin'])} (size limit) · "
+                f"blackboard history: last {fmt_span(chip['head'] - bb_since)} (size limit)")
+
     def test_caps_show_notes_and_head_bytes_are_post_eviction(self):
         b, gw = self.browser, self.gw
         with gw.watch() as ws:
@@ -557,7 +616,14 @@ class ForcedCapTest(DashboardCase):
                 "(() => { const r = recordingStore.recording;"
                 " return r && r.capped.includes('transitions') && r.capped.includes('blackboard'); })()",
                 timeout=40000)
-            chip = b.page.evaluate(_CHIP)
+            # The pill shows what the last render painted; the store may have
+            # moved on since (a head, an eviction). Read again for a few frames
+            # until what is painted matches the store read in the same task.
+            for _ in range(20):
+                chip = b.page.evaluate(_CHIP)
+                if chip["note"] == self.expected_note(chip):
+                    break
+                b.next_frame()
             b.screenshot(SHOTS, "chip_capped")
             heads = ws.of_type("head")
             self.assertTrue(heads)
@@ -576,10 +642,7 @@ class ForcedCapTest(DashboardCase):
             span = fmt_span(chip["head"] - chip["tMin"])
             bb_since = min(t for t in chip["bbStarts"] if t is not None)
             self.assertFalse(chip["noteHidden"])
-            self.assertEqual(chip["note"],
-                             f"transitions: last {span} (size limit) · "
-                             f"blackboard history: last {fmt_span(chip['head'] - bb_since)} "
-                             "(size limit)")
+            self.assertEqual(chip["note"], self.expected_note(chip))
             self.assertTrue(chip["text"].startswith(f"Recording · last {span} · "), chip)
             # The browser's blackboard start equals the gateway's.
             state = gw.require_debug_state()

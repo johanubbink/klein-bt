@@ -33,6 +33,21 @@ class ReplayVectorsTest(unittest.TestCase):
         self.assertGreater(len(data["cases"]), 1000)
         assert_vectors_pass(self, data)
 
+    def test_bb_change_answers_as_the_harness_model(self):
+        data = make_vectors.bb_change_vectors()
+        got = {c["name"]: c["expect"] for c in data["cases"] if "bbChange" in c["name"]}
+        # The first sample (not a change), the 3 s edge exactly and just
+        # inside, and live t.
+        self.assertEqual(got["bb: bbChange Main/phase at +0.0"]["tChange"], None)
+        self.assertEqual(got["bb: bbChange Main/n at +4.5"]["recent"], 4)
+        self.assertEqual(got["bb: bbChange Main/n at +4.499999"]["recent"], 5)
+        self.assertEqual(got["bb: bbChange Main/phase at +6.0"],
+                         {"tChange": make_vectors.T0 + 6_000_000, "recent": 1})
+        # Status frames through addBoards: after a 2.5 s gap, one change.
+        self.assertEqual(got["frames: bbChange Main/phase at +9.5"],
+                         {"tChange": make_vectors.T0 + 9_500_000, "recent": 1})
+        assert_vectors_pass(self, data)
+
 
 if __name__ == "__main__":
     unittest.main()

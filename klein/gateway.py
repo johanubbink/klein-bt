@@ -14,7 +14,7 @@ Everything the browser needs is served from a **single port** (``--port``):
 
 * plain HTTP for the dashboard (``/`` and ``/index.html``), its ``/styles.css``,
   ``/app.js``, ``/renderers.js``, ``/recording.js``, ``/cursor.js``,
-  ``/drawer.js`` and ``/timeline.js``, and the bundled D3.js (``/d3.v7.min.js``), and
+  ``/drawer.js``, ``/timeline.js`` and ``/overview.js``, and the bundled D3.js (``/d3.v7.min.js``), and
 * a WebSocket endpoint (``/ws``) that pushes the unrolled tree layout on connect
   and then broadcasts live status and blackboard frames — and, while recording,
   streams the recording itself (``klein/streaming.py``), and
@@ -94,7 +94,7 @@ _CONTENT_TYPES = {
     ".js": "text/javascript; charset=utf-8",
 }
 _STATIC_FILES = ("index.html", "styles.css", "d3.v7.min.js", "renderers.js", "recording.js",
-                 "cursor.js", "drawer.js", "timeline.js", "app.js")
+                 "cursor.js", "drawer.js", "timeline.js", "overview.js", "app.js")
 _STATIC_ROUTES = {f"/{name}": (name, _CONTENT_TYPES[Path(name).suffix])
                   for name in _STATIC_FILES}
 _INDEX_FALLBACK = b"<!doctype html><h1>klein: index.html missing from package</h1>"
@@ -559,17 +559,22 @@ class KleinGateway:
                 names = self._blackboard_names
                 generation = self._layout_generation
                 reply = await self._request(REQ_BLACKBOARD, self._blackboard_request)
+                received = time.monotonic()
                 if (self._layout_generation == generation
                         and reply and len(reply) >= 2 and reply[0] != b"error"):
                     boards = parse_blackboard(reply[1], names)
                     # Broadcast even when empty, so the dashboard can say so.
+                    # t (klein's clock, µs) times the changes without a recording.
                     self._blackboard_json = json.dumps(
-                        {"type": "blackboard", "data": boards}
+                        {"type": "blackboard", "t": int(received * 1e6), "data": boards}
                     )
                     self._broadcast(self._blackboard_json)
                     if self._armed:
-                        self.recording.add_blackboard(
-                            self._clock.robot_us(time.monotonic()), boards)
+                        now = self._clock.robot_us(received)
+                        self.recording.add_blackboard(now, boards)
+                        # At once, not at the next drain: a dashboard that
+                        # connects in between gets sizes within the caps.
+                        self.recording.evict(now)
             except RobotTimeout:
                 # status_poller reports the outage; values just stop updating.
                 self._timed_out = True

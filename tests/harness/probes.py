@@ -276,13 +276,18 @@ class GatewayProbe(Process):
                              "--no-browser", *self.args]
 
         def ready(port, proc):
+            # Served by this gateway, which says so once it listens: one that
+            # lost its port exits, while whatever took the port answers / too.
+            seen = len(self.log())
+            live = f"live on http://localhost:{port}"
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline and proc.poll() is None:
                 try:
-                    if self.fetch("/", timeout=0.5)[0] == 200:
+                    if live in self.log()[seen:] and self.fetch("/", timeout=0.5)[0] == 200:
                         return
                 except OSError:
-                    time.sleep(0.05)
+                    pass
+                time.sleep(0.05)
             raise RuntimeError(f"gateway never served / on port {port}\n{self.log()[-2000:]}")
 
         launch(self, argv, free_port, ready=ready)
@@ -440,8 +445,9 @@ _READ_CONNECTION = """
 # frame, the second runs after it rendered).
 NEXT_FRAME = "() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))"
 
-# The "Back to live" button on the "Viewing t = …" banner.
-BACK_TO_LIVE = '#banner-stack [data-key="viewing"] .banner-action'
+# The drawer's "Jump to live" button ("Jump to end" for an opened file), in
+# its transport row.
+BACK_TO_LIVE = "#tr-jump"
 
 # Recording frames handed straight to the page's store, then one render.
 _FEED = """(frames) => { for (const f of frames) {
@@ -541,7 +547,7 @@ class BrowserProbe:
         self.page.evaluate(NEXT_FRAME)
 
     def go_live(self):
-        """Back to live (what "Back to live" and Esc do), unless already live."""
+        """Back to live (what "Jump to live" and Esc do), unless already live."""
         self.page.evaluate("() => { if (clock.mode !== 'live') KleinDrawer.goLive(); }")
         self.page.wait_for_function("!document.body.classList.contains('viewing-past')")
 
@@ -588,14 +594,19 @@ class BrowserProbe:
         return {n["uid"]: label_to_state(n["label"])
                 for n in (nodes if nodes is not None else self.nodes()) if n["uid"] is not None}
 
-    def snapshot(self, before_js=None):
+    def snapshot(self, before_js=None, painted=False):
         """The cards, the last status frame the page received, and the dot — read
         in one evaluate, so they are mutually consistent. ``before_js`` (a
         statement) runs first in the same task, e.g. to tamper with the DOM.
 
         Also ``displayed``/``displaySource`` (what ``window.kleinDebug`` says the
         page last painted, ``None`` without it) and ``statusCount`` (status
-        frames received so far; see ``status_frames``)."""
+        frames received so far; see ``status_frames``).
+
+        The page paints on the next animation frame, so ``displayed`` can be
+        several frames older than ``statusCount`` (a 10 ms poll, a loaded
+        machine). ``painted=True`` reads at a moment the page has painted
+        every frame it received (no render queued), so the two agree."""
         script = ("() => {" + (before_js or "") + "; const d = window.kleinDebug;"
                   " const dbg = typeof d === 'function' ? d() : null;"
                   " return { nodes: (" + _READ_NODES + ")(),"
@@ -604,7 +615,11 @@ class BrowserProbe:
                   " displayed: dbg && dbg.displayed, displaySource: dbg && dbg.displaySource,"
                   " frames: window.__kleinProbe.types,"
                   " connection: (" + _READ_CONNECTION + ")() }; }")
-        snap = self.page.evaluate(script)
+        if painted:
+            snap = self.page.wait_for_function(
+                f"() => !renderQueued && ({script})()", polling="raf", timeout=10000).json_value()
+        else:
+            snap = self.page.evaluate(script)
         snap["state"] = self.state(snap["nodes"])
         snap["connection"]["state"] = dot_state(snap["connection"]["classes"])
         last = snap.get("lastStatus") or {}

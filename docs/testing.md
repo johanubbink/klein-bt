@@ -112,7 +112,9 @@ Groot2 request on its own socket, for driving a target without klein.
   datum, name, pill label, classes, stroke), `state()` (`{uid: {status, from}}`
   as painted), `snapshot()` (cards, the last `status` frame the page received,
   `statusCount`, the connection dot, and `kleinDebug`'s
-  `displayed`/`displaySource`, read in one JS task so they agree),
+  `displayed`/`displaySource`, read in one JS task so they agree;
+  `painted=True` reads once no render is queued, so `displayed` is painted
+  from every frame `statusCount` counts, not an animation frame behind),
   `status_frames(first, last)` (status frames by number; the page keeps the
   latest 50, for checks that allow a poll of lag), `klein_debug()`
   (`window.kleinDebug()`), `click`, `drag`, `key`, and
@@ -129,23 +131,26 @@ none), `GATEWAY` (`GatewayProbe` options, or `make_gateway()`; `None` for
 none), `VIEWPORT` and `OPEN` (cards to wait for on a fresh open; `None`
 leaves the page blank). `setUpClass` starts them with class cleanups, so a
 failing set-up leaks no process, and every test fails on an uncaught page
-error.
+error. Its `assert_hover_links(layout, folded=())` hovers every key row and
+card and checks the outlines, port-line accents and linked rows against
+`links(layout)`, which reads them from the layout's `bindings` on its own;
+`PULSES` reads the cards' writer pulses.
 
 ### The debug dump — `model.py`
 
 `Model(dump)` reads a gateway's `GET /debug/state` independently: each
 segment's records, `state_at_seq`, `seq_at(t)`, the cards' `labels`,
-`bb_at(seg, t)`, a node's `intervals`, and (given each segment's layout) the
-Log's `rows`. With it, the dashboard's wording written out again
-(`fmt_time`, `fmt_delta`, `fmt_span`, `card_label`, `names`). The UI tests
-compare the browser with it, the integration tests a saved file.
+`bb_at(seg, t)`, a node's `intervals`, the tree `runs`, and (given each
+segment's layout) the Log's `rows`. With it, the dashboard's wording
+written out again (`fmt_time`, `fmt_delta`, `fmt_span`, `card_label`,
+`names`). The UI tests compare the browser with it, the integration tests a
+saved file.
 
 **Screenshots and kept files.** With `KLEIN_SHOTS=1`, `screenshot()` saves a
 PNG to `tests/ui/artifacts/<group>/<name>.png` (gitignored; groups are named by
-feature: `drawer`, `log`, `timeline`, …), and the recording tests keep their
-downloaded `.btlog` files in `tests/ui/artifacts/groot2/` for opening in
-Groot2. Without it nothing is written. Use it to look at a change, yours or an
-agent's.
+feature: `drawer`, `log`, `blackboard`, `overview`, …), and the recording
+tests keep their downloaded `.btlog` files in `tests/ui/artifacts/groot2/` for
+opening in Groot2. Without it nothing is written. Use it to look at a change.
 
 ### Oracles — `oracles.py`
 
@@ -186,7 +191,8 @@ The vectors are built from the Python model when the tests run:
 `tests/make_vectors.py` builds a recording (a swap, a same-tree restart after
 an outage, duplicate timestamps, evicted chunks, blackboard changes and
 removals), streams it, and writes the frames (incremental and backfill) plus
-the Python model's answers, for `recording.js` and `cursor.js`;
+the Python model's answers, for `recording.js` and `cursor.js` (tree runs
+are checked against the harness `Model`);
 `test_log_rows.py` and `test_timeline_model.py` do the same for the Log's rows
 and the Timeline's helpers, on `make_vectors.build_named` (trees with named
 nodes and subtrees) fed in by `make_vectors.store_cases`. `python -m
@@ -253,18 +259,20 @@ not part of the suite; about 1 min 20 s:
 
 ```bash
 python scripts/make_gifs.py                 # both, into assets/
-python scripts/make_gifs.py --only replay   # just one (hero, replay); --keep keeps the PNGs
+python scripts/make_gifs.py --only rewind   # just one (hero, rewind); --keep keeps the PNGs
 ```
 
 - `assets/klein-demo.gif` (the hero): the mock's CrossDoor tree live on
   port 1777, with the drawer on the Timeline tab, following live. Once the
   20 s window has filled, it films from the start of a mission until the
   start of the next-but-one: two whole laps, so the GIF loops cleanly.
-- `assets/klein-replay.gif`: the mock recorded until it has made 100
-  transitions (two laps and the start of a third), saved through
-  `GET /log.zip` as `crossdoor.btlog` plus its `.bb.jsonl`, and opened with
-  `--open`. The playhead is dragged back to the second-to-last failed
-  PickLock, stepped with |◀ |◀ ▶|, a Log row is clicked, then ▶ plays.
+- `assets/klein-rewind.gif`: the same live mock, rewound while it runs.
+  Once the window has filled, the playhead is dragged back 6 to 14 s into
+  one of PickLock's failures among its retries; on the Log tab it is
+  stepped with |◀ |◀ |◀ ▶|, each step moving the selected row and flipping
+  PickLock's card between RUNNING and FAILURE; then a Log row is clicked,
+  `door_open` is hovered in the blackboard (its writers and reader outlined
+  on the tree), ▶ plays, and **Jump to live** brings it back to `● Live`.
 
 Chrome draws klein in an iframe inside a made-up browser outline (a tab, ←
 → ↻ and an address bar reading `http://localhost:8080`), styled from
@@ -273,7 +281,7 @@ takes a screenshot after every step (about 20 a second), each stamped with the
 time it was taken. ffmpeg lays them out at that pace, resamples to 12 fps,
 scales to 900 px, and quantises in two passes (palettegen, then paletteuse)
 with one palette and no dithering, so nothing flickers. Headless screenshots
-have no cursor; the replay GIF has a pointer drawn by the outline page. The
-scenes are the same each run; only the wall-clock times on the axis and in
-the "Viewing t = …" pill differ.
+have no cursor; the rewind GIF has a pointer drawn by the outline page. The
+scenes are the same each run, apart from the wall-clock times on the axis
+and in the drawer's clock, and which failed PickLock the rewind lands on.
 

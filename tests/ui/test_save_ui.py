@@ -317,7 +317,8 @@ class SaveEmptyTest(_SaveCase):
             "shown": True, "disabled": True, "chip": "on", "title": "Nothing recorded yet"})
         title = self.page.evaluate("""() => {
           const a = {root_tree_id: 'A'}, b = {root_tree_id: 'B'};
-          const seg = (layout) => ({layout, startSeq: 0, headSeq: 5, bb: {tStart: null}});
+          const seg = (layout) => ({layout, layoutId: layout.root_tree_id, startSeq: 0, headSeq: 5,
+                                   bb: {tStart: null}});
           KleinDrawer.showRecording({segments: [seg(a), seg(a), seg(b), seg(a)], head: 9e6,
                                      tMin: 1e6, bytes: [1, 1], capped: []}, "on");
           return document.getElementById('drawer-save').title; }""")

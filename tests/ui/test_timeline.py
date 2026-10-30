@@ -359,13 +359,15 @@ class TimelineTest(DashboardCase):
     def test_zoom_keeps_the_playhead_and_pans(self):
         _model, runs = self.attempts()
         self.click_time(runs[2][0])
+        # − shortens the window, + lengthens it (by their labels, as read).
+        shorter, longer = "#tl-zoom button:text-is('−')", "#tl-zoom button:text-is('+')"
         # 30 s → 20 → 10 s: the 30 s default is longer than the mock's
         # recording, so the window starts at its oldest record until here.
-        self.page.click("#tl-zoom-in")
-        self.page.click("#tl-zoom-in")
+        self.page.click(shorter)
+        self.page.click(shorter)
         before = self.page.evaluate("() => KleinTimeline.debug()")
-        self.page.click("#tl-zoom-in")
-        self.page.click("#tl-zoom-in")
+        self.page.click(shorter)
+        self.page.click(shorter)
         tl = self.page.evaluate("() => KleinTimeline.debug()")
         self.assertEqual(tl["span"], 2_000_000)
         self.assertEqual(self.page.text_content("#tl-window"), "2 s")
@@ -392,7 +394,7 @@ class TimelineTest(DashboardCase):
         self.assertEqual(panned["pos"], tl["pos"])
         self.browser.drag((lanes["x"] + 600, y), (lanes["x"] + 700, y))
         for _ in range(4):
-            self.page.click("#tl-zoom-out")
+            self.page.click(longer)
         self.assertEqual(self.page.evaluate("() => KleinTimeline.debug().span"), 30_000_000)
 
         # Zoom to fit, by ⤢, by \ and by \ typed with AltGr (Ctrl+Alt on

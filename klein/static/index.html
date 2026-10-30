@@ -132,13 +132,14 @@
                        title="Filter by node or subtree name"
                        autocomplete="off" spellcheck="false">
             </label>
-            <!-- The Timeline's window length, on its tab only (timeline.js). -->
+            <!-- The Timeline's window length, on its tab only (timeline.js):
+                 − shortens it (zooms in), + lengthens it (zooms out). -->
             <div id="tl-zoom" role="group" aria-label="Timeline window">
-                <button id="tl-zoom-out" type="button" aria-label="Zoom out"
-                        title="Zoom out · Ctrl+wheel zooms, Shift+wheel or drag pans">−</button>
+                <button id="tl-zoom-in" type="button" aria-label="Shorter window"
+                        title="Shorter window (zoom in) · Ctrl+wheel zooms, Shift+wheel or drag pans">−</button>
                 <span id="tl-window" title="The Timeline's window"></span>
-                <button id="tl-zoom-in" type="button" aria-label="Zoom in"
-                        title="Zoom in · Ctrl+wheel zooms, Shift+wheel or drag pans">+</button>
+                <button id="tl-zoom-out" type="button" aria-label="Longer window"
+                        title="Longer window (zoom out) · Ctrl+wheel zooms, Shift+wheel or drag pans">+</button>
                 <button id="tl-fit" type="button" aria-label="Zoom to fit"
                         title="Zoom to fit: everything kept (\)">⤢</button>
             </div>

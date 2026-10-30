@@ -1316,6 +1316,7 @@ body.viewing-past .status-pill.running { animation: none; }
     border-bottom: 1px solid var(--subtree-fill-0);
     cursor: ew-resize;
     touch-action: none;
+    overflow-x: clip;           /* a label near the right end must not widen the drawer */
 }
 #tl-ruler-track {
     position: absolute;

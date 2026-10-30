@@ -26,10 +26,11 @@ TIMELINE_START = """() => {
   const edge = document.querySelector('#tl-bands .tl-dropped');
   const note = document.getElementById('tl-dropped-note');
   const p = document.getElementById('tl-playhead').getBoundingClientRect();
+  const body = document.getElementById('drawer-body');
   return { tl, head: KleinCursor.headTime(rec), tMin: rec.tMin,
            edge: edge && edge.getBoundingClientRect().left, title: edge && edge.title,
            note: note.hidden ? null : note.textContent, noteTitle: note.title,
-           playhead: (p.left + p.right) / 2 };
+           playhead: (p.left + p.right) / 2, overflow: body.scrollWidth - body.clientWidth };
 }"""
 
 # The hover links as drawn, in one task: per card its uid, outline role
@@ -207,10 +208,12 @@ class DashboardCase(unittest.TestCase):
         """The Timeline, its window longer than the recording, as drawn
         (``TIMELINE_START``): the window ends at the newest moment and starts
         before the oldest, the start edge sits at the oldest (±1 px) with
-        ``note`` as its title and its note's (``⇤ note``), and live the
-        playhead is the axis's right end (±1 px). Returns the view."""
+        ``note`` as its title and its note's (``⇤ note``), live the playhead
+        is the axis's right end (±1 px), and nothing (an axis label, the
+        edge) widens the drawer. Returns the view."""
         v = self.page.wait_for_function(TIMELINE_START, polling="raf", timeout=10000).json_value()
         tl = v["tl"]
+        self.assertEqual(v["overflow"], 0, f"the drawer scrolls sideways: {what}")
         self.assertEqual(tl["t1"], v["head"], what)
         self.assertLess(tl["t0"], v["tMin"], what)
         self.assertIsNotNone(v["edge"], what)

@@ -198,13 +198,19 @@ class TimelineTest(DashboardCase):
 
     # ------------------------------------------------------------------ #
     def test_dragging_the_playhead_shows_state_at_t(self):
-        # Pressed, the window holds still while the playhead is dragged
-        # (one longer than the recording would move on with the head).
+        # Pressed, the window holds still while the playhead is dragged: one
+        # longer than the recording, which would move on with the head.
         mouse = self.page.mouse
+        self.page.evaluate("() => { const d = kleinDebug();"
+                           " KleinTimeline.setWindow(d.head, d.head - d.tMin + 10e6); }")
+        self.addCleanup(self.page.evaluate, "() => { const w = KleinTimeline.getWindow();"
+                        " if (w) KleinTimeline.setWindow(w.t1, 30000000); }")
         tl = self.page.evaluate("() => KleinTimeline.debug()")
         mouse.move(tl["left"] + tl["width"] / 2, self.ruler_y())
         mouse.down()
         tl = self.read()["tl"]
+        self.assertLess(tl["t0"], self.page.evaluate("() => kleinDebug().tMin"),
+                        "a window longer than the recording")
         head = self.page.evaluate("() => kleinDebug().head")
         t_end = min(tl["t1"], head) - SETTLED_US
         # Five moments, oldest first: each midway between two records at

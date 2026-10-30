@@ -104,7 +104,7 @@ _SCRUB = """async ([steps]) => {
 # activity column by column, the marks. [ms, columns drawn, marks drawn].
 _OVERVIEW_REBUILD = """(span) => {
   const t = performance.now();
-  KleinTimeline.setWindow(KleinTimeline.getWindow().t1, span);
+  KleinTimeline.setWindow(KleinTimeline.debug().t1, span);
   void document.getElementById('ov-strip').offsetHeight;
   const ms = performance.now() - t;
   const d = document.querySelector('#ov-activity path').getAttribute('d');

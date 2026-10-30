@@ -53,8 +53,7 @@ from klein.streaming import backfill_frames
 from tests.harness.model import STATUS, Model, card_label, fmt_time, names
 from tests.harness.probes import BACK_TO_LIVE, NEXT_FRAME
 from tests.helpers import layout
-from tests.ui import (OVERVIEW, PULSES, DashboardCase, links, overview_t, overview_x, scrollbar_t,
-                      scrollbar_x)
+from tests.ui import OVERVIEW, PULSES, DashboardCase, links, mid, overview_t, overview_x
 
 SHOTS = "log"
 WIDTH, HEIGHT = 1400, 900
@@ -340,13 +339,13 @@ class LogTest(LogView, DashboardCase):
         pointer reads above it. A click on the strip, or on the scrollbar,
         pauses there (the Model's state shows), folded too. With the
         recording longer than the strip, the strip follows the cursor."""
-        page, mid = self.page, lambda r: (r["left"] + r["right"]) / 2
+        page = self.page
 
         def ys(selector):
             box = page.locator(selector).bounding_box()
             return box["y"], box["y"] + box["height"]
 
-        span = "(s) => KleinTimeline.setWindow(KleinTimeline.getWindow().t1, s)"
+        span = "(s) => KleinTimeline.setWindow(KleinTimeline.debug().t1, s)"     # the Log's tab
         self.addCleanup(page.evaluate, span, 30_000_000)
         page.evaluate(span, 1_000_000)          # an 8 s strip: all 5 s kept on it
         self.frame()
@@ -369,16 +368,17 @@ class LogTest(LogView, DashboardCase):
         self.assertTrue(page.evaluate("document.getElementById('ov-tip').hidden"))
 
         def click(where, f, what):
-            """Click the strip or the scrollbar at f of the kept recording:
-            paused there, the Model's state shown, the line or tick there."""
-            to_x, to_t = (overview_x, overview_t) if where == "strip" else (scrollbar_x, scrollbar_t)
-            at = round(to_x(v, t_min + f * (head - t_min)))
+            """Click the strip or the scrollbar ("bar") at f of the kept
+            recording: paused there, the Model's state shown, the line or
+            tick there."""
+            to_t = lambda x: overview_t(v, x, where)
+            at = round(overview_x(v, t_min + f * (head - t_min), where))
             page.mouse.click(at, sum(ys("#ov-strip" if where == "strip" else "#ov-track")) / 2)
             view = self.view()
             pos = page.evaluate("() => KleinCursor.cursorPos(clock, performance.now(), "
                                 "shownRecording())")
             self.assertTrue(view["past"], what)
-            self.assertAlmostEqual(pos["t"], to_t(v, at), delta=to_t(v, 1) - to_t(v, 0), msg=what)
+            self.assertAlmostEqual(pos["t"], to_t(at), delta=to_t(1) - to_t(0), msg=what)
             st = self.model.state_at_seq(*self.model.seq_at(pos["t"]))
             cards = dict(view["cards"])
             self.assertEqual(cards, {u: card_label(st[u]) for u in cards}, what)
@@ -388,14 +388,14 @@ class LogTest(LogView, DashboardCase):
             return pos
 
         click("strip", 0.37, "a click on the strip")
-        click("scrollbar", 0.52, "a click on the scrollbar")
+        click("bar", 0.52, "a click on the scrollbar")
         # Folded to the transport row alone, the overview and |◀ still move
         # the tree; unfolding gives the height back.
         height = page.evaluate("() => document.getElementById('drawer').offsetHeight")
         page.click("#drawer-collapse")
         try:
             self.assertFalse(page.is_visible("#drawer-toolbar"))
-            click("scrollbar", 0.2, "folded, a click on the scrollbar")
+            click("bar", 0.2, "folded, a click on the scrollbar")
             pos = click("strip", 0.61, "folded, a click on the strip")
             self.assertIsNone(page.evaluate(OVERVIEW)["box"])
             # A 200 µs window: the 1.6 ms strip is placed by the cursor, its

@@ -233,8 +233,15 @@ class Model:
         return out
 
     def count_in(self, a, b):
-        """``countIn``: the kept records of every segment with ``a < ts <= b``."""
+        """The kept records of every segment with ``a < ts <= b`` (``countIn``
+        gives this for each two neighbouring edges)."""
         return sum(1 for _s, records in self.segments.values() for r in records if a < r[0] <= b)
+
+    def busiest_column(self, d):
+        """``busiestColumn``: the most kept records in one column
+        ``(k·d, (k + 1)·d]`` of the grid."""
+        cols = {-(-r[0] // d) for _s, records in self.segments.values() for r in records}
+        return max(self.count_in((c - 1) * d, c * d) for c in cols)
 
     def runs(self):
         """``treeRuns``: the segment ids, grouped where the tree changes."""

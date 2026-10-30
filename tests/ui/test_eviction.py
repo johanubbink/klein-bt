@@ -30,7 +30,7 @@ from klein.recording import Recording
 from klein.streaming import Streamer
 from tests.harness.model import fmt_span, names
 from tests.helpers import layout
-from tests.ui import OVERVIEW, DashboardCase, overview_x, scrollbar_t
+from tests.ui import OVERVIEW, DashboardCase, overview_t, overview_x
 
 SHOTS = "eviction"
 ROW = 20
@@ -232,7 +232,7 @@ class EvictionTest(DashboardCase):
         self.assertEqual(self.assert_timeline_starts(note, "dropped")["tMin"], synth.rec.t_min)
         self.browser.screenshot(SHOTS, "timeline_dropped_marker")
         # The overview's box is still the window, an eighth of its strip.
-        self.assert_box(self.page.evaluate(OVERVIEW), "after eviction")
+        self.overview("after eviction")
         # Zoomed in to 1 s while live, the oldest record is off screen: no mark.
         self.zoom_to(1_000_000)
         self.frame()
@@ -264,7 +264,7 @@ class EvictionTest(DashboardCase):
         crosses the whole recording. The scrollbar shows on hover only: its
         thumb pans the window by what it moved, and a press beside the thumb
         brings the window there, the cursor left live."""
-        page, drag = self.page, self.browser.drag
+        page, drag, view = self.page, self.browser.drag, self.overview
         follow = """() => KleinTimeline.setWindow(KleinCursor.headTime(shownRecording()),
                                                  KleinTimeline.getWindow().span)"""
         page.click("#drawer-tab-timeline")
@@ -272,12 +272,8 @@ class EvictionTest(DashboardCase):
         self.addCleanup(self.zoom_to, 30_000_000)
         strip, track = (page.locator(s).bounding_box() for s in ("#ov-strip", "#ov-track"))
         y, sb_y = strip["y"] + strip["height"] / 2, track["y"] + track["height"] / 2
-
-        def view(what):
-            self.frame()
-            v = page.evaluate(OVERVIEW)
-            self.assert_box(v, what)
-            return v
+        bar_t = lambda v, x: overview_t(v, x, "bar")
+        opacity = "(o) => getComputedStyle(document.getElementById('ov-scrollbar')).opacity === o"
 
         for seconds, span in ((5, 30_000_000), (40, 30_000_000), (180, 30_000_000),
                               (40, 2_000_000), (180, 2_000_000)):
@@ -287,12 +283,11 @@ class EvictionTest(DashboardCase):
                 self.feed(synth)
                 self.zoom_to(span)
                 page.evaluate(follow)
-                v = view("live")
+                v = view("live")            # its box and line at the strip's right edge
                 ov, head = v["ov"], T0 + seconds * 1_000_000
                 right = ov["left"] + ov["width"]
                 self.assertEqual((ov["tMin"], ov["tMax"]), (T0, head))
-                self.assertAlmostEqual(v["box"]["right"], right, delta=1)
-                self.assertAlmostEqual((v["cursor"]["left"] + v["cursor"]["right"]) / 2, right, delta=1)
+                self.assertTrue(v["tl"]["follow"])
                 fits = head - T0 <= ov["S"]
                 if fits:
                     self.assertEqual(ov["m0"], head - ov["S"], "the strip ends at the head")
@@ -320,12 +315,10 @@ class EvictionTest(DashboardCase):
                 self.assertAlmostEqual(after["tl"]["t1"], head, delta=per_px)
                 # The scrollbar: hidden at rest, shown on hover.
                 page.mouse.move(100, 100)
-                page.wait_for_timeout(650)
-                self.assertEqual(page.evaluate(OVERVIEW)["opacity"], 0)
+                page.wait_for_function(opacity, arg="0", timeout=2000)
                 page.mouse.move(right - 1, y)
-                page.wait_for_timeout(250)
+                page.wait_for_function(opacity, arg="1", timeout=2000)
                 before = page.evaluate(OVERVIEW)
-                self.assertEqual(before["opacity"], 1)
                 # Its readout at the strip's end widens nothing: no sideways scroll.
                 self.assertEqual(page.evaluate(_OVERFLOW), [False, 0, 0, 0])
                 # Its thumb pans the window by what it moved.
@@ -334,16 +327,14 @@ class EvictionTest(DashboardCase):
                 drag((at, sb_y), (at - 40, sb_y))
                 after = view("a thumb drag")
                 self.assertAlmostEqual(after["tl"]["t0"] - before["tl"]["t0"],
-                                       scrollbar_t(before, at - 40) - scrollbar_t(before, at),
-                                       delta=scrollbar_t(before, 1) - scrollbar_t(before, 0))
+                                       bar_t(before, at - 40) - bar_t(before, at),
+                                       delta=bar_t(before, 1) - bar_t(before, 0))
                 # A press beside it brings the window there; the cursor stays live.
-                thumb, sb = after["thumb"], after["ov"]["sb"]
-                at = (sb["left"] + thumb["left"]) / 2
+                at = (after["ov"]["left"] + after["thumb"]["left"]) / 2
                 page.mouse.click(at, sb_y)
                 after = view("a press beside the thumb")
-                t1 = min(max(scrollbar_t(before, at) + span / 2, T0 + span), head)
-                self.assertAlmostEqual(after["tl"]["t1"], t1,
-                                       delta=scrollbar_t(before, 1) - scrollbar_t(before, 0))
+                t1 = min(max(bar_t(before, at) + span / 2, T0 + span), head)
+                self.assertAlmostEqual(after["tl"]["t1"], t1, delta=bar_t(before, 1) - bar_t(before, 0))
                 self.assertEqual(page.evaluate("clock"), {"mode": "live"})
                 page.keyboard.press("\\")
                 view("zoomed to fit")

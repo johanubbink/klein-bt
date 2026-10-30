@@ -29,20 +29,17 @@ const stripMarks = document.getElementById("ov-strip-marks");
 const box = document.getElementById("ov-box");
 const line = document.getElementById("ov-cursor");
 const scrollbar = document.getElementById("ov-scrollbar");
-const track = document.getElementById("ov-track");
 const marksEl = document.getElementById("ov-marks");
 const thumb = document.getElementById("ov-thumb");
 const tick = document.getElementById("ov-tick");
 const tip = document.getElementById("ov-tip");
-const timelinePanel = document.getElementById("drawer-timeline");
 
 let rec = null;                     // what update() was last given
 let pos = null;
-let shown = null;                   // the strip as last painted (place())
-let bar = null;                     // and the scrollbar: {wa, wb, k}
+let seek = () => {};                // app.js: moves the shared cursor (onSeek)
+let shown = null;                   // the layout as last painted
 let held = null;                    // scrubbing the strip: its start, held still
-let pathKey = null;
-const drawn = { strip: null, bar: null };   // what each set of marks was drawn for
+const painted = new Map();          // the activity and each set of marks: what drawn for
 // The strip's size (the scrollbar is as wide), kept current by an observer
 // rather than read (a layout) on every render.
 let width = Math.max(1, strip.clientWidth);
@@ -52,10 +49,6 @@ new ResizeObserver(() => {
     height = strip.clientHeight;
     paint();
 }).observe(strip);
-
-function ready() {
-    return Boolean(rec && pos && rec.segments.length);
-}
 
 function clamp(v, lo, hi) {
     return Math.min(Math.max(v, lo), hi);
@@ -69,33 +62,47 @@ function setStyle(el, name, value) {
     if (el.style[name] !== value) el.style[name] = value;
 }
 
-// The Timeline's window, on its tab with the drawer open; else none.
-function timelineWindow() {
-    return timelinePanel.hidden || drawer.classList.contains("collapsed") ? null : T.getWindow();
+// False when part was last drawn for this key (nothing to redraw).
+function changed(part, key) {
+    key = key.join(" ");
+    if (painted.get(part) === key) return false;
+    painted.set(part, key);
+    return true;
 }
 
-// Where the strip lies: S µs (8 windows) from m0, k px per µs. Placed by the
-// window, or without one by the cursor (a window of no length). While the
+function seekTime(t) {
+    seek(C.pauseAt(rec, t));
+}
+
+// Where the strip and the scrollbar lie, or null with nothing to show.
+// The strip: S µs (8 windows) from m0, k px per µs, placed by the window
+// shown, or without one by the cursor (a window of no length). While the
 // recording fits in the strip, the strip ends at the head; longer, the
 // window's place on the strip is its place in the recording (VS Code's
 // minimap), so the box sweeps all of it from one end of the strip to the
-// other. Scrubbing holds it still.
-function place() {
-    const win = timelineWindow();
+// other. Scrubbing holds it still. The scrollbar (bar): the whole
+// recording, wa to the head at k px per µs (on the Timeline tab, while that
+// is shorter than the window, the window's length back from the head:
+// nothing to scroll, so no thumb).
+function layout() {
+    if (!rec || !pos || !rec.segments.length) return null;
+    const win = T.getWindow();
     const tMin = rec.tMin, head = C.headTime(rec), length = head - tMin;
     const S = ZOOM * T.getSpan();
-    const t0 = win ? win.t0 : C.shownTime(pos, rec), w = win ? win.span : 0;
+    const at = C.shownTime(pos, rec);
+    const t0 = win ? win.t0 : at, w = win ? win.span : 0;
     const m0 = held !== null ? held
         : length <= S ? head - S : tMin + clamp((t0 - tMin) / (length - w), 0, 1) * (length - S);
-    return { win, tMin, head, length, S, m0, k: width / S };
+    const wa = win ? Math.min(tMin, head - win.span) : tMin;
+    return { win, tMin, head, length, S, m0, k: width / S, at,
+             bar: { wa, wb: head, k: width / Math.max(1, head - wa) },
+             scrolls: Boolean(win) && length > win.span };
 }
 
-// Gaps and tree-run starts over [t0, t1] at k px per µs, into el: rebuilt
-// only when that, the width or what is kept changes. Returns what they are
-// drawn for.
-function paintMarks(el, last, t0, t1, k) {
-    const key = [t0, t1, k, rec.gaps.length, rec.segments.map((seg) => seg.id).join(",")].join(" ");
-    if (last && last.key === key) return last;
+// Gaps and tree-run starts over [t0, t1] at k px per µs, into el; redrawn
+// only when that, the width or what is kept changes.
+function paintMarks(el, part, t0, t1, k) {
+    if (!changed(part, [t0, t1, k, rec.gaps.length, rec.segments.map((seg) => seg.id).join(",")])) return;
     const x = (t) => (t - t0) * k;
     const out = [];
     for (const gap of R.gapsIn(rec, t0, t1)) {
@@ -107,48 +114,43 @@ function paintMarks(el, last, t0, t1, k) {
         if (t >= t0 && t <= t1) out.push(`<i class="ov-run" style="left:${px(x(t) - 0.5)}"></i>`);
     }
     el.innerHTML = out.join("");
-    return { key, t0, t1, width };
 }
 
-// The transitions per column of the strip, as one path. The columns lie on
-// a grid of whole µs, so a column keeps its count as the strip scrolls, and
-// their heights are log-scaled against the busiest column of everything kept
-// (KleinRecording.busiestColumn), so they hold still as it scrolls too.
+// The transitions per column of the strip over [a, b], as one path. The
+// columns lie on a grid of whole µs, so a column keeps its count as the
+// strip scrolls, and their heights are log-scaled against the busiest column
+// of everything kept (KleinRecording.busiestColumn), so they hold still as
+// it scrolls too.
 function paintActivity(s, a, b) {
     const d = Math.max(1, Math.round(COLUMN / s.k));       // µs per column
     const last = rec.segments[rec.segments.length - 1];
-    const key = [s.m0, s.k, a, b, height, rec.segments.length, last.headSeq, rec.tMin].join(" ");
-    if (key === pathKey) return;
-    pathKey = key;
+    if (!changed("activity", [s.m0, s.k, a, b, height, rec.segments.length, last.headSeq, rec.tMin])) return;
     const scale = Math.log1p(R.busiestColumn(rec, d));
     const w = (d * s.k).toFixed(2);
+    // Columns c0 … (c0 + n - 1), column c being (c·d, (c + 1)·d].
+    const c0 = Math.ceil(a / d) - 1, n = Math.max(0, Math.ceil(b / d) - c0);
+    const counts = R.countIn(rec, Array.from({ length: n + 1 }, (_, i) => (c0 + i) * d));
     const out = [];
-    for (let c = Math.ceil(a / d) - 1; c * d < b; c++) {
-        const n = R.countIn(rec, c * d, (c + 1) * d);
-        if (!n) continue;
-        const h = Math.max(LOW, Math.min(1, Math.log1p(n) / scale) * (height - 2));
-        out.push(`M${((c * d - s.m0) * s.k).toFixed(2)} ${(height - h).toFixed(2)}h${w}v${h.toFixed(2)}h-${w}z`);
-    }
+    counts.forEach((count, i) => {
+        if (!count) return;
+        const h = Math.max(LOW, Math.min(1, Math.log1p(count) / scale) * (height - 2));
+        out.push(`M${(((c0 + i) * d - s.m0) * s.k).toFixed(2)} ${(height - h).toFixed(2)}h${w}v${h.toFixed(2)}h-${w}z`);
+    });
     path.setAttribute("d", out.join(""));
 }
 
-// The scrollbar: the whole recording, its oldest kept moment to the head
-// (on the Timeline tab, while that is shorter than the window, the window's
-// length back from the head: nothing to scroll, so no thumb); the window's
-// thumb, the marks and the cursor's tick.
-function paintScrollbar(s, at) {
-    const wa = s.win ? Math.min(s.tMin, s.head - s.win.span) : s.tMin, wb = s.head;
-    const k = width / Math.max(1, wb - wa);
-    bar = { wa, wb, k };
-    drawn.bar = paintMarks(marksEl, drawn.bar, wa, wb, k);
-    thumb.hidden = !s.win || s.length <= s.win.span;
-    if (!thumb.hidden) {
+// The scrollbar: its marks, the window's thumb and the cursor's tick.
+function paintScrollbar(s) {
+    const { wa, wb, k } = s.bar;
+    paintMarks(marksEl, "bar", wa, wb, k);
+    thumb.hidden = !s.scrolls;
+    if (s.scrolls) {
         const l = (s.win.t0 - wa) * k, r = (s.win.t1 - wa) * k, w = Math.max(THUMB, r - l);
         setStyle(thumb, "left", px(clamp((l + r - w) / 2, 0, width - w)));
         setStyle(thumb, "width", px(w));
     }
     tick.hidden = false;
-    setStyle(tick, "left", px(clamp((at - wa) * k - 1, 0, width - 2)));
+    setStyle(tick, "left", px(clamp((s.at - wa) * k - 1, 0, width - 2)));
     tick.classList.toggle("live", pos.live);
     const title = s.win ? "The whole recording · drag the thumb to pan, click to bring the window there"
                         : "The whole recording · click or drag to move the cursor";
@@ -157,28 +159,25 @@ function paintScrollbar(s, at) {
 
 // Painted folded too: the transport row is the collapsed strip.
 function paint() {
-    const ok = ready();
-    ov.classList.toggle("empty", !ok);
-    if (!ok) {
-        shown = bar = null;
+    const s = shown = layout();
+    ov.classList.toggle("empty", !s);
+    if (!s) {
         box.hidden = line.hidden = thumb.hidden = tick.hidden = tip.hidden = true;
         setStyle(keptEl, "width", "0px");
-        if (pathKey !== null || drawn.strip || drawn.bar) {
+        if (painted.size) {
             path.setAttribute("d", "");
             stripMarks.textContent = marksEl.textContent = "";
-            pathKey = drawn.strip = drawn.bar = null;
+            painted.clear();
         }
         return;
     }
-    const s = place();
-    shown = s;
     const x = (t) => (t - s.m0) * s.k;
     // What is kept, and in it the activity, the gaps and the run starts.
     const a = Math.max(s.m0, s.tMin), b = Math.min(s.m0 + s.S, s.head);
     setStyle(keptEl, "left", px(x(a)));
     setStyle(keptEl, "width", px(Math.max(0, x(b) - x(a))));
     paintActivity(s, a, b);
-    drawn.strip = paintMarks(stripMarks, drawn.strip, s.m0, s.m0 + s.S, s.k);
+    paintMarks(stripMarks, "strip", s.m0, s.m0 + s.S, s.k);
     // The window's box: an eighth of the strip, whatever the zoom.
     box.hidden = !s.win;
     if (s.win) {
@@ -186,11 +185,10 @@ function paint() {
         setStyle(box, "width", px(s.win.span * s.k));
     }
     // The cursor's line, while it is on the strip (live: its right end).
-    const at = C.shownTime(pos, rec);
-    line.hidden = x(at) < -1 || x(at) > width + 1;
-    setStyle(line, "left", px(clamp(x(at), 0, width)));
+    line.hidden = x(s.at) < -1 || x(s.at) > width + 1;
+    setStyle(line, "left", px(clamp(x(s.at), 0, width)));
     line.classList.toggle("live", pos.live);
-    paintScrollbar(s, at);
+    paintScrollbar(s);
 }
 
 // What the dashboard shows, from app.js's render(), after the Timeline's
@@ -233,20 +231,20 @@ function hover(event) {
 ov.addEventListener("pointerdown", (event) => {
     if (event.button !== 0) return;
     event.preventDefault();             // no focus from the mouse: R and F keep working
-    if (!ready()) return;
-    const s = place();
+    const s = layout();
+    if (!s) return;
     const left = strip.getBoundingClientRect().left;
     const at = (e) => clamp(e.clientX - left, 0, width);
     const dx = (e) => e.clientX - event.clientX;
     let move, end = () => {}, panning = true;
     if (event.target.closest("#ov-scrollbar")) {
-        const { wa, k } = bar;
+        const { wa, k } = s.bar;
         if (!s.win) {
             panning = false;
-            move = (e) => T.seekTime(wa + at(e) / k);
+            move = (e) => seekTime(wa + at(e) / k);
             move(event);
         } else {
-            if (thumb.hidden) return;   // the recording fits the window: nothing to scroll
+            if (!s.scrolls) return;     // the recording fits the window: nothing to scroll
             if (!event.target.closest("#ov-thumb")) {
                 T.setWindow(wa + at(event) / k + s.win.span / 2, s.win.span);   // centred there
             }
@@ -264,12 +262,12 @@ ov.addEventListener("pointerdown", (event) => {
             panned = true;
             T.setWindow(s.win.t1 + dx(e) * perPx, s.win.span);
         };
-        end = (e) => { if (!panned && e.type === "pointerup") T.seekTime(s.m0 + at(event) / s.k); };
+        end = (e) => { if (!panned && e.type === "pointerup") seekTime(s.m0 + at(event) / s.k); };
     } else {
         panning = false;
         held = s.m0;
         T.hold(true);
-        move = (e) => T.seekTime(held + at(e) / s.k);
+        move = (e) => seekTime(held + at(e) / s.k);
         move(event);
         end = () => {
             held = null;
@@ -277,19 +275,12 @@ ov.addEventListener("pointerdown", (event) => {
             paint();
         };
     }
-    ov.setPointerCapture(event.pointerId);
     ov.classList.add("dragging");
     ov.classList.toggle("panning", panning);
-    const done = (e) => {
+    KleinDrawer.drag(ov, event, move, (e) => {
         end(e);
         ov.classList.remove("dragging", "panning");
-        ov.removeEventListener("pointermove", move);
-        ov.removeEventListener("pointerup", done);
-        ov.removeEventListener("pointercancel", done);
-    };
-    ov.addEventListener("pointermove", move);
-    ov.addEventListener("pointerup", done);
-    ov.addEventListener("pointercancel", done);
+    });
 });
 ov.addEventListener("pointermove", hover);
 ov.addEventListener("pointerleave", () => { tip.hidden = true; });
@@ -298,12 +289,12 @@ ov.addEventListener("pointerleave", () => { tip.hidden = true; });
 // sideways wheel does; Ctrl+wheel zooms around the time under the pointer,
 // held inside the window.
 ov.addEventListener("wheel", (event) => {
-    const s = ready() && place();
+    const s = layout();
     if (!s || !s.win) return;
     event.preventDefault();
     if (event.ctrlKey) {
         const t = s.m0 + (event.clientX - strip.getBoundingClientRect().left) / s.k;
-        T.zoomTo(s.win.span * Math.exp(event.deltaY * 0.002), clamp(t, s.win.t0, s.win.t1));
+        T.zoomBy(event.deltaY, clamp(t, s.win.t0, s.win.t1));
     } else {
         const d = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
         T.setWindow(s.win.t1 + d * s.win.span / width, s.win.span);
@@ -315,23 +306,17 @@ for (const tab of drawer.querySelectorAll('[role="tab"]')) tab.addEventListener(
 T.connect({ windowMoved: paint });
 
 // For the tests: the strip on screen and where it lies (m0, S; tMin and tMax
-// the recording's ends as painted), the box and the cursor's line (px from
-// the strip's left, null when not shown), what the marks were drawn for, and
-// the same for the scrollbar (thumb as placed, at least THUMB px wide).
+// the recording's ends as painted), the box (px from the strip's left, null
+// when not shown), and the span the scrollbar covers (it is as wide).
 function debug() {
-    if (!ready() || !shown) return null;
-    const s = shown, x = (t) => (t - s.m0) * s.k;
-    const span = (m) => m && { t0: m.t0, t1: m.t1, width: m.width };
+    const s = shown;
+    if (!s) return null;
     return {
         left: strip.getBoundingClientRect().left, width, m0: s.m0, S: s.S, tMin: s.tMin, tMax: s.head,
-        box: s.win && { x: x(s.win.t0), w: s.win.span * s.k },
-        cursor: line.hidden ? null : x(C.shownTime(pos, rec)),
-        marks: span(drawn.strip),
-        sb: { left: track.getBoundingClientRect().left, width, wa: bar.wa, wb: bar.wb,
-              thumb: thumb.hidden ? null : { x: parseFloat(thumb.style.left), w: parseFloat(thumb.style.width) },
-              marks: span(drawn.bar) },
+        box: s.win && { x: (s.win.t0 - s.m0) * s.k, w: s.win.span * s.k },
+        bar: { t0: s.bar.wa, t1: s.bar.wb },
     };
 }
 
-globalThis.KleinOverview = { update, debug };
+globalThis.KleinOverview = { update, debug, onSeek: (fn) => { seek = fn; } };
 })();

@@ -333,10 +333,13 @@ const INGEST = {
 // ------------------------------------------------------------------ //
 // Queries (mirroring Segment / BlackboardTrack in recording.py)
 // ------------------------------------------------------------------ //
-// The chunk holding seq (startSeq <= seq < headSeq).
+// The index of the chunk holding seq (startSeq <= seq < headSeq), and the chunk.
+function chunkIndex(seg, seq) {
+    return Math.max(0, bisectRight(seg.chunks.length, seq, (j) => seg.chunks[j].seq0) - 1);
+}
+
 function chunkOf(seg, seq) {
-    const i = bisectRight(seg.chunks.length, seq, (j) => seg.chunks[j].seq0) - 1;
-    return seg.chunks[i];
+    return seg.chunks[chunkIndex(seg, seq)];
 }
 
 // The state after the first seq records, or null if evicted.
@@ -679,18 +682,24 @@ function gapsIn(rec, t0, t1) {
     return rec.gaps.filter((g) => g.tTo >= t0 && g.tFrom <= t1);
 }
 
-// The kept transitions with a < ts <= b, over every segment (the overview's
-// activity): seqAtTime's convention, so neighbouring columns (a, b] and
-// (b, c] share none. seqAtTime counts the kept records at or before any t,
-// so the difference needs no clamp to tStart, and a segment's records are
-// never older than its tBegin.
-function countIn(rec, a, b) {
-    let n = 0;
+// The kept transitions between each two neighbouring edges (ascending),
+// e[i] < ts <= e[i + 1], over every segment: seqAtTime's convention, so
+// neighbouring spans share none. seqAtTime counts the kept records at or
+// before any t, so the differences need no clamp to tStart. One bisection
+// per edge, only in the segments the edges overlap: the overview asks for
+// a few hundred columns at once.
+function countIn(rec, edges) {
+    const counts = new Array(Math.max(0, edges.length - 1)).fill(0);
     for (const seg of rec.segments) {
-        if (seg.tBegin > b) break;
-        n += seqAtTime(seg, b) - seqAtTime(seg, a);
+        if (seg.tBegin > edges[edges.length - 1]) break;
+        let prev = seqAtTime(seg, edges[0]);
+        for (let i = 1; i < edges.length && prev < seg.headSeq; i++) {
+            const seq = seqAtTime(seg, edges[i]);
+            counts[i - 1] += seq - prev;
+            prev = seq;
+        }
     }
-    return n;
+    return counts;
 }
 
 // The most kept transitions in one column of the grid (k·d, (k + 1)·d], d
@@ -706,12 +715,11 @@ function busiestColumn(rec, d) {
         s = { d, most: 0, seg: -1, seq: 0, col: NaN, n: 0 };
         BUSIEST.set(rec, s);
     }
-    let { most, col, n } = s;
+    let { most, col, n, seg: atSeg, seq: atSeq } = s;
     for (const seg of rec.segments) {
-        if (seg.id < s.seg) continue;
-        const from = seg.id === s.seg ? s.seq : seg.startSeq;
-        const first = Math.max(0, bisectRight(seg.chunks.length, from, (j) => seg.chunks[j].seq0) - 1);
-        for (let j = first; j < seg.chunks.length; j++) {
+        if (seg.id < atSeg) continue;
+        const from = seg.id === atSeg ? atSeq : seg.startSeq;
+        for (let j = chunkIndex(seg, from); j < seg.chunks.length; j++) {
             const chunk = seg.chunks[j];
             let i = Math.max(0, from - chunk.seq0);
             if (i >= chunk.length) continue;
@@ -729,10 +737,10 @@ function busiestColumn(rec, d) {
                 if (n > most) most = n;
             }
         }
-        s.seg = seg.id;
-        s.seq = seg.headSeq;
+        atSeg = seg.id;
+        atSeq = seg.headSeq;
     }
-    Object.assign(s, { most, col, n });
+    Object.assign(s, { most, col, n, seg: atSeg, seq: atSeq });
     return most;
 }
 

@@ -5,9 +5,9 @@ from tests.harness.probes import BrowserProbe, GatewayProbe
 from tests.harness.targets import MockTarget
 
 # The drawer's overview as drawn, in one task: its own debug (the strip's
-# place and scale, the scrollbar's), the Timeline's, the box's, the cursor
-# line's, the thumb's and the tick's boxes (null when hidden), every mark's
-# [left, right] on the strip and on the scrollbar, and the scrollbar's opacity.
+# place and scale, the scrollbar's span), the Timeline's, the box's, the
+# cursor line's, the thumb's and the tick's boxes (null when hidden), and
+# every mark's [left, right] on the strip and on the scrollbar.
 OVERVIEW = """() => {
   const box = (id) => { const e = document.getElementById(id);
                         return e.hidden ? null : e.getBoundingClientRect().toJSON(); };
@@ -16,8 +16,7 @@ OVERVIEW = """() => {
   return { ov: KleinOverview.debug(), tl: KleinTimeline.debug(), box: box('ov-box'),
            cursor: box('ov-cursor'), thumb: box('ov-thumb'), tick: box('ov-tick'),
            gaps: marks('#ov-strip-marks .ov-gap'), runs: marks('#ov-strip-marks .ov-run'),
-           sbGaps: marks('#ov-marks .ov-gap'), sbRuns: marks('#ov-marks .ov-run'),
-           opacity: Number(getComputedStyle(document.getElementById('ov-scrollbar')).opacity) };
+           sbGaps: marks('#ov-marks .ov-gap'), sbRuns: marks('#ov-marks .ov-run') };
 }"""
 
 # The Timeline's start edge as drawn, in one task, or null while a render is
@@ -88,28 +87,28 @@ def port_line(ports):
     return text if len(text) <= MAX_PORT_CHARS else text[:MAX_PORT_CHARS - 1] + "…"
 
 
-def overview_x(v, t):
-    """The x of time ``t`` on the overview's strip in ``v`` (``OVERVIEW``'s result)."""
+def overview_span(v, where="strip"):
+    """The times at the left and right ends of the overview's strip (or of
+    its scrollbar, ``where="bar"``, as wide) in ``v`` (``OVERVIEW``'s result)."""
     ov = v["ov"]
-    return ov["left"] + (t - ov["m0"]) * ov["width"] / ov["S"]
+    return (ov["m0"], ov["m0"] + ov["S"]) if where == "strip" else (ov["bar"]["t0"], ov["bar"]["t1"])
 
 
-def overview_t(v, x):
-    """The time at ``x`` on the overview's strip: ``overview_x`` inverted."""
-    ov = v["ov"]
-    return ov["m0"] + (x - ov["left"]) * ov["S"] / ov["width"]
+def overview_x(v, t, where="strip"):
+    """The x of time ``t`` on the overview's strip (or scrollbar) in ``v``."""
+    t0, t1 = overview_span(v, where)
+    return v["ov"]["left"] + (t - t0) * v["ov"]["width"] / (t1 - t0)
 
 
-def scrollbar_x(v, t):
-    """The x of time ``t`` on the overview's scrollbar in ``v``."""
-    sb = v["ov"]["sb"]
-    return sb["left"] + (t - sb["wa"]) * sb["width"] / (sb["wb"] - sb["wa"])
+def overview_t(v, x, where="strip"):
+    """The time at ``x`` on the overview's strip (or scrollbar): ``overview_x`` inverted."""
+    t0, t1 = overview_span(v, where)
+    return t0 + (x - v["ov"]["left"]) * (t1 - t0) / v["ov"]["width"]
 
 
-def scrollbar_t(v, x):
-    """The time at ``x`` on the overview's scrollbar: ``scrollbar_x`` inverted."""
-    sb = v["ov"]["sb"]
-    return sb["wa"] + (x - sb["left"]) * (sb["wb"] - sb["wa"]) / sb["width"]
+def mid(r):
+    """The middle of a box's ``left`` and ``right`` (a ``getBoundingClientRect``)."""
+    return (r["left"] + r["right"]) / 2
 
 
 def links(layout, folded=()):
@@ -197,45 +196,56 @@ class DashboardCase(unittest.TestCase):
         """The overview as drawn (``OVERVIEW``) against ``model`` (a harness
         ``Model``) and its ``gaps`` (``[t_from, t_to, kind]``), on the strip
         and on the scrollbar: a hatched band per gap and a line where each
-        tree run after the first starts, to ±1 px, each set of marks drawn
-        for the span shown. Returns the view and the strip's time -> x."""
+        tree run after the first starts, to ±1 px. Returns the view and the
+        strip's time -> x."""
         v = self.page.evaluate(OVERVIEW)
-        ov = v["ov"]
         starts = [model.segments[run[0]][0]["t_begin"] for run in model.runs()[1:]]
-        for where, drawn, (lo, hi), x, least, gaps_got, runs_got in (
-                ("strip", ov["marks"], (ov["m0"], ov["m0"] + ov["S"]), lambda t: overview_x(v, t),
-                 1, v["gaps"], v["runs"]),
-                ("scrollbar", ov["sb"]["marks"], (ov["sb"]["wa"], ov["sb"]["wb"]),
-                 lambda t: scrollbar_x(v, t), 2, v["sbGaps"], v["sbRuns"])):
+        for where, least, gaps_got, runs_got in (("strip", 1, v["gaps"], v["runs"]),
+                                                 ("bar", 2, v["sbGaps"], v["sbRuns"])):
             msg = f"{what}: the {where}"
-            self.assertEqual(drawn, {"t0": lo, "t1": hi, "width": ov["width"]}, msg)
-            want = [(x(max(a, lo)), x(min(b, hi))) for a, b, _k in gaps if b >= lo and a <= hi]
+            lo, hi = overview_span(v, where)
+            want = [(overview_x(v, max(a, lo), where), overview_x(v, min(b, hi), where))
+                    for a, b, _k in gaps if b >= lo and a <= hi]
             self.assertEqual(len(gaps_got), len(want), msg)
             for got, w in zip(gaps_got, want):
                 self.assertAlmostEqual(got[0], w[0], delta=1, msg=msg)
                 self.assertAlmostEqual(got[1], max(w[1], w[0] + least), delta=1, msg=msg)
-            want = [x(t) for t in starts if lo <= t <= hi]
+            want = [overview_x(v, t, where) for t in starts if lo <= t <= hi]
             self.assertEqual(len(runs_got), len(want), msg)
             for (left, right), w in zip(runs_got, want):
                 self.assertAlmostEqual((left + right) / 2, w, delta=1, msg=msg)
         return v, lambda t: overview_x(v, t)
 
+    def overview(self, what=""):
+        """The overview after the next frame (``OVERVIEW``), its box checked
+        (``assert_box``). Returns the view."""
+        self.frame()
+        v = self.page.evaluate(OVERVIEW)
+        self.assert_box(v, what)
+        return v
+
     def assert_box(self, v, what=""):
         """The overview in ``v`` (``OVERVIEW``) shows the Timeline's window:
         the box spans it on the strip, an eighth of the strip wide, and while
         the recording is longer than the window the scrollbar's thumb spans
-        it too (at least 18 px, centred on it, kept on the track)."""
-        ov, tl, box, sb = v["ov"], v["tl"], v["box"], v["ov"]["sb"]
+        it too (at least 18 px, centred on it, kept on the track). Live and
+        following the head, the box and the cursor's line end at the strip's
+        right edge."""
+        ov, tl, box = v["ov"], v["tl"], v["box"]
         self.assertIsNotNone(box, what)
         self.assertAlmostEqual(box["width"], ov["width"] / 8, delta=1, msg=what)
         self.assertAlmostEqual(box["left"], overview_x(v, tl["t0"]), delta=1, msg=what)
         self.assertAlmostEqual(box["right"], overview_x(v, tl["t1"]), delta=1, msg=what)
+        if tl["pos"]["live"] and tl["follow"]:
+            right = ov["left"] + ov["width"]
+            self.assertAlmostEqual(box["right"], right, delta=1, msg=f"{what}: live")
+            self.assertAlmostEqual(mid(v["cursor"]), right, delta=1, msg=f"{what}: live")
         if ov["tMax"] - ov["tMin"] <= tl["span"]:
             self.assertIsNone(v["thumb"], f"{what}: nothing to scroll")
             return
-        left, right = scrollbar_x(v, tl["t0"]), scrollbar_x(v, tl["t1"])
+        left, right = overview_x(v, tl["t0"], "bar"), overview_x(v, tl["t1"], "bar")
         w = max(18, right - left)
-        left = min(max((left + right - w) / 2, sb["left"]), sb["left"] + sb["width"] - w)
+        left = min(max((left + right - w) / 2, ov["left"]), ov["left"] + ov["width"] - w)
         self.assertAlmostEqual(v["thumb"]["left"], left, delta=1, msg=what)
         self.assertAlmostEqual(v["thumb"]["width"], w, delta=1, msg=what)
 

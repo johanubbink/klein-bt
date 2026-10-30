@@ -48,7 +48,7 @@ from pathlib import Path
 from tests.harness.model import Model, fmt_time, names
 from tests.harness.probes import BACK_TO_LIVE, NEXT_FRAME
 from tests.harness.targets import ReplayTarget
-from tests.ui import OVERVIEW, DashboardCase, overview_t, overview_x
+from tests.ui import OVERVIEW, DashboardCase, mid, overview_t, overview_x
 
 SHOTS = "timeline"
 FIXTURE = Path(__file__).resolve().parent.parent / "fixtures" / "t11_filelogger2.btlog"
@@ -503,17 +503,10 @@ class TimelineTest(DashboardCase):
         zooms). A press on the strip pauses there without taking the focus,
         and a drag scrubs with the strip and the window held still; after
         the release the window shows the cursor."""
-        page, mouse = self.page, self.page.mouse
-        mid = lambda r: (r["left"] + r["right"]) / 2
+        page, mouse, overview = self.page, self.page.mouse, self.overview
         strip = page.locator("#ov-strip").bounding_box()
         y = strip["y"] + strip["height"] / 2
         lanes = page.locator("#tl-lanes").bounding_box()
-
-        def overview(what):
-            self.frame()
-            v = page.evaluate(OVERVIEW)
-            self.assert_box(v, what)
-            return v
 
         def ctrl_wheel(x, y, dy):
             mouse.move(x, y)
@@ -522,12 +515,9 @@ class TimelineTest(DashboardCase):
             page.keyboard.up("Control")
 
         try:
-            v = overview("live")
+            v = overview("live")            # its box and line at the strip's right edge
             self.browser.screenshot("overview", "live")
-            right = v["ov"]["left"] + v["ov"]["width"]
-            self.assertTrue(v["tl"]["pos"]["live"])
-            self.assertAlmostEqual(v["box"]["right"], right, delta=1)
-            self.assertAlmostEqual(mid(v["cursor"]), right, delta=1)
+            self.assertTrue(v["tl"]["pos"]["live"] and v["tl"]["follow"])
             for button in ["#tl-zoom-in"] * 4 + ["#tl-zoom-out", "#tl-fit", "#tl-zoom-in"]:
                 page.click(button)
                 overview(button)
@@ -560,6 +550,7 @@ class TimelineTest(DashboardCase):
             per_px = ov["S"] / ov["width"]
             mouse.move(at, y)
             mouse.down()
+            still = set()
             try:
                 for x in (at, at + 3, at - 6):
                     mouse.move(x, y)
@@ -568,13 +559,11 @@ class TimelineTest(DashboardCase):
                     self.assertFalse(held["tl"]["pos"]["live"])
                     self.assertAlmostEqual(held["tl"]["pos"]["t"], overview_t(held, x), delta=per_px)
                     self.assertAlmostEqual(mid(held["cursor"]), x, delta=1)
-                    still = (held["tl"]["t0"], held["tl"]["t1"], held["ov"]["m0"])
-                    if x == at:
-                        pressed = still
-                    self.assertEqual(still, pressed, "the window and the strip hold still")
                     self.assertLess(held["tl"]["pos"]["t"], held["tl"]["t0"], "left of the window")
+                    still.add((held["tl"]["t0"], held["tl"]["t1"], held["ov"]["m0"]))
             finally:
                 mouse.up()
+            self.assertEqual(len(still), 1, "the window and the strip hold still")
             self.assertFalse(page.evaluate("!!document.activeElement.closest('#drawer')"),
                              "a press doesn't focus the drawer: R and F keep working")
             v = overview("after a scrub")

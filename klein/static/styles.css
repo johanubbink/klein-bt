@@ -986,15 +986,19 @@ body.viewing-past .status-pill.running { animation: none; }
     background: color-mix(in srgb, var(--text-main) 14%, transparent);
 }
 #overview.panning, #overview.panning #ov-box { cursor: grabbing; }
-/* The cursor: amber in the past, blue live (or at an opened file's end). */
-#ov-cursor {
+/* The cursor's line on the strip and its tick on the scrollbar: amber in
+   the past, blue live (or at an opened file's end). */
+#ov-cursor, #ov-tick {
     position: absolute;
-    top: 4px;
-    height: 34px;               /* 3 px past the strip either side */
     width: 2px;
-    margin-left: -1px;
     background: var(--changed);
     pointer-events: none;
+}
+#ov-cursor.live, #ov-tick.live { background: var(--accent); }
+#ov-cursor {
+    top: 4px;
+    height: 34px;               /* 3 px past the strip either side */
+    margin-left: -1px;
 }
 #ov-cursor::before {
     content: "";
@@ -1006,7 +1010,6 @@ body.viewing-past .status-pill.running { animation: none; }
     background: inherit;
     clip-path: polygon(0 0, 100% 0, 50% 100%);
 }
-#ov-cursor.live { background: var(--accent); }
 #ov-scrollbar {
     position: absolute;
     left: 0;
@@ -1020,35 +1023,26 @@ body.viewing-past .status-pill.running { animation: none; }
     opacity: 1;
     transition-delay: 0s;
 }
+/* The scrollbar's rail, its marks and its thumb: one 7 px band. */
 #ov-track, #ov-marks, #ov-thumb {
+    position: absolute;
     top: 2px;
     bottom: auto;
     height: 7px;
+    border-radius: 4px;
 }
 #ov-track {
-    position: absolute;
     left: 0;
     right: 0;
-    border-radius: 4px;
     background: color-mix(in srgb, var(--border-color) 95%, transparent);
 }
 #ov-marks .ov-gap { min-width: 2px; }
 #ov-thumb {
-    position: absolute;
-    border-radius: 4px;
     background: color-mix(in srgb, var(--text-muted) 70%, transparent);
     cursor: grab;
 }
 #overview.panning #ov-thumb { background: color-mix(in srgb, var(--text-muted) 90%, transparent); }
-#ov-tick {
-    position: absolute;
-    top: 0;
-    width: 2px;
-    height: 11px;
-    background: var(--changed);
-    pointer-events: none;
-}
-#ov-tick.live { background: var(--accent); }
+#ov-tick { top: 0; height: 11px; }
 /* Without a recording, a bare grey strip that ignores presses. */
 #overview.empty { cursor: default; }
 #overview.empty #ov-strip { background: color-mix(in srgb, var(--color-IDLE) 30%, var(--panel-bg)); }

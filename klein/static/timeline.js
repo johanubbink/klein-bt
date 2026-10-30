@@ -304,7 +304,7 @@ function paintBars() {
     barsKey = key;
     barsT1 = t1;
     const k = width / span;
-    const inWindow = rec.segments.reduce((n, s) => n + R.seqAtTime(s, t1) - R.seqAtTime(s, t0), 0);
+    const inWindow = R.countIn(rec, [t0, t1])[0];
     const tooMany = inWindow > MAX_WINDOW_RECORDS;
     tooManyEl.hidden = !tooMany;
     if (tooMany) {
@@ -362,10 +362,14 @@ function paintBars() {
 // ------------------------------------------------------------------ //
 // Painting
 // ------------------------------------------------------------------ //
-// Nothing is painted while the tab is hidden or the drawer folded; showing
-// either asks for a render, which paints again.
+// The Timeline is shown on its tab with the drawer open. Nothing is painted
+// otherwise; showing it asks for a render, which paints again.
+function shown() {
+    return !panel.hidden && !drawer.classList.contains("collapsed");
+}
+
 function paint() {
-    if (panel.hidden || drawer.classList.contains("collapsed")) return;
+    if (!shown()) return;
     refreshRows();
     const ready = Boolean(pos && rowEls.length);
     lanes.hidden = !ready;
@@ -421,10 +425,11 @@ function windowMoved() {
     hooks.windowMoved();
 }
 
-// The window as last painted, for the overview's box and thumb: {t0, t1,
-// span}, or null before the Timeline has painted one.
+// The window shown, for the overview's box and thumb: {t0, t1, span}, or
+// null while the Timeline isn't shown (another tab, or folded) or before it
+// has painted one.
 function getWindow() {
-    return t1 === null || !pos ? null : { t0: t1 - span, t1, span };
+    return t1 === null || !pos || !shown() ? null : { t0: t1 - span, t1, span };
 }
 
 // The window's length, painted yet or not (the overview's strip is 8 of them).
@@ -448,6 +453,11 @@ function zoomTo(newSpan, anchor) {
     span = Math.min(Math.max(newSpan, LADDER[0]), LADDER[LADDER.length - 1]);
     t1 = anchor + (1 - fraction) * span;
     if (span !== before) windowMoved();
+}
+
+// Ctrl+wheel, here and over the overview: deltaY scales the window, around anchor.
+function zoomBy(deltaY, anchor) {
+    zoomTo(span * Math.exp(deltaY * 0.002), anchor);
 }
 
 // The buttons step along LADDER, anchored on the head while following live,
@@ -492,19 +502,9 @@ function hold(on) {
 ruler.addEventListener("pointerdown", (event) => {
     if (event.button !== 0 || !pos) return;
     event.preventDefault();
-    ruler.setPointerCapture(event.pointerId);
     scrubbing = true;
     seekTime(timeAt(event.clientX));
-    const move = (e) => seekTime(timeAt(e.clientX));
-    const end = () => {
-        scrubbing = false;
-        ruler.removeEventListener("pointermove", move);
-        ruler.removeEventListener("pointerup", end);
-        ruler.removeEventListener("pointercancel", end);
-    };
-    ruler.addEventListener("pointermove", move);
-    ruler.addEventListener("pointerup", end);
-    ruler.addEventListener("pointercancel", end);
+    KleinDrawer.drag(ruler, event, (e) => seekTime(timeAt(e.clientX)), () => { scrubbing = false; });
 });
 
 // The lanes: drag to pan the time axis; a click without a drag puts the
@@ -514,23 +514,15 @@ lanes.addEventListener("pointerdown", (event) => {
     const startX = event.clientX;
     const startT1 = t1;
     let panned = false;
-    lanes.setPointerCapture(event.pointerId);
-    const move = (e) => {
+    KleinDrawer.drag(lanes, event, (e) => {
         if (!panned && Math.abs(e.clientX - startX) < 3) return;
         panned = true;
         t1 = startT1 - (e.clientX - startX) * span / trackWidth();
         windowMoved();
-    };
-    const end = (e) => {
-        lanes.removeEventListener("pointermove", move);
-        lanes.removeEventListener("pointerup", end);
-        lanes.removeEventListener("pointercancel", end);
+    }, (e) => {
         if (!panned && e.type === "pointerup"
             && e.clientX >= rulerTrack.getBoundingClientRect().left) seekTime(timeAt(e.clientX));
-    };
-    lanes.addEventListener("pointermove", move);
-    lanes.addEventListener("pointerup", end);
-    lanes.addEventListener("pointercancel", end);
+    });
 });
 
 // Ctrl+wheel zooms around the pointer; a sideways wheel (or Shift+wheel)
@@ -539,7 +531,7 @@ panel.addEventListener("wheel", (event) => {
     if (!pos) return;
     if (event.ctrlKey) {
         event.preventDefault();
-        zoomTo(span * Math.exp(event.deltaY * 0.002), timeAt(event.clientX));
+        zoomBy(event.deltaY, timeAt(event.clientX));
     } else if (event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
         event.preventDefault();
         t1 += (event.shiftKey ? event.deltaY : event.deltaX) * span / trackWidth();
@@ -566,7 +558,7 @@ window.addEventListener("resize", () => {
 // F with the drawer open: scroll the first of these nodes' rows (the running
 // frontier, app.js) into view, under the sticky axis and section header.
 function revealRows(ids) {
-    if (panel.hidden || drawer.classList.contains("collapsed")) return;
+    if (!shown()) return;
     refreshRows();
     const wanted = new Set(ids);
     const row = rowEls.find((r) => wanted.has(r.item.id));
@@ -587,7 +579,7 @@ function debug() {
 }
 
 globalThis.KleinTimeline = {
-    update, revealRows, debug, getWindow, getSpan, setWindow, zoomTo, seekTime, hold, fit,
+    update, revealRows, debug, getWindow, getSpan, setWindow, zoomBy, hold, fit,
     connect: (h) => { hooks = { ...hooks, ...h }; },
 };
 })();

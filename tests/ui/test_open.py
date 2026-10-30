@@ -34,7 +34,7 @@ from tests.harness import btlog_ref
 from tests.harness.model import BB_SAMPLE, Model
 from tests.harness.probes import GatewayProbe
 from tests.helpers import T11_BOARDS, T11_SIDECAR, opened, sidecar_at, t11_sidecar
-from tests.ui import PULSES, DashboardCase, links, overview_t
+from tests.ui import PULSES, DashboardCase, links, mid, overview_t
 
 SHOTS = "open"                      # screenshot group (KLEIN_SHOTS=1)
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
@@ -161,8 +161,7 @@ class OpenFileTest(DashboardCase):
         end = max(self.records[-1][0], self.first + max(line["t"] for line in T11_SIDECAR))
         self.assertEqual((ov["tMin"], ov["tMax"], ov["m0"]), (self.first, end, end - ov["S"]))
         self.assertEqual((v["gaps"], v["runs"], v["sbGaps"], v["sbRuns"]), ([], [], [], []))
-        self.assertAlmostEqual((v["cursor"]["left"] + v["cursor"]["right"]) / 2,
-                               ov["left"] + ov["width"], delta=1)
+        self.assertAlmostEqual(mid(v["cursor"]), ov["left"] + ov["width"], delta=1)
         strip = self.page.locator("#ov-strip").bounding_box()
         at = round(x((self.first + end) / 2))
         self.page.mouse.move(at, strip["y"] + strip["height"] / 2)

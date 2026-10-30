@@ -502,22 +502,20 @@ def _tree_run_cases(name, rec):
 
 
 def _count_cases(name, rec):
-    """``countIn`` over every record time, a µs either side and spans across
-    segments, the gap and the evicted start; ``busiestColumn`` at a few
-    column lengths, the busiest grid column by the Model's count."""
+    """``countIn`` between neighbouring edges at every 7th record time, a µs
+    either side, each segment's begin and past both ends, and over wider
+    spans across segments, the gap and the evicted start; ``busiestColumn``
+    at a few column lengths."""
     ref = {"$ref": f"{name}_rec"}
     model = Model(dump(rec))
     times = sorted({r[0] for _s, records in model.segments.values() for r in records})
     edges = sorted({t + e for t in times[::7] for e in (-1, 0, 1)}
                    | {s.t_begin for s in rec.segments} | {rec.t_min - 1, rec.head + 1})
-    spans = list(zip(edges, edges[1:])) + list(zip(edges, edges[9:])) + [(edges[0], edges[-1])]
-    cases = [{"name": f"{name}: countIn {a - T0}..{b - T0}", "call": "KleinRecording.countIn",
-              "args": [ref, a, b], "expect": model.count_in(a, b)} for a, b in spans]
-    for d in (1, 7, 40, 1000):
-        cols = {-(-t // d) for t in times}             # the column (k·d, (k + 1)·d] holding t
-        cases.append({"name": f"{name}: busiestColumn {d}", "call": "KleinRecording.busiestColumn",
-                      "args": [ref, d],
-                      "expect": max(model.count_in((c - 1) * d, c * d) for c in cols)})
+    cases = [{"name": f"{name}: countIn {len(e)} edges from {e[0] - T0}", "call": "KleinRecording.countIn",
+              "args": [ref, e], "expect": [model.count_in(a, b) for a, b in zip(e, e[1:])]}
+             for e in (edges, edges[::9], [edges[0], edges[-1]], edges[5:6])]
+    cases += [{"name": f"{name}: busiestColumn {d}", "call": "KleinRecording.busiestColumn",
+               "args": [ref, d], "expect": model.busiest_column(d)} for d in (1, 7, 40, 1000)]
     return cases
 
 
@@ -541,11 +539,9 @@ def _busiest_growing_cases(d=50):
         rec.advance_head(rec.segments[-1].last_ts)
         cases += [{"name": f"grow: ingest {i}.{j}", "call": "$grow.ingest", "args": [_arg(f)],
                    "expect": True} for j, f in enumerate(frames)]
-        model = Model(dump(rec))
-        times = {r[0] for _s, records in model.segments.values() for r in records}
         cases.append({"name": f"grow: busiestColumn {d} after step {i}",
                       "call": "KleinRecording.busiestColumn", "args": [ref, d],
-                      "expect": max(model.count_in(c * d - d, c * d) for c in {-(-t // d) for t in times})})
+                      "expect": Model(dump(rec)).busiest_column(d)})
     return cases
 
 

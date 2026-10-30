@@ -26,29 +26,35 @@ const chipStats = chip.querySelector(".drawer-chip-stats");
 const note = document.getElementById("drawer-note");
 const tabs = [...drawer.querySelectorAll('[role="tab"]')];
 
+// Follow a press on el (its pointerdown event) to its release: move(e) on
+// each pointermove, then end(e) on pointerup or pointercancel. Pointer
+// capture keeps the drag going when the pointer leaves el. The drawer's
+// edges, the Timeline's ruler and lanes, and the overview drag with it.
+function drag(el, event, move, end) {
+    el.setPointerCapture(event.pointerId);
+    const done = (e) => {
+        el.removeEventListener("pointermove", move);
+        el.removeEventListener("pointerup", done);
+        el.removeEventListener("pointercancel", done);
+        end(e);
+    };
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", done);
+    el.addEventListener("pointercancel", done);
+}
+
 // Drag a panel's edge along one axis ("x" or "y"): onMove(from, delta) with
 // the panel's size() at the press and the pointer's offset since, then
-// onEnd() on release. Pointer capture keeps the drag going when the pointer
-// leaves the thin handle; an unmoved press (half of a double-click) changes
+// onEnd() on release. An unmoved press (half of a double-click) changes
 // nothing, so it can't expand a collapsed panel to its minimum.
 function dragEdge(edge, axis, size, onMove, onEnd) {
     const coord = axis === "x" ? "clientX" : "clientY";
     edge.addEventListener("pointerdown", (event) => {
         if (event.button !== 0) return;
         event.preventDefault();
-        edge.setPointerCapture(event.pointerId);
         const start = event[coord];
         const from = size();
-        const move = (e) => { if (e[coord] !== start) onMove(from, e[coord] - start); };
-        const end = () => {
-            edge.removeEventListener("pointermove", move);
-            edge.removeEventListener("pointerup", end);
-            edge.removeEventListener("pointercancel", end);
-            onEnd();
-        };
-        edge.addEventListener("pointermove", move);
-        edge.addEventListener("pointerup", end);
-        edge.addEventListener("pointercancel", end);
+        drag(edge, event, (e) => { if (e[coord] !== start) onMove(from, e[coord] - start); }, () => onEnd());
     });
 }
 
@@ -794,7 +800,7 @@ function debugRows() {
 
 globalThis.KleinDrawer = {
     showRecording, summary, update, formatTime, formatClock, debugRows, goLive,
-    keptSpan, droppedNote, pane,
+    keptSpan, droppedNote, pane, drag,
     onSeek: (fn) => { seek = fn; },
 };
 })();

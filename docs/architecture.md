@@ -477,8 +477,8 @@ decides what is displayed:
   `pos.mode` and keeps no clock of its own), then, once the cursor's tree is
   on the canvas, `KleinTimeline.update(rec, pos, hierarchy)` and
   `KleinOverview.update(rec, pos)`. They move the cursor through one
-  `seek(clock)` (`KleinDrawer.onSeek`, `KleinTimeline.connect`; the overview
-  goes through the Timeline), which sets the clock and asks for a render; the
+  `seek(clock)` (`KleinDrawer.onSeek`, `KleinTimeline.connect`,
+  `KleinOverview.onSeek`), which sets the clock and asks for a render; the
   Timeline's chevrons fold the canvas through `toggleFold` / `foldOthers`, the
   same `toggleFold` a card's click uses.
 
@@ -600,8 +600,9 @@ sidebar's width (see [The sidebar](#the-sidebar)).
     no window, and the cursor stands in for one of no length: live, the
     strip ends at now, and in the past it follows the cursor.
   - **On the strip:** what is kept, lighter than the time outside it; the
-    activity, the transitions per 2 px column (`KleinRecording.countIn`;
-    the columns on a grid of whole µs, so a column keeps its count as the
+    activity, the transitions per 2 px column (`KleinRecording.countIn`,
+    one bisection per column edge in the segments the strip overlaps; the
+    columns on a grid of whole µs, so a column keeps its count as the
     strip scrolls), log-scaled against the busiest column of everything kept
     at that column length (`busiestColumn`, counted once per length, then
     only over new records, so heights hold still as it scrolls; eviction
@@ -791,7 +792,7 @@ sidebar's width (see [The sidebar](#the-sidebar)).
     pointer, **dragging the lanes** (or Shift+wheel, or a sideways wheel)
     pans; a plain wheel scrolls the rows. The window never runs past the
     head, nor before the oldest record once the recording is longer than
-    it (`clampWindow`: `t1 = max(min(t1, head), min(head, tMin + span))`).
+    it (`clampWindow`).
     One longer than the recording ends at the head, live or paused, so now
     is at the axis's right end from a session's first second; the time
     before the oldest record is empty, its start edge marked (see Dropped

@@ -1,0 +1,13 @@
+version: 2
+updates:
+  # No pip entry: pyproject.toml only sets minimums (>=), which every new
+  # release already satisfies, so version updates would never fire. Security
+  # updates for those dependencies come from the repo settings, not this file.
+  # The vendored klein/static/d3.v7.min.js has no manifest; check it by hand.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    groups:
+      actions:
+        patterns: ["*"]

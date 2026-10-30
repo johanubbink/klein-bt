@@ -333,10 +333,13 @@ const INGEST = {
 // ------------------------------------------------------------------ //
 // Queries (mirroring Segment / BlackboardTrack in recording.py)
 // ------------------------------------------------------------------ //
-// The chunk holding seq (startSeq <= seq < headSeq).
+// The index of the chunk holding seq (startSeq <= seq < headSeq), and the chunk.
+function chunkIndex(seg, seq) {
+    return Math.max(0, bisectRight(seg.chunks.length, seq, (j) => seg.chunks[j].seq0) - 1);
+}
+
 function chunkOf(seg, seq) {
-    const i = bisectRight(seg.chunks.length, seq, (j) => seg.chunks[j].seq0) - 1;
-    return seg.chunks[i];
+    return seg.chunks[chunkIndex(seg, seq)];
 }
 
 // The state after the first seq records, or null if evicted.
@@ -679,6 +682,68 @@ function gapsIn(rec, t0, t1) {
     return rec.gaps.filter((g) => g.tTo >= t0 && g.tFrom <= t1);
 }
 
+// The kept transitions between each two neighbouring edges (ascending),
+// e[i] < ts <= e[i + 1], over every segment: seqAtTime's convention, so
+// neighbouring spans share none. seqAtTime counts the kept records at or
+// before any t, so the differences need no clamp to tStart. One bisection
+// per edge, only in the segments the edges overlap: the overview asks for
+// a few hundred columns at once.
+function countIn(rec, edges) {
+    const counts = new Array(Math.max(0, edges.length - 1)).fill(0);
+    for (const seg of rec.segments) {
+        if (seg.tBegin > edges[edges.length - 1]) break;
+        let prev = seqAtTime(seg, edges[0]);
+        for (let i = 1; i < edges.length && prev < seg.headSeq; i++) {
+            const seq = seqAtTime(seg, edges[i]);
+            counts[i - 1] += seq - prev;
+            prev = seq;
+        }
+    }
+    return counts;
+}
+
+// The most kept transitions in one column of the grid (k·d, (k + 1)·d], d
+// whole µs: the overview's activity scale. Counted over every kept record
+// once per d, then only over the records added since. Eviction can only
+// lower the true maximum, and the scale keeps the old one, so heights hold
+// still as the oldest go.
+const BUSIEST = new WeakMap();      // rec -> {d, most, seg, seq, col, n}
+
+function busiestColumn(rec, d) {
+    let s = BUSIEST.get(rec);
+    if (!s || s.d !== d) {
+        s = { d, most: 0, seg: -1, seq: 0, col: NaN, n: 0 };
+        BUSIEST.set(rec, s);
+    }
+    let { most, col, n, seg: atSeg, seq: atSeq } = s;
+    for (const seg of rec.segments) {
+        if (seg.id < atSeg) continue;
+        const from = seg.id === atSeg ? atSeq : seg.startSeq;
+        for (let j = chunkIndex(seg, from); j < seg.chunks.length; j++) {
+            const chunk = seg.chunks[j];
+            let i = Math.max(0, from - chunk.seq0);
+            if (i >= chunk.length) continue;
+            const last = Math.ceil(chunk.ts[chunk.length - 1] / d);
+            if (Math.ceil(chunk.ts[i] / d) === last) {      // the rest of it in one column
+                n = last === col ? n + chunk.length - i : chunk.length - i;
+                col = last;
+                most = Math.max(most, n);
+                continue;
+            }
+            for (; i < chunk.length; i++) {
+                const c = Math.ceil(chunk.ts[i] / d);
+                n = c === col ? n + 1 : 1;
+                col = c;
+                if (n > most) most = n;
+            }
+        }
+        atSeg = seg.id;
+        atSeq = seg.headSeq;
+    }
+    Object.assign(s, { most, col, n, seg: atSeg, seq: atSeq });
+    return most;
+}
+
 // True once eviction has dropped transitions: a whole segment (ids count up
 // from 0, and only eviction removes one) or a segment's leading chunks (its
 // retained start moved past its begin). The Log and the Timeline then mark
@@ -707,6 +772,7 @@ globalThis.KleinRecording = {
     decodeState, stateAtSeq, seqAtTime, stateAt, timeAtSeq, recordsRange, intervals,
     bbAt, bbChange, BB_RECENT, describe, logRows, logRowAt, logRowIndex, intervalsAll, timelineMarks,
     timelineSections, historyDropped, gapsIn, treeName, eachNode, sameTree, treeRuns,
+    countIn, busiestColumn,
     createStore: () => new Store(),
     createTrack: () => new BlackboardTrack(),
 };

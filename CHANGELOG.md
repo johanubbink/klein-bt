@@ -6,6 +6,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **The Timeline ends at now from the first second.** A window longer than
+  the recording (a session's first 30 s, or zoomed out past it) ends at
+  now, live or paused, instead of starting at the oldest moment and filling
+  up towards the right. A dashed edge marks where the recording starts,
+  with `⇤ Recording starts` beside the axis; once old history was dropped
+  it says so, as before.
+- **A shorter live button.** In the past it reads **Go live ⏭** (an opened
+  file: **Go to end ⏭**) instead of "Jump to live ⏭", so the overview
+  beside it gets the room.
+- **The overview is a minimap over a scrollbar.** It shows the recording at
+  a fixed zoom, eight of the Timeline's windows (4 min at the default
+  30 s), with now at its right edge from the first second: how busy the
+  robot was as amber columns, outages hatched, a pink dashed line where
+  another tree started, and the moment shown as a line (blue live, amber
+  in the past). Hover it for the time and how long ago. Click or drag along
+  it to go to any moment. On the Timeline tab a box on it is the Timeline's
+  window, the same size however long the recording gets: drag it to pan
+  (once the recording is longer than the minimap, one drag crosses all of
+  it), or turn the wheel over it; Ctrl+wheel zooms. While the pointer is
+  over it, a thin scrollbar for the whole recording shows underneath: drag
+  its thumb, or click beside it, to move the Timeline's window there (on
+  the Log tab or folded, to go to that moment). The box's edges no longer
+  zoom: use − and +, Ctrl+wheel or `\`.
+
 ## [0.7.0] - 2026-10-06
 
 ### Added

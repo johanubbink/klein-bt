@@ -1355,6 +1355,7 @@ function seek(next) {
     requestRender({ boards: true });
 }
 KleinDrawer.onSeek(seek);
+KleinOverview.onSeek(seek);
 KleinTimeline.connect({
     seek,
     toggleFold: (id) => { const d = nodeById(id); if (d) toggleFold(d); },

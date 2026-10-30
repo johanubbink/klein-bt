@@ -105,20 +105,33 @@
                 <button id="tr-next" type="button" aria-label="Next transition"
                         title="Next transition (→)">▶&#xFE0E;|</button>
             </div>
-            <!-- "● Live" (inert), or "Jump to live ⏭" in the past; "● End" /
-                 "Jump to end ⏭" for an opened file. One fixed width. -->
+            <!-- "● Live" (inert), or "Go live ⏭" in the past; "● End" /
+                 "Go to end ⏭" for an opened file. One fixed width. -->
             <button id="tr-jump" type="button" data-state="none" hidden></button>
-            <div id="overview" title="Click or drag to move the cursor">
-                <div id="ov-track"><div id="ov-played"></div></div>
-                <div id="ov-marks"></div>
-                <div id="ov-thumb" hidden title="The Timeline's window · drag to pan, drag an edge to zoom">
-                    <div class="ov-edge" data-edge="left"></div><div class="ov-edge" data-edge="right"></div>
+            <!-- The overview (overview.js): the strip, the cursor's line, and
+                 the scrollbar under them that shows on hover. -->
+            <div id="overview">
+                <div id="ov-strip">
+                    <div id="ov-kept"></div>
+                    <svg id="ov-activity" aria-hidden="true"><path></path></svg>
+                    <div id="ov-strip-marks"></div>
+                    <div id="ov-box" hidden
+                         title="The Timeline's window · drag or wheel to pan, Ctrl+wheel to zoom"></div>
                 </div>
-                <div id="ov-knob"></div>
+                <div id="ov-cursor" hidden></div>
+                <div id="ov-scrollbar">
+                    <div id="ov-track"></div>
+                    <div id="ov-marks"></div>
+                    <div id="ov-thumb" hidden></div>
+                    <div id="ov-tick" hidden></div>
+                </div>
             </div>
             <!-- The cursor's time; a narrow drawer drops the µs, then the ms. -->
             <span id="tr-clock" title="The moment shown"><span class="tr-main"></span><span class="tr-ms"></span><span class="tr-micro"></span></span>
         </div>
+        <!-- The overview's hover readout, above the strip: outside the
+             transport row, which clips what overflows it. -->
+        <div id="ov-tip" hidden></div>
         <div id="drawer-toolbar">
             <div class="drawer-tabs" role="tablist" aria-label="View">
                 <button id="drawer-tab-log" type="button" role="tab" aria-selected="false"

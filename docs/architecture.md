@@ -378,7 +378,7 @@ Python model. That pins the two implementations together.
   queries have mirrors here (`stateAtSeq`, `seqAtTime`, `stateAt`, `bbAt`,
   `decodeState`), next to what the cursor, the Log (`logRows`, `logRowAt`)
   the Timeline (`intervalsAll`, `timelineMarks`, `timelineSections`) and
-  the overview (`treeRuns`) need.
+  the overview (`treeRuns`, `countIn`, `busiestColumn`) need.
 - [`klein/static/cursor.js`](../klein/static/cursor.js) →
   `globalThis.KleinCursor`. A clock is data: `live()`, `pause(segId, seq,
   t?)`, `play(fromSegId, fromSeq, nowMs, t?)` (1× only).
@@ -463,7 +463,7 @@ decides what is displayed:
   written.
 - **An opened file** (`klein-bt --open`) is the same recording source, with
   three differences in wording only: "live" is the file's end, so the
-  drawer says `● End` there and offers **Jump to end** elsewhere (Esc and End
+  drawer says `● End` there and offers **Go to end** elsewhere (Esc and End
   return to the end too); without a sidecar the board panel says **No
   blackboard in this file.** at every moment (`body.no-blackboard`, which
   also hides the "sampled 2×/s" note); and the recorder pill and the
@@ -472,15 +472,15 @@ decides what is displayed:
   RUNNING pulse, like `body.telemetry-stale`, shows the blackboard's "sampled
   2×/s" note, and draws a thin amber edge round the visible canvas (right of
   the sidebar, above the drawer: `#past-edge`). Which moment is shown is the
-  drawer's clock, beside its **Jump to live** (see
+  drawer's clock, beside its **Go live** (see
   [The drawer](#the-drawer)).
 - **The drawer** (see [The drawer](#the-drawer)): `KleinDrawer.showRecording`
   and `KleinDrawer.update(rec, pos)` run on every render (the drawer reads
   `pos.mode` and keeps no clock of its own), then, once the cursor's tree is
   on the canvas, `KleinTimeline.update(rec, pos, hierarchy)` and
   `KleinOverview.update(rec, pos)`. They move the cursor through one
-  `seek(clock)` (`KleinDrawer.onSeek`, `KleinTimeline.connect`; the overview
-  goes through the Timeline), which sets the clock and asks for a render; the
+  `seek(clock)` (`KleinDrawer.onSeek`, `KleinTimeline.connect`,
+  `KleinOverview.onSeek`), which sets the clock and asks for a render; the
   Timeline's chevrons fold the canvas through `toggleFold` / `foldOthers`, the
   same `toggleFold` a card's click uses.
 
@@ -542,8 +542,8 @@ A bottom drawer ([`klein/static/drawer.js`](../klein/static/drawer.js)) holds
 the recording views in two 48 px rows over a scrollable body:
 
 - the **transport row**, shared by both tabs: the collapse button,
-  **|◀ ▶ ▶|**, `● Live` (or, in the past, **Jump to live ⏭**),
-  the overview of the whole recording (taking the space left), then the
+  **|◀ ▶ ▶|**, `● Live` (or, in the past, **Go live ⏭**),
+  the overview of the recording (taking the space left), then the
   clock;
 - the **tab row**: the **Log** and **Timeline** tabs, the compact filter
   right after them, on the Timeline tab its zoom (− window +), and at the far
@@ -559,7 +559,7 @@ sidebar's width (see [The sidebar](#the-sidebar)).
   collapsed and back to the chosen height. Collapsed, only the transport
   row shows (49 px with the border, as wide as the sidebar's strip): the
   tree gets the whole canvas, and the overview, the step and play buttons
-  and Jump to live still move it. Height and collapsed state are kept in
+  and Go live still move it. Height and collapsed state are kept in
   `localStorage` (`klein.drawer`); without storage the drawer starts at
   300 px every time. The shown height is the `--drawer-height` custom
   property on `<html>`, so the hint line (`#watermark`) and the canvas's
@@ -576,8 +576,8 @@ sidebar's width (see [The sidebar](#the-sidebar)).
   an opened file's end the button is off.
   Beside them one button (`#tr-jump`) says where the cursor is: live, a
   green `● Live`, inert (disabled, but tinted as a state, not greyed); in
-  the past, paused or playing, an amber **Jump to live ⏭** that goes back.
-  For an opened file it reads `● End` at the end and **Jump to end ⏭**
+  the past, paused or playing, an amber **Go live ⏭** that goes back.
+  For an opened file it reads `● End` at the end and **Go to end ⏭**
   elsewhere. It has a fixed width so the overview beside it never moves.
   Each has a key (its tooltip names it; see Keys below): ←/→ step, Space
   plays or pauses, End (and Esc) goes live; Home has no button and pauses at
@@ -586,28 +586,65 @@ sidebar's width (see [The sidebar](#the-sidebar)).
   newest blackboard sample's, whichever is newer (`shownTime`). Without a
   recording the buttons are off, and Live and the clock are hidden.
 - **The overview** ([`klein/static/overview.js`](../klein/static/overview.js))
-  is a slim track in the transport row over the whole kept recording,
+  takes the rest of the transport row: a strip of the recording at a fixed
+  zoom, over a slim scrollbar for the whole of it. The recording runs from
   `rec.tMin` (the oldest kept moment, which eviction moves) to the head
   (`KleinCursor.headTime`: a blackboard sample newer than the last drain
-  counts); for an opened file, its first timestamp to its last record. The
-  part up to the cursor is tinted, and a knob sits at the cursor (at the
-  right edge while live). On it: each gap hatched like the Timeline's bands,
-  and a pink dashed line where each tree run after the first starts
-  (`KleinRecording.treeRuns`, as Save counts them); nothing else is marked.
-  The marks are rebuilt whenever the span, the width or what is kept
-  changes. Pressing or dragging the track moves the shared cursor as the
-  Timeline's axis does (`KleinCursor.pauseAt`). On the Timeline
-  tab a thumb outlines the Timeline's window, clipped to the track (so a
-  window longer than the recording covers all of it) and at least 6 px wide;
-  it follows the head while the window does. Dragging its body pans the
-  window (a click on it without a drag moves the cursor, as on the track);
-  dragging an edge zooms it with the other edge held (the head, for a
-  window reaching past it), between the shortest and the longest window of
-  − and + and inside the recording. A thumb under 16 px only pans; folded,
-  there is no thumb. A mouse press doesn't focus the overview, so R and F
-  keep working; it has no keys of its own. Without a recording
-  (`--record-buffer 0`, or a robot that can't record) it is a bare grey
-  track that ignores presses.
+  counts); for an opened file, its first timestamp to its last record.
+  - **The strip** is 8 of the Timeline's windows long (4 min at the default
+    30 s; its length counts on the Log tab and folded too). While
+    everything kept fits in it, it ends at the head, so live, now is its
+    right edge from the first second. Once the recording is longer, the
+    window places it as VS Code places its minimap: for a window from `t0`,
+    `w` long, a recording `R` long and the strip `S`, it starts at
+    `tMin + (t0 − tMin) / (R − w) × (R − S)`, so the window's place on the
+    strip is its place in the recording. On the Log tab and folded there is
+    no window, and the cursor stands in for one of no length: live, the
+    strip ends at now, and in the past it follows the cursor.
+  - **On the strip:** what is kept, lighter than the time outside it; the
+    activity, the transitions per 2 px column (`KleinRecording.countIn`,
+    one bisection per column edge in the segments the strip overlaps; the
+    columns on a grid of whole µs, so a column keeps its count as the
+    strip scrolls), log-scaled against the busiest column of everything kept
+    at that column length (`busiestColumn`, counted once per length, then
+    only over new records, so heights hold still as it scrolls; eviction
+    keeps the old maximum until the window's length or the strip's width
+    changes, so heights don't jump as the oldest go), at least
+    2 px tall where there is anything, in the Timeline bars' amber; each gap
+    hatched like the Timeline's bands; a pink dashed line where each tree
+    run after the first starts (`KleinRecording.treeRuns`, as Save counts
+    them); and the cursor's line, blue live (and at an opened file's end),
+    amber in the past. Above the pointer a readout gives the time there and
+    how long before now, `13:05:12.4 · 42 s ago` (an opened file: the time
+    only).
+  - **The box** (the Timeline tab, unfolded) is the Timeline's window, an
+    eighth of the strip whatever the zoom: faint at rest, brighter while the
+    pointer is over the overview. Dragging it pans the window with the box
+    under the pointer (`S / W` per px while the recording fits in the strip,
+    else `(R − w) / (W − box)`, so one drag from end to end crosses all of
+    it); a click on it without a drag (under 3 px) moves the cursor there.
+  - **Pressing the strip** elsewhere pauses the cursor there
+    (`KleinCursor.pauseAt`) and dragging scrubs. Meanwhile the strip and the
+    Timeline's window hold still (`KleinTimeline.hold`); after the release,
+    a cursor outside the window has the window centred on it.
+  - **The wheel** over the overview (the Timeline tab) pans the window as
+    the Timeline's sideways wheel does; Ctrl+wheel zooms around the time
+    under the pointer.
+  - **The scrollbar** under the strip shows only while the pointer is over
+    the overview or a drag is on: it fades in over 120 ms and out 400 ms
+    after the pointer leaves (by `opacity`, so it keeps its place). It spans
+    the whole recording (on the Timeline tab while the recording is shorter
+    than the window, the window's length back from the head, with no thumb:
+    nothing to scroll), with the gaps, the run starts and a tick at the
+    cursor. Its thumb is the window, at least 18 px wide: dragging it pans
+    the window by the distance moved, and a press beside it centres the
+    window there and drags on. It never moves the cursor, except with no
+    window (the Log tab, or folded): there a press moves the cursor, so the
+    whole recording stays in reach folded.
+
+  A mouse press doesn't focus the overview, so R and F keep working; it has
+  no keys of its own. Without a recording (`--record-buffer 0`, or a robot
+  that can't record) it is a bare grey strip that ignores presses.
 - **The recorder pill** says what klein keeps, from the browser's mirror:
   a red dot, `Recording`, and in muted monospace the span kept and its size,
   `10 min · 60 kB`; its tooltip is the whole summary,
@@ -658,11 +695,14 @@ sidebar's width (see [The sidebar](#the-sidebar)).
   (`historyDropped`), the Log's first line, hatched like the Timeline's
   not-recorded bands, reads "Transitions older than the kept 10 min were
   dropped", with the span actually kept (as the recorder pill's), and the
-  rows sit one line lower. The Timeline marks the same edge: its window never
-  starts before the oldest record, so when panned or zoomed out to it, a
-  dashed edge at the axis's left end, with the same note (`⇤ Transitions
-  older…`, cut to fit, the whole text its tooltip) in the name column beside
-  the axis. While nothing was dropped neither shows.
+  rows sit one line lower. While nothing was dropped the Log has no such
+  line. The Timeline marks where the recording starts whenever that is in
+  its window (panned back to the oldest record, or a window longer than the
+  recording, which ends at the head): a dashed edge over the rows at
+  `rec.tMin`, nothing drawn left of it, and a note in the name column
+  beside the axis, `⇤ Recording starts` (an opened file too), or once
+  eviction dropped some, the Log's note (`⇤ Transitions older…`, cut to
+  fit, the whole text its tooltip).
 - **Save** (the recorder pill's right half, past a hairline) is one
   download of everything kept:
   it fetches `/log.zip` as a blob and saves it through an `<a download>`
@@ -689,7 +729,7 @@ sidebar's width (see [The sidebar](#the-sidebar)).
   says "Blackboard history from this moment was dropped." instead
   (`Segment.bbDropped` in the mirror). Live keeps what it shows. The row is
   highlighted, the transport row's clock says `14:03:22.201 030` beside
-  **Jump to live**, and the canvas gets its amber edge. Recording goes on
+  **Go live**, and the canvas gets its amber edge. Recording goes on
   underneath. When eviction drops the moment shown (`KleinCursor.evicted`),
   the cursor pauses just after the oldest kept record, its Log row selected,
   and a pill says so for 6 s: "Older than the kept 10 min: moved to the oldest
@@ -697,7 +737,7 @@ sidebar's width (see [The sidebar](#the-sidebar)).
   previous/next row as listed: with no filter that is consecutive seqs, across
   segment boundaries; with one, the previous/next matching transition. From
   live, ↑ takes the newest row; at either end the cursor stays. **Esc**,
-  **End** or **Jump to live** goes back to live and scrolls to the newest row.
+  **End** or **Go live** goes back to live and scrolls to the newest row.
   When the cursor moves elsewhere (the Timeline's playhead, stepping,
   playing), the Log scrolls its row into view (the next listed row when the
   filter hides it), at once or when the tab is shown again; going live by any
@@ -739,7 +779,7 @@ sidebar's width (see [The sidebar](#the-sidebar)).
     inside the window change; the playhead moves on its own. **Bars are
     drawn for at most 20,000 records in the window** (`MAX_WINDOW_RECORDS`);
     a window holding more shows "Zoom in to see bars: N transitions in this
-    window…" over the lanes instead, and its axis, bands, dropped edge and
+    window…" over the lanes instead, and its axis, bands, start edge and
     playhead still work. While following live, a rebuild also waits at least
     8× the last one's script and layout time, so a busy window steps rather
     than taking the main thread; a timer makes the last rebuild when nothing
@@ -753,19 +793,26 @@ sidebar's width (see [The sidebar](#the-sidebar)).
     when it is in view, else the middle; **Ctrl+wheel** zooms around the
     pointer, **dragging the lanes** (or Shift+wheel, or a sideways wheel)
     pans; a plain wheel scrolls the rows. The window never runs past the
-    head or before the oldest record; one longer than the recording starts
-    at the oldest record and the head fills it. While live it follows the
-    head, until you pan or zoom it off the head (back onto the head, or back
-    to live, follows again). **⤢** (or `\`) zooms to fit: the window becomes
-    everything kept, `rec.tMin` to the head, its length kept within the
-    ladder's 200 µs and 1 h (`clampWindow`); while live it then follows the
-    head at that length, so the oldest moment drifts off its left edge.
+    head, nor before the oldest record once the recording is longer than
+    it (`clampWindow`).
+    One longer than the recording ends at the head, live or paused, so now
+    is at the axis's right end from a session's first second; the time
+    before the oldest record is empty, its start edge marked (see Dropped
+    history). While live it follows the head, until you pan or zoom it off
+    the head (back onto the head, or back to live, follows again); paused,
+    a window longer than the recording still moves on with the head, except
+    while the playhead is dragged. **⤢** (or `\`) zooms to fit: the window
+    becomes everything kept, `rec.tMin` to the head, its length kept within
+    the ladder's 200 µs and 1 h (`clampWindow`); while live it then follows
+    the head at that length, so the oldest moment drifts off its left edge.
   - **The playhead** is the shared cursor. Pressing the axis pauses there,
     and dragging scrubs: the cursor is paused at that time to the µs,
     `pause(seg, seqAtTime(seg, t), t)` in the segment holding it, so the
     tree shows `state_at(t)` and the clock that time, and the playhead stays
-    under the pointer between transitions. A click on the lanes without a
-    drag does the same. Stepping and playing are the transport row's (see
+    under the pointer between transitions: the window holds still while it
+    is dragged (one longer than the recording catches up with the head after
+    the release). A click on the lanes without a drag does the same.
+    Stepping and playing are the transport row's (see
     The transport, above). A cursor moved elsewhere (a Log row, a step,
     playing) that leaves the window re-centres the window on it.
   - **F** with the drawer open on the Timeline also scrolls the first row of
@@ -780,7 +827,7 @@ sidebar's width (see [The sidebar](#the-sidebar)).
   | ← / → (and ↑ / ↓) | previous / next transition as filtered | \|◀ / ▶\| |
   | Space | play / pause (live: pause there; an opened file's end: nothing) | ▶ / ❚❚ |
   | Home | pause at the oldest kept moment: `rec.tMin`, the records of that µs applied (an opened file: its first moment) | — |
-  | End, Esc | go live (an opened file: its end) | Jump to live / end |
+  | End, Esc | go live (an opened file: its end) | Go live / Go to end |
   | `\` | zoom the Timeline to fit; on the Timeline tab only, the Log has no window | ⤢ |
 
   Unmodified presses only, except `\` typed with AltGr (reported as

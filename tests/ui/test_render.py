@@ -185,10 +185,11 @@ class RenderTest(DashboardCase):
                         arg=chip, timeout=10000)
                     self.assertEqual(b.page.evaluate(_CHIP_AND_SAVE),
                                      {"state": "off", "disabled": True, "title": chip})
-                    # The drawer's overview is a bare grey track.
+                    # The drawer's overview is a bare grey strip that ignores presses.
+                    b.page.click("#overview")
                     self.assertEqual(b.page.evaluate(
                         "() => [document.getElementById('overview').className,"
-                        " document.querySelectorAll('#ov-marks i').length, KleinOverview.debug()]"),
+                        " document.querySelectorAll('#overview i').length, KleinOverview.debug()]"),
                         ["empty", 0, None])
                     # ...and the transport has nothing to say: no Live
                     # button, no clock, no zoom.

@@ -55,7 +55,7 @@ const droppedNoteEl = document.getElementById("tl-dropped-note");
 const tooManyEl = document.getElementById("tl-too-many");
 
 // app.js: move the shared cursor, fold the canvas, and the cards' glyphs;
-// overview.js: the window moved (its thumb).
+// overview.js: the window moved (its box and thumb).
 let hooks = { seek() {}, toggleFold() {}, foldOthers() {}, glyphFor: () => "", windowMoved() {} };
 let rec = null;                     // what update() was last given
 let pos = null;
@@ -92,11 +92,13 @@ function timeAt(clientX) {
 }
 
 // Keep the window on the recording: never past the head, and never before the
-// oldest record. A window longer than everything kept starts at the oldest
-// record, and the head fills it towards the right edge.
+// oldest record once there is more than a window of it. A window longer than
+// everything kept ends at the head, so now is at the right edge from the
+// first second; the time before the oldest record is empty, its start edge
+// marked (paintBars).
 function clampWindow() {
     span = Math.min(Math.max(span, LADDER[0]), LADDER[LADDER.length - 1]);
-    t1 = Math.max(Math.min(t1, head()), rec.tMin + span);
+    t1 = Math.max(Math.min(t1, head()), Math.min(head(), rec.tMin + span));
 }
 
 // The window's length: "10 s", "500 ms", "1.25 s", "200 µs", "10 min".
@@ -302,7 +304,7 @@ function paintBars() {
     barsKey = key;
     barsT1 = t1;
     const k = width / span;
-    const inWindow = rec.segments.reduce((n, s) => n + R.seqAtTime(s, t1) - R.seqAtTime(s, t0), 0);
+    const inWindow = R.countIn(rec, [t0, t1])[0];
     const tooMany = inWindow > MAX_WINDOW_RECORDS;
     tooManyEl.hidden = !tooMany;
     if (tooMany) {
@@ -324,19 +326,21 @@ function paintBars() {
         bandsEl.children[i].firstChild.textContent = b.kind === "gap" ? b.label : `tree: ${b.label}`;
         bandsEl.children[i].title = b.kind === "gap" ? `Not recorded (${b.label})` : b.title;
     });
-    // Where the kept history starts, once eviction dropped some: the window
-    // can't go further left, so this is its left edge when panned there. A
-    // dashed edge over the rows, its note in the name column beside the axis.
-    const edge = Boolean(dropped) && rec.tMin >= t0 && rec.tMin <= t1;
+    // Where the recording starts, when that is inside the window (a window
+    // longer than the recording, or panned back to its oldest record): a
+    // dashed edge over the rows, its note in the name column beside the
+    // axis. Once eviction dropped history, the note says what was dropped.
+    const edge = rec.tMin >= t0 && rec.tMin <= t1;
+    const note = dropped || "Recording starts";
     if (edge) {
         const mark = bandsEl.appendChild(document.createElement("div"));
         mark.className = "tl-dropped";
         mark.style.left = `${((rec.tMin - t0) * k).toFixed(2)}px`;
-        mark.title = dropped;
+        mark.title = note;
     }
     droppedNoteEl.hidden = !edge;
-    droppedNoteEl.textContent = edge ? `⇤ ${dropped}` : "";
-    droppedNoteEl.title = edge ? dropped : "";      // cut to fit the name column
+    droppedNoteEl.textContent = edge ? `⇤ ${note}` : "";
+    droppedNoteEl.title = edge ? note : "";         // cut to fit the name column
     // The axis.
     const step = tickStep();
     const ticks = [];
@@ -358,10 +362,14 @@ function paintBars() {
 // ------------------------------------------------------------------ //
 // Painting
 // ------------------------------------------------------------------ //
-// Nothing is painted while the tab is hidden or the drawer folded; showing
-// either asks for a render, which paints again.
+// The Timeline is shown on its tab with the drawer open. Nothing is painted
+// otherwise; showing it asks for a render, which paints again.
+function shown() {
+    return !panel.hidden && !drawer.classList.contains("collapsed");
+}
+
 function paint() {
-    if (panel.hidden || drawer.classList.contains("collapsed")) return;
+    if (!shown()) return;
     refreshRows();
     const ready = Boolean(pos && rowEls.length);
     lanes.hidden = !ready;
@@ -377,7 +385,10 @@ function paint() {
     const moved = !lastPos || lastPos.seg !== pos.seg || lastPos.seq !== pos.seq || lastPos.t !== pos.t;
     lastPos = pos;
     if (moved && !pos.live && !scrubbing && (pos.t < t1 - span || pos.t > t1)) t1 = pos.t + span / 2;
-    clampWindow();
+    // Scrubbing, the window holds still, even one longer than the recording
+    // (which ends at the head, so moves on with it): the next paint after
+    // the release catches up.
+    if (!scrubbing) clampWindow();
     paintBars();
 
     const x = xOf(C.shownTime(pos, rec));     // live: at head()
@@ -414,16 +425,20 @@ function windowMoved() {
     hooks.windowMoved();
 }
 
-// The window as last painted, for the overview's thumb: {t0, t1, span,
-// min, max} (min and max: the shortest and longest span), or null before
-// the Timeline has painted one.
+// The window shown, for the overview's box and thumb: {t0, t1, span}, or
+// null while the Timeline isn't shown (another tab, or folded) or before it
+// has painted one.
 function getWindow() {
-    return t1 === null || !pos ? null
-        : { t0: t1 - span, t1, span, min: LADDER[0], max: LADDER[LADDER.length - 1] };
+    return t1 === null || !pos || !shown() ? null : { t0: t1 - span, t1, span };
+}
+
+// The window's length, painted yet or not (the overview's strip is 8 of them).
+function getSpan() {
+    return span;
 }
 
 // Move the window to (t1 - span, t1], as the reader's own move (the
-// overview's thumb). Clamped as always.
+// overview's box and scrollbar). Clamped as always.
 function setWindow(right, newSpan) {
     if (!pos || t1 === null) return;
     t1 = right;
@@ -438,6 +453,11 @@ function zoomTo(newSpan, anchor) {
     span = Math.min(Math.max(newSpan, LADDER[0]), LADDER[LADDER.length - 1]);
     t1 = anchor + (1 - fraction) * span;
     if (span !== before) windowMoved();
+}
+
+// Ctrl+wheel, here and over the overview: deltaY scales the window, around anchor.
+function zoomBy(deltaY, anchor) {
+    zoomTo(span * Math.exp(deltaY * 0.002), anchor);
 }
 
 // The buttons step along LADDER, anchored on the head while following live,
@@ -468,23 +488,23 @@ function seekTime(t) {
     hooks.seek(C.pauseAt(rec, t));
 }
 
+// The overview's scrub: the window holds still while it lasts, as while the
+// playhead is dragged; after it the cursor counts as moved, so one left
+// outside the window is brought into view, centred.
+function hold(on) {
+    scrubbing = on;
+    if (on) return;
+    lastPos = null;
+    paint();
+}
+
 // The ruler: press to put the playhead there, drag to scrub.
 ruler.addEventListener("pointerdown", (event) => {
     if (event.button !== 0 || !pos) return;
     event.preventDefault();
-    ruler.setPointerCapture(event.pointerId);
     scrubbing = true;
     seekTime(timeAt(event.clientX));
-    const move = (e) => seekTime(timeAt(e.clientX));
-    const end = () => {
-        scrubbing = false;
-        ruler.removeEventListener("pointermove", move);
-        ruler.removeEventListener("pointerup", end);
-        ruler.removeEventListener("pointercancel", end);
-    };
-    ruler.addEventListener("pointermove", move);
-    ruler.addEventListener("pointerup", end);
-    ruler.addEventListener("pointercancel", end);
+    KleinDrawer.drag(ruler, event, (e) => seekTime(timeAt(e.clientX)), () => { scrubbing = false; });
 });
 
 // The lanes: drag to pan the time axis; a click without a drag puts the
@@ -494,23 +514,15 @@ lanes.addEventListener("pointerdown", (event) => {
     const startX = event.clientX;
     const startT1 = t1;
     let panned = false;
-    lanes.setPointerCapture(event.pointerId);
-    const move = (e) => {
+    KleinDrawer.drag(lanes, event, (e) => {
         if (!panned && Math.abs(e.clientX - startX) < 3) return;
         panned = true;
         t1 = startT1 - (e.clientX - startX) * span / trackWidth();
         windowMoved();
-    };
-    const end = (e) => {
-        lanes.removeEventListener("pointermove", move);
-        lanes.removeEventListener("pointerup", end);
-        lanes.removeEventListener("pointercancel", end);
+    }, (e) => {
         if (!panned && e.type === "pointerup"
             && e.clientX >= rulerTrack.getBoundingClientRect().left) seekTime(timeAt(e.clientX));
-    };
-    lanes.addEventListener("pointermove", move);
-    lanes.addEventListener("pointerup", end);
-    lanes.addEventListener("pointercancel", end);
+    });
 });
 
 // Ctrl+wheel zooms around the pointer; a sideways wheel (or Shift+wheel)
@@ -519,7 +531,7 @@ panel.addEventListener("wheel", (event) => {
     if (!pos) return;
     if (event.ctrlKey) {
         event.preventDefault();
-        zoomTo(span * Math.exp(event.deltaY * 0.002), timeAt(event.clientX));
+        zoomBy(event.deltaY, timeAt(event.clientX));
     } else if (event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
         event.preventDefault();
         t1 += (event.shiftKey ? event.deltaY : event.deltaX) * span / trackWidth();
@@ -546,7 +558,7 @@ window.addEventListener("resize", () => {
 // F with the drawer open: scroll the first of these nodes' rows (the running
 // frontier, app.js) into view, under the sticky axis and section header.
 function revealRows(ids) {
-    if (panel.hidden || drawer.classList.contains("collapsed")) return;
+    if (!shown()) return;
     refreshRows();
     const wanted = new Set(ids);
     const row = rowEls.find((r) => wanted.has(r.item.id));
@@ -567,7 +579,7 @@ function debug() {
 }
 
 globalThis.KleinTimeline = {
-    update, revealRows, debug, getWindow, setWindow, seekTime, fit,
+    update, revealRows, debug, getWindow, getSpan, setWindow, zoomBy, hold, fit,
     connect: (h) => { hooks = { ...hooks, ...h }; },
 };
 })();

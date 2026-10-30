@@ -5,15 +5,21 @@ A Python ``Recording`` with a short window is streamed through
 with ``--record-buffer 0``, so nothing else feeds it), then grown until
 eviction drops its oldest chunk:
 
-* the Log's first line and the Timeline's left edge say that history older
+* the Log's first line and the Timeline's start edge say that history older
   than the kept span was dropped, with the span the recording really keeps
-  (head back to the oldest record, as the recorder pill); zoom to fit (\\) shows
+  (head back to the oldest record, as the recorder pill; before that, the
+  edge says where the recording starts); zoom to fit (\\) shows
   exactly that span, and Home pauses at its oldest moment;
 * a paused cursor on a dropped record moves to the oldest kept record (its
   Log row selected) with a pill in the banner stack;
 * scrolled up in the Log, the rows in view stay in view when older rows go;
 * two million rows (more than a browser lets one element be tall at 20 px a
-  row) still scroll end to end, and a row far down is revealed and selected.
+  row) still scroll end to end, and a row far down is revealed and selected;
+* the overview's box stays the window and an eighth of its strip at any
+  length of recording and after eviction: the strip ends at the head while
+  the recording fits in it and scrolls in proportion once it is longer (one
+  drag of the box crosses it all); the hover scrollbar's thumb and track
+  move the window, not the cursor.
 
 Skipped when Playwright is missing.
 """
@@ -24,7 +30,7 @@ from klein.recording import Recording
 from klein.streaming import Streamer
 from tests.harness.model import fmt_span, names
 from tests.helpers import layout
-from tests.ui import DashboardCase
+from tests.ui import OVERVIEW, DashboardCase, overview_t, overview_x
 
 SHOTS = "eviction"
 ROW = 20
@@ -83,12 +89,19 @@ _SYNTH_JS = """([n, uids]) => {
 }"""
 
 
+# The overview's readout hidden, and how far the page, the drawer and its
+# transport row could scroll sideways.
+_OVERFLOW = """() => [document.getElementById('ov-tip').hidden,
+  ...[document.documentElement, document.getElementById('drawer'),
+      document.getElementById('drawer-transport')].map(e => e.scrollWidth - e.clientWidth)]"""
+
+
 class Synthetic:
     """A seeded recording of the mock's tree, streamed as the gateway would."""
 
-    def __init__(self, tree):
+    def __init__(self, tree, keep_us=KEEP_US):
         self.layout = layout(tree=tree, uids=names(tree))
-        self.rec = Recording(keep_us=KEEP_US)
+        self.rec = Recording(keep_us=keep_us)
         self.frames = []
         self.streamer = Streamer(self.rec, lambda clients, f: self.frames.append(f),
                                  name="synthetic")
@@ -177,6 +190,12 @@ class EvictionTest(DashboardCase):
         self.assertIsNone(self.log_view()["dropped"], "nothing dropped yet: no marker")
         overview = "() => [KleinOverview.debug().tMin, KleinOverview.debug().tMax]"
         self.assertEqual(self.page.evaluate(overview), [T0, synth.rec.head])
+        # The Timeline at a 5 s window, longer than the 3 s recorded: it ends
+        # at the head, and its start edge says where the recording starts.
+        self.page.click("#drawer-tab-timeline")
+        self.zoom_to(5_000_000)
+        self.assertEqual(self.assert_timeline_starts("Recording starts", "nothing dropped")["tMin"], T0)
+        self.page.click("#drawer-tab-log")
         # Scrolled up: row 1500 at the top.
         self.page.evaluate(f"() => {{ document.getElementById('drawer-body').scrollTop = {1500 * ROW}; }}")
         before = self.log_view()["rows"]
@@ -206,22 +225,14 @@ class EvictionTest(DashboardCase):
         self.browser.screenshot(SHOTS, "log_dropped_marker")
 
         # The Timeline at a 5 s window, longer than the 4 s kept: the window
-        # starts at the oldest record, and the dropped edge is the axis's left end.
+        # ends at the head, and the start edge at the oldest kept record says
+        # what was dropped, its note beside the axis.
         self.page.click("#drawer-tab-timeline")
         self.zoom_to(5_000_000)
-        self.frame()
-        mark = self.page.evaluate("""() => { const m = document.querySelector('#tl-bands .tl-dropped');
-            if (!m) return null; const track = document.getElementById('tl-ruler-track').getBoundingClientRect();
-            const note = document.getElementById('tl-dropped-note');
-            return { text: note.hidden ? null : note.textContent, title: m.title,
-                     x: m.getBoundingClientRect().left - track.left }; }""")
-        self.assertIsNotNone(mark, "the Timeline marks the dropped edge")
-        self.assertEqual(mark["text"], f"⇤ {note}", "its note, beside the axis")
-        self.assertEqual(mark["title"], note)
-        self.assertAlmostEqual(mark["x"], 0, delta=1)
-        debug = self.page.evaluate("KleinTimeline.debug()")
-        self.assertEqual(debug["t0"], synth.rec.t_min)
+        self.assertEqual(self.assert_timeline_starts(note, "dropped")["tMin"], synth.rec.t_min)
         self.browser.screenshot(SHOTS, "timeline_dropped_marker")
+        # The overview's box is still the window, an eighth of its strip.
+        self.overview("after eviction")
         # Zoomed in to 1 s while live, the oldest record is off screen: no mark.
         self.zoom_to(1_000_000)
         self.frame()
@@ -242,6 +253,91 @@ class EvictionTest(DashboardCase):
         self.assertEqual(seg.t_start, synth.rec.t_min)
         self.page.keyboard.press("End")
         self.assertEqual(self.page.evaluate("clock"), {"mode": "live"})
+
+    def test_the_overview_box_stays_an_eighth_of_its_strip(self):
+        """However long the recording, the overview's box is the Timeline's
+        window and an eighth of its strip (also after −/+ and fit); live, it
+        and the cursor's line end at the strip's right edge. While the
+        recording fits in the strip, the strip ends at the head and a dragged
+        box moves along it; longer, the strip scrolls in proportion, so the
+        dragged box stays under the pointer and one drag from end to end
+        crosses the whole recording. The scrollbar shows on hover only: its
+        thumb pans the window by what it moved, and a press beside the thumb
+        brings the window there, the cursor left live."""
+        page, drag, view = self.page, self.browser.drag, self.overview
+        follow = """() => KleinTimeline.setWindow(KleinCursor.headTime(shownRecording()),
+                                                 KleinTimeline.getWindow().span)"""
+        page.click("#drawer-tab-timeline")
+        self.addCleanup(page.evaluate, follow)
+        self.addCleanup(self.zoom_to, 30_000_000)
+        strip, track = (page.locator(s).bounding_box() for s in ("#ov-strip", "#ov-track"))
+        y, sb_y = strip["y"] + strip["height"] / 2, track["y"] + track["height"] / 2
+        bar_t = lambda v, x: overview_t(v, x, "bar")
+        opacity = "(o) => getComputedStyle(document.getElementById('ov-scrollbar')).opacity === o"
+
+        for seconds, span in ((5, 30_000_000), (40, 30_000_000), (180, 30_000_000),
+                              (40, 2_000_000), (180, 2_000_000)):
+            with self.subTest(seconds=seconds, span=span):
+                synth = Synthetic(self.tree, keep_us=10 ** 9)
+                synth.idle(T0 + seconds * 1_000_000 - synth.t)
+                self.feed(synth)
+                self.zoom_to(span)
+                page.evaluate(follow)
+                v = view("live")            # its box and line at the strip's right edge
+                ov, head = v["ov"], T0 + seconds * 1_000_000
+                right = ov["left"] + ov["width"]
+                self.assertEqual((ov["tMin"], ov["tMax"]), (T0, head))
+                self.assertTrue(v["tl"]["follow"])
+                fits = head - T0 <= ov["S"]
+                if fits:
+                    self.assertEqual(ov["m0"], head - ov["S"], "the strip ends at the head")
+                if head - T0 <= span:
+                    continue            # the window holds the whole recording: nothing to move
+                # The box dragged half way back stays under the pointer;
+                # fitting in the strip, the strip stays put.
+                box = v["box"]
+                room = box["left"] - max(ov["left"], overview_x(v, T0))
+                at = (box["left"] + box["right"]) / 2
+                drag((at, y), (at - room / 2, y))
+                after = view("dragged half way")
+                self.assertAlmostEqual(after["box"]["left"], box["left"] - room / 2, delta=1)
+                self.assertEqual(after["ov"]["m0"] == ov["m0"], fits)
+                self.assertEqual(page.evaluate("clock"), {"mode": "live"})
+                # One drag from the head end to the oldest crosses it all, and back.
+                per_px = ov["S"] / ov["width"] if fits else (head - T0 - span) / room
+                page.evaluate(follow)
+                drag((at, y), (at - room, y))
+                after = view("dragged to the oldest")
+                self.assertAlmostEqual(after["tl"]["t0"], T0, delta=per_px)
+                at -= room
+                drag((at, y), (at + room, y))
+                after = view("dragged back to the head")
+                self.assertAlmostEqual(after["tl"]["t1"], head, delta=per_px)
+                # The scrollbar: hidden at rest, shown on hover.
+                page.mouse.move(100, 100)
+                page.wait_for_function(opacity, arg="0", timeout=2000)
+                page.mouse.move(right - 1, y)
+                page.wait_for_function(opacity, arg="1", timeout=2000)
+                before = page.evaluate(OVERVIEW)
+                # Its readout at the strip's end widens nothing: no sideways scroll.
+                self.assertEqual(page.evaluate(_OVERFLOW), [False, 0, 0, 0])
+                # Its thumb pans the window by what it moved.
+                thumb = before["thumb"]
+                at = (thumb["left"] + thumb["right"]) / 2
+                drag((at, sb_y), (at - 40, sb_y))
+                after = view("a thumb drag")
+                self.assertAlmostEqual(after["tl"]["t0"] - before["tl"]["t0"],
+                                       bar_t(before, at - 40) - bar_t(before, at),
+                                       delta=bar_t(before, 1) - bar_t(before, 0))
+                # A press beside it brings the window there; the cursor stays live.
+                at = (after["ov"]["left"] + after["thumb"]["left"]) / 2
+                page.mouse.click(at, sb_y)
+                after = view("a press beside the thumb")
+                t1 = min(max(bar_t(before, at) + span / 2, T0 + span), head)
+                self.assertAlmostEqual(after["tl"]["t1"], t1, delta=bar_t(before, 1) - bar_t(before, 0))
+                self.assertEqual(page.evaluate("clock"), {"mode": "live"})
+                page.keyboard.press("\\")
+                view("zoomed to fit")
 
     def test_a_whole_dropped_segment_is_marked_too(self):
         """Eviction dropping an ended segment, and nothing of the next one."""

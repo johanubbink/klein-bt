@@ -838,7 +838,7 @@ body.viewing-past .status-pill.running { animation: none; }
 #drawer-handle:hover::after, #sidebar-handle:hover::after { background: var(--text-muted); }
 
 /* The drawer's two rows. The transport row, the collapsed strip on its
-   own: fold, |◀ ▶ ▶|, Live or Jump to live, the overview (overview.js)
+   own: fold, |◀ ▶ ▶|, Live or Go live, the overview (overview.js)
    taking what is left, then the clock. The tab row: the tabs, the filter,
    the Timeline's zoom and, at the far end, the recorder pill; hidden while
    the drawer is collapsed. */
@@ -880,11 +880,11 @@ body.viewing-past .status-pill.running { animation: none; }
 }
 /* Where the cursor is, beside the buttons, in one button of one width (the
    longest label's), so nothing beside it moves: an inert green "● Live" (or
-   "● End" for an opened file), or in the past an amber "Jump to live ⏭"
-   that goes back. */
+   "● End" for an opened file), or in the past an amber "Go live ⏭" (or
+   "Go to end ⏭") that goes back. */
 #tr-jump {
     flex-shrink: 0;
-    width: 100px;               /* "Jump to live ⏭", the longest */
+    width: 86px;                /* "Go to end ⏭", the longest (81 px in Chrome) */
     height: 28px;
     box-sizing: border-box;
     padding: 0 6px;
@@ -925,11 +925,16 @@ body.viewing-past .status-pill.running { animation: none; }
     font-size: 12px;
     color: var(--text-main);
 }
-/* The overview (overview.js): the whole kept recording on a slim track in
-   the transport row. Its marks sit on the track: hatched gaps and a pink
-   dashed line where a new tree run starts; then the Timeline's window (the
-   thumb) and the cursor's knob. */
+/* The overview (overview.js), filling the rest of the transport row: a
+   strip at 8× the Timeline's window (dark where nothing is kept; the
+   activity as amber columns; hatched gaps and pink dashed tree-run starts;
+   the window's box, faint until the pointer is over the overview), the
+   cursor's line over it, and under it a slim scrollbar over the whole
+   recording that fades in while the pointer is over the overview (or a drag
+   is on) and out 400 ms after it leaves. Hidden by opacity, so it keeps its
+   place and size. */
 #overview {
+    --ov-activity: color-mix(in srgb, var(--color-RUNNING) 62%, var(--panel-bg));
     position: relative;
     flex: 1;
     min-width: 24px;
@@ -937,71 +942,129 @@ body.viewing-past .status-pill.running { animation: none; }
     cursor: pointer;
     touch-action: none;
 }
-#ov-track {
+#ov-strip {
     position: absolute;
-    left: 6px;                  /* the knob's radius: it fits at either end */
-    right: 6px;
-    top: calc(50% - 4px);
-    height: 8px;
-    border-radius: 4px;
+    left: 0;
+    right: 0;
+    top: 7px;
+    height: 28px;
+    border-radius: 3px;
     overflow: hidden;
-    background: var(--border-color);
+    background: color-mix(in srgb, var(--bg-color) 60%, var(--panel-bg));
 }
-#ov-played {
+#ov-kept { position: absolute; top: 0; bottom: 0; background: var(--subtree-fill-0); }
+#ov-activity {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
     height: 100%;
-    background: color-mix(in srgb, var(--accent) 55%, var(--panel-bg));
-}
-#ov-marks { position: absolute; inset: 0; pointer-events: none; }
-#ov-marks i { position: absolute; }
-.ov-gap {
-    top: calc(50% - 8px);
-    height: 16px;
-    box-sizing: border-box;
-    background: var(--hatch), var(--panel-bg);
-    border-left: 1px dashed var(--color-IDLE);
-    border-right: 1px dashed var(--color-IDLE);
-}
-.ov-run {
-    top: calc(50% - 10px);
-    height: 20px;
-    border-left: 2px dashed var(--type-SubTree);
-}
-#ov-thumb {
-    position: absolute;
-    top: calc(50% - 10px);
-    height: 20px;
-    box-sizing: border-box;
-    border: 1px solid color-mix(in srgb, var(--text-main) 70%, transparent);
-    border-radius: 4px;
-    background: color-mix(in srgb, var(--text-main) 8%, transparent);
-    cursor: grab;
-}
-#ov-thumb:active { cursor: grabbing; }
-.ov-edge {
-    position: absolute;
-    top: -2px;
-    bottom: -2px;
-    width: 8px;
-    cursor: ew-resize;
-}
-.ov-edge[data-edge="left"] { left: -5px; }
-.ov-edge[data-edge="right"] { right: -5px; }
-#ov-thumb.narrow .ov-edge { pointer-events: none; }  /* too narrow to tell body from edge */
-#ov-knob {
-    position: absolute;
-    top: calc(50% - 6px);
-    width: 12px;
-    height: 12px;
-    margin-left: -6px;
-    box-sizing: border-box;
-    border-radius: 50%;
-    background: var(--text-main);
-    border: 2px solid var(--accent);
+    fill: var(--ov-activity);
     pointer-events: none;
 }
-#ov-knob.live { background: var(--accent); }
+#ov-strip-marks, #ov-marks { position: absolute; inset: 0; pointer-events: none; }
+#ov-strip-marks i, #ov-marks i { position: absolute; top: 0; bottom: 0; }
+.ov-gap { background: var(--hatch), var(--panel-bg); }
+#ov-strip-marks .ov-run { border-left: 1px dashed var(--type-SubTree); }
+#ov-marks .ov-run { top: -1px; bottom: -1px; border-left: 1px solid var(--type-SubTree); }
+#ov-box {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    box-sizing: border-box;
+    border: 1px solid color-mix(in srgb, var(--text-main) 32%, transparent);
+    border-radius: 3px;
+    background: color-mix(in srgb, var(--text-main) 5%, transparent);
+    cursor: grab;
+}
+#overview:hover #ov-box {
+    border-color: color-mix(in srgb, var(--text-main) 80%, transparent);
+    background: color-mix(in srgb, var(--text-main) 10%, transparent);
+}
+#overview.panning #ov-box {
+    border-color: color-mix(in srgb, var(--text-main) 95%, transparent);
+    background: color-mix(in srgb, var(--text-main) 14%, transparent);
+}
+#overview.panning, #overview.panning #ov-box { cursor: grabbing; }
+/* The cursor's line on the strip and its tick on the scrollbar: amber in
+   the past, blue live (or at an opened file's end). */
+#ov-cursor, #ov-tick {
+    position: absolute;
+    width: 2px;
+    background: var(--changed);
+    pointer-events: none;
+}
+#ov-cursor.live, #ov-tick.live { background: var(--accent); }
+#ov-cursor {
+    top: 4px;
+    height: 34px;               /* 3 px past the strip either side */
+    margin-left: -1px;
+}
+#ov-cursor::before {
+    content: "";
+    position: absolute;
+    top: -1px;
+    left: -3px;
+    width: 8px;
+    height: 5px;
+    background: inherit;
+    clip-path: polygon(0 0, 100% 0, 50% 100%);
+}
+#ov-scrollbar {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 36px;
+    bottom: 0;                  /* the hit area: everything under the strip */
+    opacity: 0;
+    transition: opacity 120ms ease 400ms;
+}
+#overview:hover #ov-scrollbar, #overview.dragging #ov-scrollbar {
+    opacity: 1;
+    transition-delay: 0s;
+}
+/* The scrollbar's rail, its marks and its thumb: one 7 px band. */
+#ov-track, #ov-marks, #ov-thumb {
+    position: absolute;
+    top: 2px;
+    bottom: auto;
+    height: 7px;
+    border-radius: 4px;
+}
+#ov-track {
+    left: 0;
+    right: 0;
+    background: color-mix(in srgb, var(--border-color) 95%, transparent);
+}
+#ov-marks .ov-gap { min-width: 2px; }
+#ov-thumb {
+    background: color-mix(in srgb, var(--text-muted) 70%, transparent);
+    cursor: grab;
+}
+#overview.panning #ov-thumb { background: color-mix(in srgb, var(--text-muted) 90%, transparent); }
+#ov-tick { top: 0; height: 11px; }
+/* Without a recording, a bare grey strip that ignores presses. */
 #overview.empty { cursor: default; }
-#overview.empty #ov-track { background: color-mix(in srgb, var(--color-IDLE) 30%, var(--panel-bg)); }
+#overview.empty #ov-strip { background: color-mix(in srgb, var(--color-IDLE) 30%, var(--panel-bg)); }
+#overview.empty #ov-scrollbar { display: none; }
+/* The time under the pointer, above the strip (a child of #drawer, as the
+   transport row clips what overflows it); placed by overview.js. */
+#ov-tip {
+    position: absolute;
+    bottom: calc(100% - 4px);
+    z-index: 3;
+    transform: translateX(-50%);
+    padding: 2px 7px;
+    font-family: ui-monospace, "DejaVu Sans Mono", monospace;
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    color: var(--text-main);
+    background: var(--subtree-fill-0);
+    border: 1px solid var(--border-color);
+    border-radius: 5px;
+    pointer-events: none;
+}
 
 /* The fold button, the drawer's and the sidebar's alike: a chevron pointing
    the way the panel folds, turned round while it is collapsed. */
@@ -1316,6 +1379,7 @@ body.viewing-past .status-pill.running { animation: none; }
     border-bottom: 1px solid var(--subtree-fill-0);
     cursor: ew-resize;
     touch-action: none;
+    overflow-x: clip;           /* a label near the right end must not widen the drawer */
 }
 #tl-ruler-track {
     position: absolute;
@@ -1362,7 +1426,8 @@ body.viewing-past .status-pill.running { animation: none; }
 #tl-playhead.live { opacity: 0.6; }
 
 /* Not recorded (a gap), or the robot ran another tree: a hatched band over
-   every row, headers too, since none of them has bars there. */
+   every row, headers too, since none of them has bars there. Clipped to the
+   axis, so the start edge near its right end can't widen the drawer. */
 #tl-bands {
     position: absolute;
     left: var(--tl-label);
@@ -1370,6 +1435,7 @@ body.viewing-past .status-pill.running { animation: none; }
     top: 0;
     bottom: 0;
     z-index: 3;
+    overflow: clip;
     pointer-events: none;
 }
 .tl-band {
@@ -1398,9 +1464,10 @@ body.viewing-past .status-pill.running { animation: none; }
     .tl-band span { display: none; }
 }
 
-/* The left edge of the kept history once eviction dropped some (drawer.js
-   droppedNote): a dashed edge over the rows; its note (#tl-dropped-note)
-   sits in the name column beside the axis, clear of the bars. */
+/* Where the recording starts, when that is inside the window (nothing is
+   recorded before it; once eviction dropped some, drawer.js droppedNote):
+   a dashed edge over the rows; its note (#tl-dropped-note) sits in the name
+   column beside the axis, clear of the bars. */
 .tl-dropped {
     position: absolute;
     top: 0;

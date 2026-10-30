@@ -76,7 +76,7 @@ blackboard included, and keeps the last 10 minutes. Change that with
 from Groot2 against the same robot at the same time: each would get only
 some of the transitions.
 
-![klein rewinding a live robot: scrub, step, hover a key, play, back to live](assets/klein-rewind.gif)
+![klein rewinding a live robot: hover the minimap (its scrollbar shows), drag its box back, click a burst, scrub, step, hover a key, play, back to live](assets/klein-rewind.gif)
 
 The drawer under the tree shows the recording. Its top row works in every
 tab, even with the drawer folded:
@@ -85,14 +85,16 @@ tab, even with the drawer folded:
   While live it reads ❚❚: press it to freeze the tree, the blackboard and
   the clock right where they are.
 - The green **● Live** says you are live. In the past it turns into
-  **Jump to live**, which takes you back; the tree gets a thin amber edge,
+  **Go live**, which takes you back; the tree gets a thin amber edge,
   and the clock beside the bar says which moment you see. Changes are marked
   in the past too: stepping or clicking shows which values just changed.
-- The bar is the whole recording, from the oldest moment kept to now.
-  Click or drag it to go anywhere. Hatched stretches are outages, and a pink
-  dashed line marks where the robot started another tree. On the Timeline
-  tab a box on it shows the Timeline's window: drag it to pan, or drag its
-  edges to zoom.
+- The bar is a minimap of the recording, eight of the Timeline's windows
+  long (live, now is its right edge): amber columns show how busy the robot
+  was, hatched stretches are outages, and a pink dashed line marks where
+  the robot started another tree. Click or drag it to go to that moment;
+  hover it for the time. On the Timeline tab a box on it is the Timeline's
+  window: drag it (or turn the wheel) to pan. While the pointer is over the
+  bar, a thin scrollbar for the whole recording shows underneath.
 - The keys: ←/→ step, Space plays or pauses, Home goes to the oldest moment
   kept, End or Esc goes live, and `\` zooms the Timeline to fit everything
   kept (also its ⤢ button).
@@ -110,7 +112,7 @@ Below it are two tabs, a filter and the recording pill:
   and its blackboard in a `.bb.jsonl` beside it.
 
 `klein-bt --open FILE.btlog` shows a saved recording without a robot, in the
-same Log and Timeline; **Jump to end** takes you to its end. Unzip a saved
+same Log and Timeline; **Go to end** takes you to its end. Unzip a saved
 `.zip` first; the `.bb.jsonl` beside the file brings its blackboard along.
 
 ## Set up your robot

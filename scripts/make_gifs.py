@@ -4,14 +4,20 @@ suite; see docs/testing.md, "Demo GIFs".
     .venv/bin/python scripts/make_gifs.py               # both GIFs
     .venv/bin/python scripts/make_gifs.py --only rewind  # just one (hero, rewind)
 
+Both film one mock, recorded for WARM seconds first, so the drawer's
+overview (a minimap 8 of the Timeline's 20 s windows long) is full and
+scrolls at a steady pace.
+
 * ``assets/klein-demo.gif`` (the hero): the mock's CrossDoor tree live, the
   blackboard sidebar, and the drawer on the Timeline tab following live. Two
   whole mission laps, so it loops cleanly.
 * ``assets/klein-rewind.gif``: the same live mock, rewound while it runs:
-  the playhead dragged back into PickLock's retries, then on the Log tab
-  |◀ |◀ |◀ ▶| steps (each flips PickLock's card), a Log row clicked,
-  ``door_open`` hovered in the blackboard (its writers and reader outlined
-  on the tree), ▶ play, then Jump to live, back to ● Live.
+  the pointer over the minimap (its scrollbar fades in), the window's box
+  dragged back, a burst on the minimap clicked, the playhead dragged back
+  into PickLock's retries, then on the Log tab |◀ |◀ ▶| steps (each flips
+  PickLock's card), a Log row clicked, ``door_open`` hovered in the
+  blackboard (its writers and reader outlined on the tree), ▶ play, then
+  Go live, back to ● Live.
 
 Needs Playwright (``pip install -e '.[dev]'``) and ``ffmpeg``. Chrome draws
 klein inside a plain, made-up browser outline (a wrapper page with a tab and
@@ -48,6 +54,7 @@ MOCK_PORT = 1777             # the README's mock port, so the sidebar reads :177
 PICKLOCK, ROOT = 11, 1       # uids in the mock's CrossDoor tree
 FAILURE = 3
 DRAWER = 240                 # px: the drawer's height in both GIFs
+WARM = 165                   # s recorded before filming: longer than the minimap (8 x 20 s)
 
 # The outline: a tab strip and a toolbar above an iframe, all in klein's palette.
 WRAPPER = """<!DOCTYPE html>
@@ -180,6 +187,13 @@ class Recorder:
     def x_of(self, t, tl):
         return tl["left"] + (t - tl["t0"]) * tl["width"] / tl["span"]
 
+    def overview(self):
+        """The overview's minimap and its box, in page coordinates."""
+        ov = self.js("() => KleinOverview.debug()")
+        ov["left"] += self.offset["x"]
+        ov["x"] = lambda t: ov["left"] + (t - ov["m0"]) * ov["width"] / ov["S"]
+        return ov
+
     def ruler_y(self):
         return self.box("#tl-ruler")[1]
 
@@ -197,7 +211,7 @@ class Recorder:
         lines.append(f"file '{self.shots[-1][1].name}'")
         listing.write_text("\n".join(lines) + "\n")
         length = self.shots[-1][0] - self.shots[0][0] + 1 / FPS
-        vf = f"fps={FPS},scale={GIF_WIDTH}:-1:flags=lanczos"
+        vf = f"fps={FPS},scale={GIF_WIDTH}:-1:flags=area"   # area: less shimmer, smaller GIFs
         if fade:                                # to and from klein's background
             bg = re.search(r"--bg-color:\s*(#[0-9a-fA-F]+)", palette()).group(1)
             vf += (f",fade=t=in:st=0:d={fade}:color={bg}"
@@ -233,17 +247,21 @@ def at_lap_start(rec, previous):
     return started
 
 
-def make_hero(workdir):
-    robot = start_mock()
-    gw = GatewayProbe(robot.port).start()
+def open_klein(gw, workdir, full):
+    """klein in the outline on the Timeline tab at 20 s, once the minimap is
+    full (at the monotonic time ``full``)."""
     rec = Recorder(gw.url, workdir)
+    rec.app.locator("#drawer-tab-timeline").click()
+    rec.app.locator("#tl-zoom-in").click()          # 30 s -> 20 s: bigger bars
+    rec.show_doorclosed()
+    rec.page.mouse.move(60, VIEWPORT[1] - 30)       # the sidebar's empty foot: no hover
+    time.sleep(max(0.0, full - time.monotonic()))
+    return rec
+
+
+def make_hero(gw, workdir, full):
+    rec = open_klein(gw, workdir, full)
     try:
-        rec.app.locator("#drawer-tab-timeline").click()
-        rec.app.locator("#tl-zoom-in").click()          # 30 s -> 20 s: bigger bars
-        rec.show_doorclosed()
-        rec.page.mouse.move(60, VIEWPORT[1] - 30)       # the sidebar's empty foot: no hover
-        # Fill the Timeline's window first, so it scrolls the same all through.
-        time.sleep(21)
         seen = [None]
         while not at_lap_start(rec, seen):
             time.sleep(0.02)
@@ -257,72 +275,76 @@ def make_hero(workdir):
         rec.encode(ASSETS / "klein-demo.gif")
     finally:
         rec.close()
-        gw.stop()
-        robot.stop()
 
 
-def make_rewind(workdir):
-    robot = start_mock()
-    gw = GatewayProbe(robot.port, debug=True).start()
-    rec = Recorder(gw.url, workdir)
+def make_rewind(gw, workdir, full):
+    rec = open_klein(gw, workdir, full)
     try:
-        rec.app.locator("#drawer-tab-timeline").click()
-        rec.app.locator("#tl-zoom-in").click()          # 30 s -> 20 s: bigger bars
-        rec.show_doorclosed()
-        rec.page.mouse.move(60, VIEWPORT[1] - 30)       # the sidebar's empty foot: no hover
-        time.sleep(21)                                  # fill the Timeline's window first
         rec.show_pointer()
-        rec.film(0.6)                                   # live: ● Live, the window following
+        rec.film(0.5)                                   # live: ● Live, the window following
+        # The minimap: the pointer over it fades its scrollbar in and shows
+        # the time there; the window's box, dragged back, pans the Timeline.
+        ov = rec.overview()
+        y = rec.box("#ov-strip")[1]
+        box = ov["left"] + ov["box"]["x"]
+        rec.move_to(box - 50, y)
+        rec.film(0.5)
+        rec.move_to(box + ov["box"]["w"] / 2, y, steps=6)
+        rec.page.mouse.down()
+        rec.move_to(box + ov["box"]["w"] / 2 - 70, y, steps=12)
+        rec.page.mouse.up()
+        rec.film(0.3)
+        # Click a burst left of the box, a second after one of PickLock's
+        # FAILUREs within a run of PickLock transitions (its retries), so that
+        # every step below flips that card between RUNNING and FAILURE: the
+        # cursor goes there, paused, and the window comes with it.
+        records = gw.debug_state()["records"]
+        picks = [records[i][0] for i in range(4, len(records) - 1)
+                 if records[i][1:] == [PICKLOCK, FAILURE]
+                 and all(records[j][1] == PICKLOCK for j in range(i - 4, i + 2))]
+        ov = rec.overview()
+        box = ov["left"] + ov["box"]["x"]
+        fits = [t for t in picks if ov["left"] + 40 < ov["x"](t + 1e6) < box - 60]
+        target = min(fits, key=lambda t: abs(ov["x"](t + 1e6) - (box - 130)))
+        rec.click(at=(ov["x"](target + 1e6), y), hold=0.6)
+        # Drag the playhead back that second, onto the FAILURE.
         tl = rec.tl()
         y = rec.ruler_y()
-        # Drag the playhead back 6 to 14 s, into one of PickLock's FAILUREs
-        # within a run of PickLock transitions (its retries), so that every
-        # step below flips that card between RUNNING and FAILURE.
-        dump = gw.debug_state()
-        records = dump["records"]
-        head = records[-1][0]
-        picks = [i for i in range(4, len(records) - 1)
-                 if records[i][1:] == [PICKLOCK, FAILURE] and 6e6 < head - records[i][0] < 14e6
-                 and all(records[j][1] == PICKLOCK for j in range(i - 4, i + 2))]
-        target = records[picks[len(picks) // 2]][0]
-        rec.move_to(rec.x_of(tl["t1"] - 300_000, tl), y)
+        rec.move_to(rec.x_of(tl["pos"]["t"], tl), y)
         rec.page.mouse.down()
-        rec.film(0.2)
-        tl = rec.tl()                                   # paused: the window stops here
-        rec.move_to(rec.x_of(target + 30_000, tl), y, steps=20)
+        rec.film(0.15)
+        rec.move_to(rec.x_of(target + 30_000, tl), y, steps=12)
         rec.page.mouse.up()
         rec.film(0.4)
         # The Log, then step: each press moves the selected row and flips
         # PickLock's card. Then click the row two above (on its time: a
         # subtree cell would filter).
-        rec.click("#drawer-tab-log", hold=0.5)
-        for button in ("#tr-prev", "#tr-prev", "#tr-prev", "#tr-next"):
-            rec.click(button, hold=0.7)
+        rec.click("#drawer-tab-log", hold=0.4)
+        for button in ("#tr-prev", "#tr-prev", "#tr-next"):
+            rec.click(button, hold=0.6)
         seg, seq = rec.js("""() => { const r = document.querySelector('#log-rows .log-row.selected');
           return [r.dataset.seg, Number(r.dataset.seq)]; }""")
         row = rec.app.locator(f'#log-rows .log-row[data-seg="{seg}"][data-seq="{seq - 2}"]'
                               ':not([hidden]) > :first-child').bounding_box()
-        rec.click(at=(row["x"] + row["width"] / 2, row["y"] + row["height"] / 2), hold=0.6)
+        rec.click(at=(row["x"] + row["width"] / 2, row["y"] + row["height"] / 2), hold=0.5)
         # Hover door_open in the blackboard: its writers (the Script, and the
         # subtree remapping it) are outlined solid, its reader dashed.
         key = rec.app.locator("#bb-groups .bb-row", has_text="door_open").first
         b = key.bounding_box()
         rec.move_to(b["x"] + 50, b["y"] + b["height"] / 2, steps=10)
-        rec.film(1.0)
+        rec.film(0.9)
         rec.click("#drawer-tab-timeline", hold=0)
         rec.show_doorclosed()                           # the tab scrolled to the playhead
         rec.film(0.2)
-        rec.click("#tr-play", hold=1.4)
+        rec.click("#tr-play", hold=1.2)
         # Back to live: the button turns into ● Live, the window follows again.
         rec.click("#tr-jump", hold=0)
         rec.move_to(rec.mouse[0] + 40, rec.mouse[1] + 60)
-        rec.film(1.2)
+        rec.film(1.0)
         assert rec.js("() => document.getElementById('tr-jump').dataset.state") == "live"
         rec.encode(ASSETS / "klein-rewind.gif", fade=0.3)
     finally:
         rec.close()
-        gw.stop()
-        robot.stop()
 
 
 def main():
@@ -332,14 +354,22 @@ def main():
     args = ap.parse_args()
     if shutil.which("ffmpeg") is None:
         sys.exit("ffmpeg is not installed")
-    for name, make in (("hero", make_hero), ("rewind", make_rewind)):
-        if args.only in (None, name):
-            workdir = Path(tempfile.mkdtemp(prefix=f"klein-gif-{name}-"))
-            make(workdir)
-            if args.keep:
-                print(f"screenshots kept in {workdir}")
-            else:
-                shutil.rmtree(workdir, ignore_errors=True)
+    robot = start_mock()
+    gw = GatewayProbe(robot.port, debug=True).start()
+    full = time.monotonic() + WARM
+    print(f"recording the mock for {WARM} s first, so the minimap is full")
+    try:
+        for name, make in (("hero", make_hero), ("rewind", make_rewind)):
+            if args.only in (None, name):
+                workdir = Path(tempfile.mkdtemp(prefix=f"klein-gif-{name}-"))
+                make(gw, workdir, full)
+                if args.keep:
+                    print(f"screenshots kept in {workdir}")
+                else:
+                    shutil.rmtree(workdir, ignore_errors=True)
+    finally:
+        gw.stop()
+        robot.stop()
 
 
 if __name__ == "__main__":

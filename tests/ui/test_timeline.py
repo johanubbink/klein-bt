@@ -14,6 +14,9 @@ reference:
   Log to its row;
 * F with the drawer open scrolls the timeline to the running rows;
 * the filter keeps the rows the Log keeps;
+* zoomed out past the recording, live or paused, the window ends at the
+  head, the time before the oldest record empty and its start edge marked
+  "Recording starts" (live, the playhead is the axis's right end);
 * zooming keeps the playhead in place, a paused window rebuilds nothing,
   and a drag on the lanes pans; zoom to fit (⤢ and \\) makes the window the
   oldest record to the head, paused or live, and \\ does nothing on the Log.
@@ -167,6 +170,17 @@ class TimelineTest(DashboardCase):
         self.page.mouse.click(self.x_of(t), self.ruler_y())
         self.frame()
 
+    def zoom_while(self, button, js):
+        """Click the zoom ``button`` while ``js`` (on the window's span ``s``
+        and the recording's length ``r``) holds, at most the ladder's length."""
+        check = ("() => { const s = KleinTimeline.debug().span,"
+                 f" r = kleinDebug().head - kleinDebug().tMin; return {js}; }}")
+        for _ in range(24):
+            if not self.page.evaluate(check):
+                return
+            self.page.click(button)
+        self.fail(f"the zoom never left {js}")
+
     def rows(self):
         return self.page.evaluate(_ROWS)
 
@@ -184,7 +198,13 @@ class TimelineTest(DashboardCase):
 
     # ------------------------------------------------------------------ #
     def test_dragging_the_playhead_shows_state_at_t(self):
+        # Pressed, the window holds still while the playhead is dragged
+        # (one longer than the recording would move on with the head).
+        mouse = self.page.mouse
         tl = self.page.evaluate("() => KleinTimeline.debug()")
+        mouse.move(tl["left"] + tl["width"] / 2, self.ruler_y())
+        mouse.down()
+        tl = self.read()["tl"]
         head = self.page.evaluate("() => kleinDebug().head")
         t_end = min(tl["t1"], head) - SETTLED_US
         # Five moments, oldest first: each midway between two records at
@@ -196,9 +216,6 @@ class TimelineTest(DashboardCase):
         px = tl["span"] / tl["width"]
         mids = [(a + b) / 2 for a, b in zip(times, times[1:]) if b - a >= 4 * px]
         targets = [mids[round(f * (len(mids) - 1))] for f in (0.1, 0.3, 0.5, 0.7, 0.9)]
-        mouse = self.page.mouse
-        mouse.move(self.x_of(targets[0], tl), self.ruler_y())
-        mouse.down()
         seen = []
         for t in targets:
             x = self.x_of(t, tl)
@@ -206,6 +223,9 @@ class TimelineTest(DashboardCase):
             view = self.read()
             seen.append((x, view))
         mouse.up()
+        for _x, view in seen:
+            self.assertEqual((view["tl"]["t0"], view["tl"]["span"]), (tl["t0"], tl["span"]),
+                             "the window holds still")
         model = Model(self.gw.require_debug_state())
         for x, view in seen:
             t = view["tl"]["pos"]["t"]
@@ -357,21 +377,34 @@ class TimelineTest(DashboardCase):
         self.assertEqual(self.page.text_content("#tl-empty"), "No nodes match “zzz”.")
 
     def test_zoom_keeps_the_playhead_and_pans(self):
-        _model, runs = self.attempts()
-        self.click_time(runs[2][0])
         # − shortens the window, + lengthens it (by their labels, as read).
         shorter, longer = "#tl-zoom button:text-is('−')", "#tl-zoom button:text-is('+')"
-        # 30 s → 20 → 10 s: the 30 s default is longer than the mock's
-        # recording, so the window starts at its oldest record until here.
-        self.page.click(shorter)
-        self.page.click(shorter)
+        # Zoomed out past the recording, live and then paused, the window
+        # ends at the head: the time before the oldest record is empty, its
+        # start edge marked, and live the playhead is the axis's right end.
+        self.zoom_while(longer, "s < 2 * r")
+        v = self.assert_timeline_starts("Recording starts", "zoomed out, live")
+        self.click_time((v["tMin"] + v["head"]) / 2)
+        self.page.wait_for_function("(h) => KleinCursor.headTime(shownRecording()) > h", arg=v["head"])
+        paused = self.assert_timeline_starts("Recording starts", "zoomed out, paused")
+        self.assertFalse(paused["tl"]["pos"]["live"])
+        self.assertGreater(paused["tl"]["t1"], v["tl"]["t1"], "paused, the window follows the head")
+        self.page.evaluate("() => KleinTimeline.setWindow(KleinTimeline.getWindow().t1, 3e7)")
+        self.browser.go_live()
+
+        _model, runs = self.attempts()
+        self.click_time(runs[2][0])
+        # 30 s → 2 s. A window longer than the recording (the mock's is about
+        # 10 s here) ends at the head, so the playhead keeps its place on
+        # screen from the first window a second shorter than the recording.
+        self.zoom_while(shorter, f"s > r - {SETTLED_US}")
         before = self.page.evaluate("() => KleinTimeline.debug()")
-        self.page.click(shorter)
-        self.page.click(shorter)
+        self.zoom_while(shorter, "s > 2e6")
         tl = self.page.evaluate("() => KleinTimeline.debug()")
         self.assertEqual(tl["span"], 2_000_000)
         self.assertEqual(self.page.text_content("#tl-window"), "2 s")
         # The playhead keeps its place on screen.
+        self.assertGreater(before["span"], tl["span"])
         x = lambda d: d["left"] + (d["pos"]["t"] - d["t0"]) * d["width"] / d["span"]
         self.assertAlmostEqual(x(tl), x(before), delta=1)
         # Paused on a still window behind the head, the robot's new records
@@ -490,7 +523,7 @@ class TimelineTest(DashboardCase):
             self.assertLessEqual(after["tl"]["pos"]["t"], overview_t(after, at + 1))
             before, x = after, after["thumb"]["x"] + 1
             self.browser.drag((x, y), (at, y))
-            v = overview("the left edge of a window past the head")
+            v = overview("the left edge of a window longer than the recording")
             self.assertGreaterEqual(v["tl"]["t1"], before["ov"]["tMax"])
             self.assertLessEqual(v["tl"]["t1"], v["ov"]["tMax"])
             self.assertGreaterEqual(v["tl"]["t0"], overview_t(before, at - 1))
@@ -712,10 +745,13 @@ class TimelineReplayTest(DashboardCase):
         page.wait_for_function("(h) => kleinDebug().head >= h",
                                arg=page.evaluate("kleinDebug().head") + 2 * MARK_SETTLED_US,
                                timeout=10000, polling=50)
-        # Pause near the head: the window holds still from here on.
+        # Pause near the head, then zoom to fit: the window holds still from
+        # here on (one longer than the recording would move on with the head).
         tl = page.evaluate("() => KleinTimeline.debug()")
         ruler = page.locator("#tl-ruler").bounding_box()
         page.mouse.click(tl["left"] + tl["width"] - 3, ruler["y"] + 10)
+        cls.frame()
+        page.evaluate("() => KleinTimeline.fit()")
         cls.frame()
         cls.tl = page.evaluate("() => KleinTimeline.debug()")
         cls.rows = page.evaluate(_ROW_SHAPES)

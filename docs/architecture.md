@@ -599,10 +599,11 @@ sidebar's width (see [The sidebar](#the-sidebar)).
   window longer than the recording covers all of it) and at least 6 px wide;
   it follows the head while the window does. Dragging its body pans the
   window (a click on it without a drag moves the cursor, as on the track);
-  dragging an edge zooms it with the other edge held (the head, for a
-  window reaching past it), between the shortest and the longest window of
-  − and + and inside the recording. A thumb under 16 px only pans; folded,
-  there is no thumb. A mouse press doesn't focus the overview, so R and F
+  dragging an edge zooms it with the other edge held where the thumb shows
+  it (the oldest record, for a window reaching before it), between the
+  shortest and the longest window of − and + and inside the recording. A
+  thumb under 16 px only pans; folded, there is no thumb. A mouse press
+  doesn't focus the overview, so R and F
   keep working; it has no keys of its own. Without a recording
   (`--record-buffer 0`, or a robot that can't record) it is a bare grey
   track that ignores presses.
@@ -656,11 +657,14 @@ sidebar's width (see [The sidebar](#the-sidebar)).
   (`historyDropped`), the Log's first line, hatched like the Timeline's
   not-recorded bands, reads "Transitions older than the kept 10 min were
   dropped", with the span actually kept (as the recorder pill's), and the
-  rows sit one line lower. The Timeline marks the same edge: its window never
-  starts before the oldest record, so when panned or zoomed out to it, a
-  dashed edge at the axis's left end, with the same note (`⇤ Transitions
-  older…`, cut to fit, the whole text its tooltip) in the name column beside
-  the axis. While nothing was dropped neither shows.
+  rows sit one line lower. While nothing was dropped the Log has no such
+  line. The Timeline marks where the recording starts whenever that is in
+  its window (panned back to the oldest record, or a window longer than the
+  recording, which ends at the head): a dashed edge over the rows at
+  `rec.tMin`, nothing drawn left of it, and a note in the name column
+  beside the axis, `⇤ Recording starts` (an opened file too), or once
+  eviction dropped some, the Log's note (`⇤ Transitions older…`, cut to
+  fit, the whole text its tooltip).
 - **Save** (the recorder pill's right half, past a hairline) is one
   download of everything kept:
   it fetches `/log.zip` as a blob and saves it through an `<a download>`
@@ -737,7 +741,7 @@ sidebar's width (see [The sidebar](#the-sidebar)).
     inside the window change; the playhead moves on its own. **Bars are
     drawn for at most 20,000 records in the window** (`MAX_WINDOW_RECORDS`);
     a window holding more shows "Zoom in to see bars: N transitions in this
-    window…" over the lanes instead, and its axis, bands, dropped edge and
+    window…" over the lanes instead, and its axis, bands, start edge and
     playhead still work. While following live, a rebuild also waits at least
     8× the last one's script and layout time, so a busy window steps rather
     than taking the main thread; a timer makes the last rebuild when nothing
@@ -751,19 +755,26 @@ sidebar's width (see [The sidebar](#the-sidebar)).
     when it is in view, else the middle; **Ctrl+wheel** zooms around the
     pointer, **dragging the lanes** (or Shift+wheel, or a sideways wheel)
     pans; a plain wheel scrolls the rows. The window never runs past the
-    head or before the oldest record; one longer than the recording starts
-    at the oldest record and the head fills it. While live it follows the
-    head, until you pan or zoom it off the head (back onto the head, or back
-    to live, follows again). **⤢** (or `\`) zooms to fit: the window becomes
-    everything kept, `rec.tMin` to the head, its length kept within the
-    ladder's 200 µs and 1 h (`clampWindow`); while live it then follows the
-    head at that length, so the oldest moment drifts off its left edge.
+    head, nor before the oldest record once the recording is longer than
+    it (`clampWindow`: `t1 = max(min(t1, head), min(head, tMin + span))`).
+    One longer than the recording ends at the head, live or paused, so now
+    is at the axis's right end from a session's first second; the time
+    before the oldest record is empty, its start edge marked (see Dropped
+    history). While live it follows the head, until you pan or zoom it off
+    the head (back onto the head, or back to live, follows again); paused,
+    a window longer than the recording still moves on with the head, except
+    while the playhead is dragged. **⤢** (or `\`) zooms to fit: the window
+    becomes everything kept, `rec.tMin` to the head, its length kept within
+    the ladder's 200 µs and 1 h (`clampWindow`); while live it then follows
+    the head at that length, so the oldest moment drifts off its left edge.
   - **The playhead** is the shared cursor. Pressing the axis pauses there,
     and dragging scrubs: the cursor is paused at that time to the µs,
     `pause(seg, seqAtTime(seg, t), t)` in the segment holding it, so the
     tree shows `state_at(t)` and the clock that time, and the playhead stays
-    under the pointer between transitions. A click on the lanes without a
-    drag does the same. Stepping and playing are the transport row's (see
+    under the pointer between transitions: the window holds still while it
+    is dragged (one longer than the recording catches up with the head after
+    the release). A click on the lanes without a drag does the same.
+    Stepping and playing are the transport row's (see
     The transport, above). A cursor moved elsewhere (a Log row, a step,
     playing) that leaves the window re-centres the window on it.
   - **F** with the drawer open on the Timeline also scrolls the first row of

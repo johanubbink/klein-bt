@@ -5,9 +5,10 @@ A Python ``Recording`` with a short window is streamed through
 with ``--record-buffer 0``, so nothing else feeds it), then grown until
 eviction drops its oldest chunk:
 
-* the Log's first line and the Timeline's left edge say that history older
+* the Log's first line and the Timeline's start edge say that history older
   than the kept span was dropped, with the span the recording really keeps
-  (head back to the oldest record, as the recorder pill); zoom to fit (\\) shows
+  (head back to the oldest record, as the recorder pill; before that, the
+  edge says where the recording starts); zoom to fit (\\) shows
   exactly that span, and Home pauses at its oldest moment;
 * a paused cursor on a dropped record moves to the oldest kept record (its
   Log row selected) with a pill in the banner stack;
@@ -177,6 +178,12 @@ class EvictionTest(DashboardCase):
         self.assertIsNone(self.log_view()["dropped"], "nothing dropped yet: no marker")
         overview = "() => [KleinOverview.debug().tMin, KleinOverview.debug().tMax]"
         self.assertEqual(self.page.evaluate(overview), [T0, synth.rec.head])
+        # The Timeline at a 5 s window, longer than the 3 s recorded: it ends
+        # at the head, and its start edge says where the recording starts.
+        self.page.click("#drawer-tab-timeline")
+        self.zoom_to(5_000_000)
+        self.assertEqual(self.assert_timeline_starts("Recording starts", "nothing dropped")["tMin"], T0)
+        self.page.click("#drawer-tab-log")
         # Scrolled up: row 1500 at the top.
         self.page.evaluate(f"() => {{ document.getElementById('drawer-body').scrollTop = {1500 * ROW}; }}")
         before = self.log_view()["rows"]
@@ -206,21 +213,11 @@ class EvictionTest(DashboardCase):
         self.browser.screenshot(SHOTS, "log_dropped_marker")
 
         # The Timeline at a 5 s window, longer than the 4 s kept: the window
-        # starts at the oldest record, and the dropped edge is the axis's left end.
+        # ends at the head, and the start edge at the oldest kept record says
+        # what was dropped, its note beside the axis.
         self.page.click("#drawer-tab-timeline")
         self.zoom_to(5_000_000)
-        self.frame()
-        mark = self.page.evaluate("""() => { const m = document.querySelector('#tl-bands .tl-dropped');
-            if (!m) return null; const track = document.getElementById('tl-ruler-track').getBoundingClientRect();
-            const note = document.getElementById('tl-dropped-note');
-            return { text: note.hidden ? null : note.textContent, title: m.title,
-                     x: m.getBoundingClientRect().left - track.left }; }""")
-        self.assertIsNotNone(mark, "the Timeline marks the dropped edge")
-        self.assertEqual(mark["text"], f"⇤ {note}", "its note, beside the axis")
-        self.assertEqual(mark["title"], note)
-        self.assertAlmostEqual(mark["x"], 0, delta=1)
-        debug = self.page.evaluate("KleinTimeline.debug()")
-        self.assertEqual(debug["t0"], synth.rec.t_min)
+        self.assertEqual(self.assert_timeline_starts(note, "dropped")["tMin"], synth.rec.t_min)
         self.browser.screenshot(SHOTS, "timeline_dropped_marker")
         # Zoomed in to 1 s while live, the oldest record is off screen: no mark.
         self.zoom_to(1_000_000)

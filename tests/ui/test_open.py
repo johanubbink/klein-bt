@@ -14,7 +14,9 @@ independent reader, and against Python's ``state_at`` on the same file:
   (DoorClosed::7) shows "—"; Home goes to the file's first moment (Python's
   state there), and Esc, End and the transport's "Jump to end" return to
   the file's last state ("● End"), where ▶ is off (nothing to pause);
-* dragging the sidebar redraws the Timeline, though a file sends nothing more;
+* the Timeline's window, longer than the file, ends at the file's end, its
+  start edge marked "Recording starts"; dragging the sidebar redraws it,
+  though a file sends nothing more;
 * hovering every key row and card links exactly what the layout's bindings
   name.
 
@@ -247,6 +249,9 @@ class OpenFileTest(DashboardCase):
                 f"(() => {{ const t = ({ticks})(); return t.length"
                 f" && Math.abs(t[0] - {before[0]}) < 0.005; }})()", timeout=5000)
             self.assertLessEqual(max(self.page.evaluate(ticks)), 1.0)
+            # The 9 s file in the 30 s window: it ends at the file's end, its start marked.
+            self.assertEqual(self.assert_timeline_starts("Recording starts", "an opened file")["tMin"],
+                             self.first)
         finally:
             self.browser.drag((self.page.evaluate(width), 300), (start, 300))
             self.page.click("#drawer-tab-log")

@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **The Timeline ends at now from the first second.** A window longer than
+  the recording (a session's first 30 s, or zoomed out past it) ends at
+  now, live or paused, instead of starting at the oldest moment and filling
+  up towards the right. A dashed edge marks where the recording starts,
+  with `⇤ Recording starts` beside the axis; once old history was dropped
+  it says so, as before.
+
 ## [0.7.0] - 2026-10-06
 
 ### Added

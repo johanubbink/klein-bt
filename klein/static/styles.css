@@ -1362,7 +1362,8 @@ body.viewing-past .status-pill.running { animation: none; }
 #tl-playhead.live { opacity: 0.6; }
 
 /* Not recorded (a gap), or the robot ran another tree: a hatched band over
-   every row, headers too, since none of them has bars there. */
+   every row, headers too, since none of them has bars there. Clipped to the
+   axis, so the start edge near its right end can't widen the drawer. */
 #tl-bands {
     position: absolute;
     left: var(--tl-label);
@@ -1370,6 +1371,7 @@ body.viewing-past .status-pill.running { animation: none; }
     top: 0;
     bottom: 0;
     z-index: 3;
+    overflow: clip;
     pointer-events: none;
 }
 .tl-band {
@@ -1398,9 +1400,10 @@ body.viewing-past .status-pill.running { animation: none; }
     .tl-band span { display: none; }
 }
 
-/* The left edge of the kept history once eviction dropped some (drawer.js
-   droppedNote): a dashed edge over the rows; its note (#tl-dropped-note)
-   sits in the name column beside the axis, clear of the bars. */
+/* Where the recording starts, when that is inside the window (nothing is
+   recorded before it; once eviction dropped some, drawer.js droppedNote):
+   a dashed edge over the rows; its note (#tl-dropped-note) sits in the name
+   column beside the axis, clear of the bars. */
 .tl-dropped {
     position: absolute;
     top: 0;

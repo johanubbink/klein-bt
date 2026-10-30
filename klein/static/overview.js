@@ -142,8 +142,9 @@ ov.addEventListener("pointerdown", (event) => {
     let move, click = () => {};
     if (edge) {
         const left = edge.dataset.edge === "left";
-        // A window longer than the recording ends past the head: hold the head.
-        const fixed = left ? Math.min(win.t1, C.headTime(rec)) : win.t0;
+        // Hold the other edge where the thumb shows it: a window longer than
+        // the recording starts before its oldest record, so hold that.
+        const fixed = left ? Math.min(win.t1, C.headTime(rec)) : Math.max(win.t0, rec.tMin);
         const clamp = (span, most) => Math.max(win.min, Math.min(span, win.max, most));
         move = (e) => {
             const t = timeAt(e.clientX);

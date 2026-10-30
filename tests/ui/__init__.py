@@ -16,6 +16,22 @@ OVERVIEW = """() => {
            knob: box('ov-knob'), gaps: marks('gap'), runs: marks('run') };
 }"""
 
+# The Timeline's start edge as drawn, in one task, or null while a render is
+# queued or the bars are drawn for another window: its debug, the newest
+# moment and the oldest, the edge's x (null when not drawn) and title, the
+# note's text (null when hidden) and title, and the playhead's middle.
+TIMELINE_START = """() => {
+  const tl = KleinTimeline.debug(), rec = shownRecording();
+  if (renderQueued || tl.barsT1 !== tl.t1) return null;
+  const edge = document.querySelector('#tl-bands .tl-dropped');
+  const note = document.getElementById('tl-dropped-note');
+  const p = document.getElementById('tl-playhead').getBoundingClientRect();
+  return { tl, head: KleinCursor.headTime(rec), tMin: rec.tMin,
+           edge: edge && edge.getBoundingClientRect().left, title: edge && edge.title,
+           note: note.hidden ? null : note.textContent, noteTitle: note.title,
+           playhead: (p.left + p.right) / 2 };
+}"""
+
 # The hover links as drawn, in one task: per card its uid, outline role
 # (write/read/null), the outline's dash, its port line's text and accented
 # tokens; and the rows a card hover marked.
@@ -186,6 +202,24 @@ class DashboardCase(unittest.TestCase):
         for (left, right), w in zip(v["runs"], starts):
             self.assertAlmostEqual((left + right) / 2, w, delta=1, msg=what)
         return v, x
+
+    def assert_timeline_starts(self, note, what=""):
+        """The Timeline, its window longer than the recording, as drawn
+        (``TIMELINE_START``): the window ends at the newest moment and starts
+        before the oldest, the start edge sits at the oldest (±1 px) with
+        ``note`` as its title and its note's (``⇤ note``), and live the
+        playhead is the axis's right end (±1 px). Returns the view."""
+        v = self.page.wait_for_function(TIMELINE_START, polling="raf", timeout=10000).json_value()
+        tl = v["tl"]
+        self.assertEqual(tl["t1"], v["head"], what)
+        self.assertLess(tl["t0"], v["tMin"], what)
+        self.assertIsNotNone(v["edge"], what)
+        self.assertAlmostEqual(v["edge"], tl["left"] + (v["tMin"] - tl["t0"]) * tl["width"] / tl["span"],
+                               delta=1, msg=what)
+        self.assertEqual((v["note"], v["noteTitle"], v["title"]), (f"⇤ {note}", note, note), what)
+        if tl["pos"]["live"]:
+            self.assertAlmostEqual(v["playhead"], tl["left"] + tl["width"], delta=1, msg=what)
+        return v
 
     def fold(self, uid):
         """Fold or unfold the card of ``uid`` (its click), the cards settled."""

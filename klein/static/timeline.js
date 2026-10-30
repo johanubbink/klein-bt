@@ -92,11 +92,13 @@ function timeAt(clientX) {
 }
 
 // Keep the window on the recording: never past the head, and never before the
-// oldest record. A window longer than everything kept starts at the oldest
-// record, and the head fills it towards the right edge.
+// oldest record once there is more than a window of it. A window longer than
+// everything kept ends at the head, so now is at the right edge from the
+// first second; the time before the oldest record is empty, its start edge
+// marked (paintBars).
 function clampWindow() {
     span = Math.min(Math.max(span, LADDER[0]), LADDER[LADDER.length - 1]);
-    t1 = Math.max(Math.min(t1, head()), rec.tMin + span);
+    t1 = Math.max(Math.min(t1, head()), Math.min(head(), rec.tMin + span));
 }
 
 // The window's length: "10 s", "500 ms", "1.25 s", "200 µs", "10 min".
@@ -324,19 +326,21 @@ function paintBars() {
         bandsEl.children[i].firstChild.textContent = b.kind === "gap" ? b.label : `tree: ${b.label}`;
         bandsEl.children[i].title = b.kind === "gap" ? `Not recorded (${b.label})` : b.title;
     });
-    // Where the kept history starts, once eviction dropped some: the window
-    // can't go further left, so this is its left edge when panned there. A
-    // dashed edge over the rows, its note in the name column beside the axis.
-    const edge = Boolean(dropped) && rec.tMin >= t0 && rec.tMin <= t1;
+    // Where the recording starts, when that is inside the window (a window
+    // longer than the recording, or panned back to its oldest record): a
+    // dashed edge over the rows, its note in the name column beside the
+    // axis. Once eviction dropped history, the note says what was dropped.
+    const edge = rec.tMin >= t0 && rec.tMin <= t1;
+    const note = dropped || "Recording starts";
     if (edge) {
         const mark = bandsEl.appendChild(document.createElement("div"));
         mark.className = "tl-dropped";
         mark.style.left = `${((rec.tMin - t0) * k).toFixed(2)}px`;
-        mark.title = dropped;
+        mark.title = note;
     }
     droppedNoteEl.hidden = !edge;
-    droppedNoteEl.textContent = edge ? `⇤ ${dropped}` : "";
-    droppedNoteEl.title = edge ? dropped : "";      // cut to fit the name column
+    droppedNoteEl.textContent = edge ? `⇤ ${note}` : "";
+    droppedNoteEl.title = edge ? note : "";         // cut to fit the name column
     // The axis.
     const step = tickStep();
     const ticks = [];
@@ -377,7 +381,10 @@ function paint() {
     const moved = !lastPos || lastPos.seg !== pos.seg || lastPos.seq !== pos.seq || lastPos.t !== pos.t;
     lastPos = pos;
     if (moved && !pos.live && !scrubbing && (pos.t < t1 - span || pos.t > t1)) t1 = pos.t + span / 2;
-    clampWindow();
+    // Scrubbing, the window holds still, even one longer than the recording
+    // (which ends at the head, so moves on with it): the next paint after
+    // the release catches up.
+    if (!scrubbing) clampWindow();
     paintBars();
 
     const x = xOf(C.shownTime(pos, rec));     // live: at head()

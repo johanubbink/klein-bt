@@ -484,7 +484,7 @@ def bb_change_vectors():
 
 
 # --------------------------------------------------------------------------- #
-# Tree runs, expected from the harness Model
+# Tree runs and counts, expected from the harness Model
 # --------------------------------------------------------------------------- #
 def dump(rec):
     """What ``GET /debug/state`` dumps of rec's segments and records: all
@@ -501,12 +501,62 @@ def _tree_run_cases(name, rec):
              "args": [{"$ref": f"{name}_rec"}], "expect": Model(dump(rec)).runs()}]
 
 
+def _count_cases(name, rec):
+    """``countIn`` over every record time, a µs either side and spans across
+    segments, the gap and the evicted start; ``busiestColumn`` at a few
+    column lengths, the busiest grid column by the Model's count."""
+    ref = {"$ref": f"{name}_rec"}
+    model = Model(dump(rec))
+    times = sorted({r[0] for _s, records in model.segments.values() for r in records})
+    edges = sorted({t + e for t in times[::7] for e in (-1, 0, 1)}
+                   | {s.t_begin for s in rec.segments} | {rec.t_min - 1, rec.head + 1})
+    spans = list(zip(edges, edges[1:])) + list(zip(edges, edges[9:])) + [(edges[0], edges[-1])]
+    cases = [{"name": f"{name}: countIn {a - T0}..{b - T0}", "call": "KleinRecording.countIn",
+              "args": [ref, a, b], "expect": model.count_in(a, b)} for a, b in spans]
+    for d in (1, 7, 40, 1000):
+        cols = {-(-t // d) for t in times}             # the column (k·d, (k + 1)·d] holding t
+        cases.append({"name": f"{name}: busiestColumn {d}", "call": "KleinRecording.busiestColumn",
+                      "args": [ref, d],
+                      "expect": max(model.count_in((c - 1) * d, c * d) for c in cols)})
+    return cases
+
+
+def _busiest_growing_cases(d=50):
+    """``busiestColumn`` asked again as the recording grows, at one column
+    length (as the overview asks it): a drain adding to the column the last
+    one ended in, then a new segment after a gap."""
+    rec, frames, ref = Recording(), [], {"$ref": "grow_rec"}
+    Streamer(rec, lambda clients, f: frames.append(f)).subscribe("grow")
+    a, b = _layout(1, [1, 2, 3]), _layout(2, [1, 2, 3, 4])
+    rec.begin_segment(a, T0, bytearray(a.size))
+    steps = [lambda: rec.append([(T0 + 10, 1, 1), (T0 + 10, 2, 1), (T0 + 20, 2, 2)]),
+             lambda: rec.append([(T0 + 20, 3, 1), (T0 + 30, 1, 2), (T0 + 200, 1, 1)]),
+             lambda: (rec.end_segment(T0 + 300), rec.add_gap(T0 + 300, T0 + 400, "outage"),
+                      rec.begin_segment(b, T0 + 400, bytearray(b.size)),
+                      rec.append([(T0 + 401, 4, 1), (T0 + 420, 4, 2), (T0 + 449, 1, 1)]))]
+    cases = store_cases("grow", frames)
+    for i, step in enumerate(steps):
+        del frames[:]
+        step()
+        rec.advance_head(rec.segments[-1].last_ts)
+        cases += [{"name": f"grow: ingest {i}.{j}", "call": "$grow.ingest", "args": [_arg(f)],
+                   "expect": True} for j, f in enumerate(frames)]
+        model = Model(dump(rec))
+        times = {r[0] for _s, records in model.segments.values() for r in records}
+        cases.append({"name": f"grow: busiestColumn {d} after step {i}",
+                      "call": "KleinRecording.busiestColumn", "args": [ref, d],
+                      "expect": max(model.count_in(c * d - d, c * d) for c in {-(-t // d) for t in times})})
+    return cases
+
+
 def vectors():
     with mock.patch.object(recording, "CHUNK_SIZE", CHUNK_SIZE):
         rec, live, late = build()
         cases = (_store_cases("live", live, rec) + _store_cases("late", late, rec)
                  + _cursor_cases("live", rec) + _cursor_cases("late", rec)
-                 + _tree_run_cases("live", rec) + _tree_run_cases("late", rec))
+                 + _tree_run_cases("live", rec) + _tree_run_cases("late", rec)
+                 + _count_cases("live", rec) + _count_cases("late", rec)
+                 + _busiest_growing_cases())
     return {"module": [str(STATIC / "recording.js"), str(STATIC / "cursor.js")],
             "cases": cases}
 

@@ -376,7 +376,7 @@ Python model. That pins the two implementations together.
   queries have mirrors here (`stateAtSeq`, `seqAtTime`, `stateAt`, `bbAt`,
   `decodeState`), next to what the cursor, the Log (`logRows`, `logRowAt`)
   the Timeline (`intervalsAll`, `timelineMarks`, `timelineSections`) and
-  the overview (`treeRuns`) need.
+  the overview (`treeRuns`, `countIn`, `busiestColumn`) need.
 - [`klein/static/cursor.js`](../klein/static/cursor.js) →
   `globalThis.KleinCursor`. A clock is data: `live()`, `pause(segId, seq,
   t?)`, `play(fromSegId, fromSeq, nowMs, t?)` (1× only).
@@ -541,7 +541,7 @@ the recording views in two 48 px rows over a scrollable body:
 
 - the **transport row**, shared by both tabs: the collapse button,
   **|◀ ▶ ▶|**, `● Live` (or, in the past, **Go live ⏭**),
-  the overview of the whole recording (taking the space left), then the
+  the overview of the recording (taking the space left), then the
   clock;
 - the **tab row**: the **Log** and **Timeline** tabs, the compact filter
   right after them, on the Timeline tab its zoom (− window +), and at the far
@@ -584,29 +584,64 @@ sidebar's width (see [The sidebar](#the-sidebar)).
   newest blackboard sample's, whichever is newer (`shownTime`). Without a
   recording the buttons are off, and Live and the clock are hidden.
 - **The overview** ([`klein/static/overview.js`](../klein/static/overview.js))
-  is a slim track in the transport row over the whole kept recording,
+  takes the rest of the transport row: a strip of the recording at a fixed
+  zoom, over a slim scrollbar for the whole of it. The recording runs from
   `rec.tMin` (the oldest kept moment, which eviction moves) to the head
   (`KleinCursor.headTime`: a blackboard sample newer than the last drain
-  counts); for an opened file, its first timestamp to its last record. The
-  part up to the cursor is tinted, and a knob sits at the cursor (at the
-  right edge while live). On it: each gap hatched like the Timeline's bands,
-  and a pink dashed line where each tree run after the first starts
-  (`KleinRecording.treeRuns`, as Save counts them); nothing else is marked.
-  The marks are rebuilt whenever the span, the width or what is kept
-  changes. Pressing or dragging the track moves the shared cursor as the
-  Timeline's axis does (`KleinCursor.pauseAt`). On the Timeline
-  tab a thumb outlines the Timeline's window, clipped to the track (so a
-  window longer than the recording covers all of it) and at least 6 px wide;
-  it follows the head while the window does. Dragging its body pans the
-  window (a click on it without a drag moves the cursor, as on the track);
-  dragging an edge zooms it with the other edge held where the thumb shows
-  it (the oldest record, for a window reaching before it), between the
-  shortest and the longest window of − and + and inside the recording. A
-  thumb under 16 px only pans; folded, there is no thumb. A mouse press
-  doesn't focus the overview, so R and F
-  keep working; it has no keys of its own. Without a recording
-  (`--record-buffer 0`, or a robot that can't record) it is a bare grey
-  track that ignores presses.
+  counts); for an opened file, its first timestamp to its last record.
+  - **The strip** is 8 of the Timeline's windows long (4 min at the default
+    30 s; its length counts on the Log tab and folded too). While
+    everything kept fits in it, it ends at the head, so live, now is its
+    right edge from the first second. Once the recording is longer, the
+    window places it as VS Code places its minimap: for a window from `t0`,
+    `w` long, a recording `R` long and the strip `S`, it starts at
+    `tMin + (t0 − tMin) / (R − w) × (R − S)`, so the window's place on the
+    strip is its place in the recording. On the Log tab and folded there is
+    no window, and the cursor stands in for one of no length: live, the
+    strip ends at now, and in the past it follows the cursor.
+  - **On the strip:** what is kept, lighter than the time outside it; the
+    activity, the transitions per 2 px column (`KleinRecording.countIn`;
+    the columns on a grid of whole µs, so a column keeps its count as the
+    strip scrolls), log-scaled against the busiest column of everything kept
+    at that column length (`busiestColumn`, counted once per length, then
+    only over new records, so heights hold still as it scrolls; eviction
+    keeps the old maximum until the window's length or the strip's width
+    changes, so heights don't jump as the oldest go), at least
+    2 px tall where there is anything, in the Timeline bars' amber; each gap
+    hatched like the Timeline's bands; a pink dashed line where each tree
+    run after the first starts (`KleinRecording.treeRuns`, as Save counts
+    them); and the cursor's line, blue live (and at an opened file's end),
+    amber in the past. Above the pointer a readout gives the time there and
+    how long before now, `13:05:12.4 · 42 s ago` (an opened file: the time
+    only).
+  - **The box** (the Timeline tab, unfolded) is the Timeline's window, an
+    eighth of the strip whatever the zoom: faint at rest, brighter while the
+    pointer is over the overview. Dragging it pans the window with the box
+    under the pointer (`S / W` per px while the recording fits in the strip,
+    else `(R − w) / (W − box)`, so one drag from end to end crosses all of
+    it); a click on it without a drag (under 3 px) moves the cursor there.
+  - **Pressing the strip** elsewhere pauses the cursor there
+    (`KleinCursor.pauseAt`) and dragging scrubs. Meanwhile the strip and the
+    Timeline's window hold still (`KleinTimeline.hold`); after the release,
+    a cursor outside the window has the window centred on it.
+  - **The wheel** over the overview (the Timeline tab) pans the window as
+    the Timeline's sideways wheel does; Ctrl+wheel zooms around the time
+    under the pointer.
+  - **The scrollbar** under the strip shows only while the pointer is over
+    the overview or a drag is on: it fades in over 120 ms and out 400 ms
+    after the pointer leaves (by `opacity`, so it keeps its place). It spans
+    the whole recording (on the Timeline tab while the recording is shorter
+    than the window, the window's length back from the head, with no thumb:
+    nothing to scroll), with the gaps, the run starts and a tick at the
+    cursor. Its thumb is the window, at least 18 px wide: dragging it pans
+    the window by the distance moved, and a press beside it centres the
+    window there and drags on. It never moves the cursor, except with no
+    window (the Log tab, or folded): there a press moves the cursor, so the
+    whole recording stays in reach folded.
+
+  A mouse press doesn't focus the overview, so R and F keep working; it has
+  no keys of its own. Without a recording (`--record-buffer 0`, or a robot
+  that can't record) it is a bare grey strip that ignores presses.
 - **The recorder pill** says what klein keeps, from the browser's mirror:
   a red dot, `Recording`, and in muted monospace the span kept and its size,
   `10 min · 60 kB`; its tooltip is the whole summary,

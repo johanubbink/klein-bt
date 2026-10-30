@@ -55,7 +55,7 @@ const droppedNoteEl = document.getElementById("tl-dropped-note");
 const tooManyEl = document.getElementById("tl-too-many");
 
 // app.js: move the shared cursor, fold the canvas, and the cards' glyphs;
-// overview.js: the window moved (its thumb).
+// overview.js: the window moved (its box and thumb).
 let hooks = { seek() {}, toggleFold() {}, foldOthers() {}, glyphFor: () => "", windowMoved() {} };
 let rec = null;                     // what update() was last given
 let pos = null;
@@ -421,16 +421,19 @@ function windowMoved() {
     hooks.windowMoved();
 }
 
-// The window as last painted, for the overview's thumb: {t0, t1, span,
-// min, max} (min and max: the shortest and longest span), or null before
-// the Timeline has painted one.
+// The window as last painted, for the overview's box and thumb: {t0, t1,
+// span}, or null before the Timeline has painted one.
 function getWindow() {
-    return t1 === null || !pos ? null
-        : { t0: t1 - span, t1, span, min: LADDER[0], max: LADDER[LADDER.length - 1] };
+    return t1 === null || !pos ? null : { t0: t1 - span, t1, span };
+}
+
+// The window's length, painted yet or not (the overview's strip is 8 of them).
+function getSpan() {
+    return span;
 }
 
 // Move the window to (t1 - span, t1], as the reader's own move (the
-// overview's thumb). Clamped as always.
+// overview's box and scrollbar). Clamped as always.
 function setWindow(right, newSpan) {
     if (!pos || t1 === null) return;
     t1 = right;
@@ -473,6 +476,16 @@ function fit() {
 
 function seekTime(t) {
     hooks.seek(C.pauseAt(rec, t));
+}
+
+// The overview's scrub: the window holds still while it lasts, as while the
+// playhead is dragged; after it the cursor counts as moved, so one left
+// outside the window is brought into view, centred.
+function hold(on) {
+    scrubbing = on;
+    if (on) return;
+    lastPos = null;
+    paint();
 }
 
 // The ruler: press to put the playhead there, drag to scrub.
@@ -574,7 +587,7 @@ function debug() {
 }
 
 globalThis.KleinTimeline = {
-    update, revealRows, debug, getWindow, setWindow, seekTime, fit,
+    update, revealRows, debug, getWindow, getSpan, setWindow, zoomTo, seekTime, hold, fit,
     connect: (h) => { hooks = { ...hooks, ...h }; },
 };
 })();

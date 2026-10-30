@@ -140,8 +140,9 @@ card and checks the outlines, port-line accents and linked rows against
 
 `Model(dump)` reads a gateway's `GET /debug/state` independently: each
 segment's records, `state_at_seq`, `seq_at(t)`, the cards' `labels`,
-`bb_at(seg, t)`, a node's `intervals`, the tree `runs`, and (given each
-segment's layout) the Log's `rows`. With it, the dashboard's wording
+`bb_at(seg, t)`, a node's `intervals`, the tree `runs`, the transitions in
+a span (`count_in`), and (given each segment's layout) the Log's `rows`.
+With it, the dashboard's wording
 written out again (`fmt_time`, `fmt_delta`, `fmt_span`, `card_label`,
 `names`). The UI tests compare the browser with it, the integration tests a
 saved file.
@@ -191,8 +192,8 @@ The vectors are built from the Python model when the tests run:
 `tests/make_vectors.py` builds a recording (a swap, a same-tree restart after
 an outage, duplicate timestamps, evicted chunks, blackboard changes and
 removals), streams it, and writes the frames (incremental and backfill) plus
-the Python model's answers, for `recording.js` and `cursor.js` (tree runs
-are checked against the harness `Model`);
+the Python model's answers, for `recording.js` and `cursor.js` (tree runs and
+the overview's transition counts are checked against the harness `Model`);
 `test_log_rows.py` and `test_timeline_model.py` do the same for the Log's rows
 and the Timeline's helpers, on `make_vectors.build_named` (trees with named
 nodes and subtrees) fed in by `make_vectors.store_cases`. `python -m
@@ -224,7 +225,9 @@ drain × 10 drains/s). `file` opens `--minutes` of it with `klein-bt --open`
 (whose backfill is exactly a live recording's) in Chrome and reports the
 backfill time on load and reload, the JS heap plus ArrayBuffers after a GC
 (the recording's typed arrays live outside the V8 heap), scrub frames on the
-Timeline at its 30 s window and zoomed out, a pan, and Log scrolling; plus,
+Timeline at its 30 s window and zoomed out, a pan, Log scrolling, and the
+overview's strip rebuilt for a new window length, scrubbed and its box
+dragged across the recording; plus,
 in-process, `KleinGateway.open_file` on it and how long building one
 dashboard's backfill blocks the gateway. `zip` times `GET /log.zip` and
 probes `GET /` every 20 ms meanwhile, whose longest wait is the event loop's
@@ -244,6 +247,8 @@ Typical results on a 16-core development machine with Chrome:
 | scrub frames (30 s window, and zoomed out) | 16.7 ms frame gaps, max 16.8; 0.7 ms of script per step | the same |
 | Log wheel scrolling | 16.7 ms frame gaps | the same |
 | Timeline pan or zoom | ~35 ms of script and layout at the 20k-record limit (a 2 s window); wider windows draw no bars (<1 ms) | the same |
+| overview strip rebuilt for a new window length (its busiest column counted over every record) | 3 ms at 30 s, 9 ms at 1 s and 200 µs | 6 ms, 26 ms |
+| overview scrub, and its box dragged across the recording | 16.7 ms frame gaps, max 16.8 | the same |
 | `GET /log.zip` | 4.5 s, event loop blocked 2.6 s | 14.3 s, blocked 8.3 s |
 
 Live, the Timeline following the head with its 30 s window full: 10% of the

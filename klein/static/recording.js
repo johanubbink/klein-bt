@@ -679,6 +679,63 @@ function gapsIn(rec, t0, t1) {
     return rec.gaps.filter((g) => g.tTo >= t0 && g.tFrom <= t1);
 }
 
+// The kept transitions with a < ts <= b, over every segment (the overview's
+// activity): seqAtTime's convention, so neighbouring columns (a, b] and
+// (b, c] share none. seqAtTime counts the kept records at or before any t,
+// so the difference needs no clamp to tStart, and a segment's records are
+// never older than its tBegin.
+function countIn(rec, a, b) {
+    let n = 0;
+    for (const seg of rec.segments) {
+        if (seg.tBegin > b) break;
+        n += seqAtTime(seg, b) - seqAtTime(seg, a);
+    }
+    return n;
+}
+
+// The most kept transitions in one column of the grid (k·d, (k + 1)·d], d
+// whole µs: the overview's activity scale. Counted over every kept record
+// once per d, then only over the records added since. Eviction can only
+// lower the true maximum, and the scale keeps the old one, so heights hold
+// still as the oldest go.
+const BUSIEST = new WeakMap();      // rec -> {d, most, seg, seq, col, n}
+
+function busiestColumn(rec, d) {
+    let s = BUSIEST.get(rec);
+    if (!s || s.d !== d) {
+        s = { d, most: 0, seg: -1, seq: 0, col: NaN, n: 0 };
+        BUSIEST.set(rec, s);
+    }
+    let { most, col, n } = s;
+    for (const seg of rec.segments) {
+        if (seg.id < s.seg) continue;
+        const from = seg.id === s.seg ? s.seq : seg.startSeq;
+        const first = Math.max(0, bisectRight(seg.chunks.length, from, (j) => seg.chunks[j].seq0) - 1);
+        for (let j = first; j < seg.chunks.length; j++) {
+            const chunk = seg.chunks[j];
+            let i = Math.max(0, from - chunk.seq0);
+            if (i >= chunk.length) continue;
+            const last = Math.ceil(chunk.ts[chunk.length - 1] / d);
+            if (Math.ceil(chunk.ts[i] / d) === last) {      // the rest of it in one column
+                n = last === col ? n + chunk.length - i : chunk.length - i;
+                col = last;
+                most = Math.max(most, n);
+                continue;
+            }
+            for (; i < chunk.length; i++) {
+                const c = Math.ceil(chunk.ts[i] / d);
+                n = c === col ? n + 1 : 1;
+                col = c;
+                if (n > most) most = n;
+            }
+        }
+        s.seg = seg.id;
+        s.seq = seg.headSeq;
+    }
+    Object.assign(s, { most, col, n });
+    return most;
+}
+
 // True once eviction has dropped transitions: a whole segment (ids count up
 // from 0, and only eviction removes one) or a segment's leading chunks (its
 // retained start moved past its begin). The Log and the Timeline then mark
@@ -707,6 +764,7 @@ globalThis.KleinRecording = {
     decodeState, stateAtSeq, seqAtTime, stateAt, timeAtSeq, recordsRange, intervals,
     bbAt, bbChange, BB_RECENT, describe, logRows, logRowAt, logRowIndex, intervalsAll, timelineMarks,
     timelineSections, historyDropped, gapsIn, treeName, eachNode, sameTree, treeRuns,
+    countIn, busiestColumn,
     createStore: () => new Store(),
     createTrack: () => new BlackboardTrack(),
 };

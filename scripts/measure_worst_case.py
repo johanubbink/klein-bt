@@ -14,7 +14,9 @@ to ``--rate`` transitions per second (default 10k/s, the observable ceiling:
   recording's backfill. In Chrome: the backfill time on (re)load, the JS heap
   after it, and scrub frame times with the Timeline at its default 30 s
   window and zoomed out to the whole recording, and the Log at the end of
-  its millions of rows. Also, in-process, what blocks the gateway's event
+  its millions of rows; the overview's strip rebuilt for a new window
+  length, scrubbed, and its box dragged across the whole recording. Also,
+  in-process, what blocks the gateway's event
   loop: building one dashboard's backfill frames.
 * ``zip``: ``GET /log.zip`` of that recording: its build time, and how long
   the event loop is blocked meanwhile (``GET /`` probed every 20 ms).
@@ -96,17 +98,17 @@ _SCRUB = """async ([steps]) => {
   return out;
 }"""
 
-# Frame gaps (rAF to rAF) while a real mouse drags along the ruler.
-# The overview's marks rebuilt once (its track narrowed by 1 px, so they are
-# due), with layout: [ms, marks drawn].
-_OVERVIEW_MARKS = """() => { const track = document.getElementById('ov-track');
-  track.style.right = '7px';
-  const rec = shownRecording(), t = performance.now();
-  KleinOverview.update(rec, KleinCursor.cursorPos(clock, performance.now(), rec));
-  void document.getElementById('ov-marks').offsetHeight;
+# The overview's strip rebuilt for a new window length (on the Log tab the
+# Timeline doesn't paint, so this is the overview alone), with layout: the
+# busiest column counted over every record for the new column length, the
+# activity column by column, the marks. [ms, columns drawn, marks drawn].
+_OVERVIEW_REBUILD = """(span) => {
+  const t = performance.now();
+  KleinTimeline.setWindow(KleinTimeline.getWindow().t1, span);
+  void document.getElementById('ov-strip').offsetHeight;
   const ms = performance.now() - t;
-  track.style.right = '';
-  return [ms, document.querySelectorAll('#ov-marks i').length]; }"""
+  const d = document.querySelector('#ov-activity path').getAttribute('d');
+  return [ms, (d.match(/M/g) || []).length, document.querySelectorAll('#overview i').length]; }"""
 
 _RAF_START = """() => { window.__raf = []; window.__rafOn = true;
   const loop = (t) => { __raf.push(t); if (__rafOn) requestAnimationFrame(loop); };
@@ -115,14 +117,17 @@ _RAF_STOP = """() => { __rafOn = false; const r = __raf;
   return r.slice(1).map((t, i) => t - r[i]); }"""
 
 
-def drag_frames(page, steps=60, track="#tl-ruler-track"):
+# Frame gaps (rAF to rAF) while a real mouse drags along the ruler (or
+# another element), from x0 to x1 of its width.
+def drag_frames(page, steps=60, track="#tl-ruler-track", x0=0.0, x1=1.0):
     box = page.locator(track).bounding_box()
     y = box["y"] + box["height"] / 2
-    page.mouse.move(box["x"] + 5, y)
+    at = lambda f: box["x"] + 5 + (box["width"] - 10) * f
+    page.mouse.move(at(x0), y)
     page.evaluate(_RAF_START)
     page.mouse.down()
     for i in range(steps):
-        page.mouse.move(box["x"] + 5 + (box["width"] - 10) * i / steps, y)
+        page.mouse.move(at(x0 + (x1 - x0) * i / steps), y)
         page.wait_for_timeout(16)
     page.mouse.up()
     return page.evaluate(_RAF_STOP)
@@ -190,16 +195,25 @@ def part_file(args, path, n):
                 print(f"Timeline scrub, {label} ({span:g} s): per step JS+layout {stats(js)}")
                 gaps = drag_frames(page, steps=30 if label == "30 s window" else 6)
                 print(f"Timeline scrub, {label}: ruler drag frame gaps {stats(gaps)}")
-            # The overview: its marks (gaps and tree-run starts),
-            # and the knob dragged across the whole recording (on the Log tab:
-            # on the Timeline's, the thumb under the pointer would pan instead).
+            # The overview: its strip rebuilt for a new window length (the
+            # busiest column counted over every record again), at the default
+            # window, at 1 s and at the shortest; then a scrub along the strip
+            # (on the Log tab), and the box dragged across the whole recording
+            # (on the Timeline's, the strip scrolling under it).
             page.click("#drawer-tab-log")
             page.wait_for_timeout(500)
-            ms, marks = page.evaluate(_OVERVIEW_MARKS)
-            print(f"Overview: marks rebuilt in {ms:.1f} ms ({marks} marks)")
-            gaps = drag_frames(page, steps=30, track="#ov-track")
-            print(f"Overview drag across the whole recording: frame gaps {stats(gaps)}")
+            for span in (30e6, 1e6, 200):
+                ms, columns, marks = page.evaluate(_OVERVIEW_REBUILD, span)
+                print(f"Overview: strip rebuilt for a {span / 1e6:g} s window in {ms:.1f} ms "
+                      f"({columns} columns, {marks} marks)")
+            page.evaluate(_OVERVIEW_REBUILD, 30e6)
+            gaps = drag_frames(page, steps=30, track="#ov-strip")
+            print(f"Overview scrub along the strip: frame gaps {stats(gaps)}")
             page.click("#drawer-tab-timeline")
+            page.keyboard.press("End")
+            page.wait_for_timeout(300)
+            gaps = drag_frames(page, steps=30, track="#ov-strip", x0=0.97, x1=0.0)
+            print(f"Overview box dragged across the whole recording: frame gaps {stats(gaps)}")
             # Panning moves the window: every bar in it is computed again.
             page.click("#tl-zoom-in")
             span = page.evaluate("KleinTimeline.debug().span") / 1e6

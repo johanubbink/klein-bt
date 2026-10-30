@@ -9,6 +9,9 @@ gateway hold exactly the same records:
 
 * every Log row's text across those segments (time, Δ or "new tree" /
   "resumed", subtree, node, from, to);
+* the overview's strip and scrollbar mark the Model's gaps and tree-run
+  starts; a click on either shows the Model's state there, folded too, and
+  with no window the strip follows the cursor;
 * random row clicks: cards = ``state_at_seq``, blackboard panel =
   ``BlackboardTrack.at(t)``, the row's "to" on its card, nothing fading
   and the static change mark on exactly the keys the Model calls fresh, and
@@ -39,6 +42,7 @@ sample shows no values, and the swap's notice centres over the canvas.
 Skipped when Playwright is missing.
 """
 import json
+import math
 import random
 import signal
 import time
@@ -49,7 +53,8 @@ from klein.streaming import backfill_frames
 from tests.harness.model import STATUS, Model, card_label, fmt_time, names
 from tests.harness.probes import BACK_TO_LIVE, NEXT_FRAME
 from tests.helpers import layout
-from tests.ui import OVERVIEW, PULSES, DashboardCase, links
+from tests.ui import (OVERVIEW, PULSES, DashboardCase, links, overview_t, overview_x, scrollbar_t,
+                      scrollbar_x)
 
 SHOTS = "log"
 WIDTH, HEIGHT = 1400, 900
@@ -328,49 +333,80 @@ class LogTest(LogView, DashboardCase):
         self.browser.screenshot(SHOTS, "segments_boundary")
 
     def test_the_overview_marks_the_kept_recording(self):
-        """The overview spans what is kept (eviction moved its left edge), with
-        the Model's outage gaps and tree-run starts; the knob is at
-        the right edge while live, and a click on the track pauses there."""
+        """The overview's strip and scrollbar span what is kept (eviction
+        moved its oldest moment), with the Model's outage gaps and tree-run
+        starts. The Log has no window, so no box and no thumb; live, the
+        cursor's line is the strip's right end, and the time under the
+        pointer reads above it. A click on the strip, or on the scrollbar,
+        pauses there (the Model's state shows), folded too. With the
+        recording longer than the strip, the strip follows the cursor."""
+        page, mid = self.page, lambda r: (r["left"] + r["right"]) / 2
+
+        def ys(selector):
+            box = page.locator(selector).bounding_box()
+            return box["y"], box["y"] + box["height"]
+
+        span = "(s) => KleinTimeline.setWindow(KleinTimeline.getWindow().t1, s)"
+        self.addCleanup(page.evaluate, span, 30_000_000)
+        page.evaluate(span, 1_000_000)          # an 8 s strip: all 5 s kept on it
         self.frame()
-        v, x = self.assert_overview(self.model, self.state["gaps"])
+        v, x = self.assert_overview(self.model, self.state["gaps"], "what is kept")
         ov = v["ov"]
-        self.assertEqual((ov["tMin"], ov["tMax"]), (self.state["t_min"], self.model.head_time()))
+        t_min, head = self.state["t_min"], self.model.head_time()
+        self.assertEqual((ov["tMin"], ov["tMax"], ov["m0"]), (t_min, head, head - ov["S"]))
         self.assertGreater(self.state["segments"][0]["id"], 0, "eviction dropped the oldest")
-        self.assertTrue(v["gaps"] and v["runs"], v)
-        self.assertAlmostEqual((v["knob"]["left"] + v["knob"]["right"]) / 2, x(ov["tMax"]), delta=1)
+        self.assertTrue(v["gaps"] and v["runs"] and v["sbGaps"] and v["sbRuns"], v)
+        self.assertEqual((v["box"], v["thumb"]), (None, None))
+        self.assertAlmostEqual(mid(v["cursor"]), ov["left"] + ov["width"], delta=1)
         self.browser.screenshot("overview", "outage")
-        box = self.page.locator("#overview").bounding_box()
-        at = ov["left"] + 0.37 * ov["width"]
-        self.page.mouse.click(at, box["y"] + box["height"] / 2)
-        view = self.view()
-        pos = self.page.evaluate("() => KleinCursor.cursorPos(clock, performance.now(), "
-                                 "shownRecording())")
-        self.assertTrue(view["past"])
-        self.assertAlmostEqual(x(pos["t"]), at, delta=1)
-        st = self.model.state_at_seq(*self.model.seq_at(pos["t"]))
-        cards = dict(view["cards"])
-        self.assertEqual(cards, {u: card_label(st[u]) for u in cards}, pos)
-        knob = self.page.evaluate(OVERVIEW)["knob"]
-        self.assertAlmostEqual((knob["left"] + knob["right"]) / 2, at, delta=1)
-        # Folded to the transport row alone, the overview and |◀ still move
-        # the tree; unfolding gives the height back.
-        height = self.page.evaluate("() => document.getElementById('drawer').offsetHeight")
-        self.page.click("#drawer-collapse")
-        try:
-            self.assertFalse(self.page.is_visible("#drawer-toolbar"))
-            box = self.page.locator("#overview").bounding_box()
-            at = ov["left"] + 0.61 * ov["width"]
-            self.page.mouse.click(at, box["y"] + box["height"] / 2)
+        # The readout: the time under the pointer, and how long before now.
+        at = round(x(t_min + 0.37 * (head - t_min)))
+        page.mouse.move(at, sum(ys("#ov-strip")) / 2)
+        t = math.floor(overview_t(v, at) + 0.5)
+        self.assertEqual(page.text_content("#ov-tip"),
+                         f"{fmt_time(t)[:10]} · {math.floor((head - t) / 1e6 + 0.5)} s ago")
+        page.mouse.move(ov["left"] - 40, sum(ys("#ov-strip")) / 2)     # and gone off the overview
+        self.assertTrue(page.evaluate("document.getElementById('ov-tip').hidden"))
+
+        def click(where, f, what):
+            """Click the strip or the scrollbar at f of the kept recording:
+            paused there, the Model's state shown, the line or tick there."""
+            to_x, to_t = (overview_x, overview_t) if where == "strip" else (scrollbar_x, scrollbar_t)
+            at = round(to_x(v, t_min + f * (head - t_min)))
+            page.mouse.click(at, sum(ys("#ov-strip" if where == "strip" else "#ov-track")) / 2)
             view = self.view()
-            pos = self.page.evaluate("() => KleinCursor.cursorPos(clock, performance.now(), "
-                                     "shownRecording())")
-            self.assertAlmostEqual(x(pos["t"]), at, delta=1)
+            pos = page.evaluate("() => KleinCursor.cursorPos(clock, performance.now(), "
+                                "shownRecording())")
+            self.assertTrue(view["past"], what)
+            self.assertAlmostEqual(pos["t"], to_t(v, at), delta=to_t(v, 1) - to_t(v, 0), msg=what)
             st = self.model.state_at_seq(*self.model.seq_at(pos["t"]))
             cards = dict(view["cards"])
-            self.assertEqual(cards, {u: card_label(st[u]) for u in cards}, "folded, at the click")
-            knob = self.page.evaluate(OVERVIEW)["knob"]
-            self.assertAlmostEqual((knob["left"] + knob["right"]) / 2, at, delta=1,
-                                   msg="folded, the overview still paints the knob")
+            self.assertEqual(cards, {u: card_label(st[u]) for u in cards}, what)
+            drawn = page.evaluate(OVERVIEW)
+            self.assertAlmostEqual(mid(drawn["cursor" if where == "strip" else "tick"]), at,
+                                   delta=1, msg=what)
+            return pos
+
+        click("strip", 0.37, "a click on the strip")
+        click("scrollbar", 0.52, "a click on the scrollbar")
+        # Folded to the transport row alone, the overview and |◀ still move
+        # the tree; unfolding gives the height back.
+        height = page.evaluate("() => document.getElementById('drawer').offsetHeight")
+        page.click("#drawer-collapse")
+        try:
+            self.assertFalse(page.is_visible("#drawer-toolbar"))
+            click("scrollbar", 0.2, "folded, a click on the scrollbar")
+            pos = click("strip", 0.61, "folded, a click on the strip")
+            self.assertIsNone(page.evaluate(OVERVIEW)["box"])
+            # A 200 µs window: the 1.6 ms strip is placed by the cursor, its
+            # line where the cursor is in the whole recording.
+            page.evaluate(span, 200)
+            self.frame()
+            ov = page.evaluate(OVERVIEW)
+            f = (pos["t"] - t_min) / (head - t_min)
+            self.assertAlmostEqual(ov["ov"]["m0"], t_min + f * (head - t_min - ov["ov"]["S"]), delta=1)
+            self.assertAlmostEqual(mid(ov["cursor"]), ov["ov"]["left"] + f * ov["ov"]["width"], delta=1)
+            page.evaluate(span, 1_000_000)
             # The row before the cursor's record (or before where it would be).
             rows = self.model.rows()
             here = next(i for i, (k, *_r) in enumerate(rows)
@@ -866,15 +902,16 @@ class AfterATreeSwapTest(LogView, DashboardCase):
         self.page.wait_for_function("Object.keys(bbGroupEls).length > 0")
 
 
-# The Timeline's playhead and the overview's knob: each shown and on its track.
+# The Timeline's playhead and the overview's cursor line: each shown and on
+# its axis or strip.
 _PLAYHEAD = """() => {
   const tl = KleinTimeline.debug(), p = document.getElementById('tl-playhead');
   const x = p.getBoundingClientRect().left;
-  const knob = document.getElementById('ov-knob').getBoundingClientRect();
-  const track = document.getElementById('ov-track').getBoundingClientRect();
-  const k = (knob.left + knob.right) / 2;
+  const line = document.getElementById('ov-cursor'), c = line.getBoundingClientRect();
+  const strip = document.getElementById('ov-strip').getBoundingClientRect();
+  const k = (c.left + c.right) / 2;
   return [!p.hidden && x >= tl.left - 1 && x <= tl.left + tl.width + 1,
-          k >= track.left - 1 && k <= track.right + 1];
+          !line.hidden && k >= strip.left - 1 && k <= strip.right + 1];
 }"""
 
 

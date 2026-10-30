@@ -19,7 +19,11 @@ reference:
   "Recording starts" (live, the playhead is the axis's right end);
 * zooming keeps the playhead in place, a paused window rebuilds nothing,
   and a drag on the lanes pans; zoom to fit (⤢ and \\) makes the window the
-  oldest record to the head, paused or live, and \\ does nothing on the Log.
+  oldest record to the head, paused or live, and \\ does nothing on the Log;
+* the overview's box is the window, an eighth of its strip, however the
+  window moves, and live it ends at the strip's right edge with the cursor's
+  line; the wheel over the overview pans, and a scrub on its strip holds the
+  window, which then shows the cursor.
 
 The robot keeps running: windows are read well behind the head (1 s), where
 the browser's mirror and the gateway's dump read after it agree.
@@ -322,9 +326,14 @@ class TimelineTest(DashboardCase):
         view = self.read()
         self.assertEqual(view["tl"]["pos"]["t"], t)
         self.assertEqual(view["tl"]["pos"]["seq"], seq + 1)
-        box = self.page.locator("#tl-playhead").bounding_box()
         self.assertFalse(self.page.locator("#tl-playhead").is_hidden())
-        self.assertAlmostEqual(box["x"] + box["width"] / 2, self.x_of(t), delta=1)
+        # Read with the window in one task: paused, one longer than the
+        # recording still moves on with the head.
+        mid, tl = self.page.evaluate("""() => {
+          const b = document.getElementById('tl-playhead').getBoundingClientRect();
+          return [b.x + b.width / 2, KleinTimeline.debug()];
+        }""")
+        self.assertAlmostEqual(mid, self.x_of(t, tl), delta=1)
         # Dragging the playhead 1 s on scrolls the Log to that moment's row.
         mouse = self.page.mouse
         mouse.move(self.x_of(t), self.ruler_y())
@@ -486,103 +495,99 @@ class TimelineTest(DashboardCase):
         finally:
             self.page.evaluate("() => KleinTimeline.setWindow(KleinTimeline.getWindow().t1, 3e7)")
 
-    def test_the_overview_thumb_is_the_window(self):
-        """The overview's thumb covers the Timeline's window however it moves
-        (−/+, Ctrl+wheel, a lane drag), and moves it: its body pans, an edge
-        zooms with the other edge held. Live, the knob is at the right edge."""
+    def test_the_overview_box_is_the_window(self):
+        """Live, the overview's box (the Timeline's window, an eighth of the
+        strip) and the cursor's line end at the strip's right edge, and the
+        box follows the window however it moves: −/+, fit, Ctrl+wheel, a lane
+        drag, and the wheel over the overview, which pans (Ctrl+wheel there
+        zooms). A press on the strip pauses there without taking the focus,
+        and a drag scrubs with the strip and the window held still; after
+        the release the window shows the cursor."""
         page, mouse = self.page, self.page.mouse
+        mid = lambda r: (r["left"] + r["right"]) / 2
+        strip = page.locator("#ov-strip").bounding_box()
+        y = strip["y"] + strip["height"] / 2
+        lanes = page.locator("#tl-lanes").bounding_box()
 
         def overview(what):
             self.frame()
             v = page.evaluate(OVERVIEW)
-            tl, ov, thumb = v["tl"], v["ov"], v["thumb"]
-            self.assertAlmostEqual(thumb["x"], overview_x(v, max(tl["t0"], ov["tMin"])),
-                                   delta=1, msg=what)
-            self.assertAlmostEqual(thumb["x"] + thumb["width"],
-                                   overview_x(v, min(tl["t1"], ov["tMax"])),
-                                   delta=1, msg=what)
+            self.assert_box(v, what)
             return v
 
-        # The robot runs on, so the track's span grows during a press: what
-        # a pointer position means lies between the spans before and after.
-        per_px = lambda v: overview_t(v, 1) - overview_t(v, 0)
-        lanes = page.locator("#tl-lanes").bounding_box()
-        y = page.locator("#overview").bounding_box()
-        y = y["y"] + y["height"] / 2
+        def ctrl_wheel(x, y, dy):
+            mouse.move(x, y)
+            page.keyboard.down("Control")
+            mouse.wheel(0, dy)
+            page.keyboard.up("Control")
+
         try:
             v = overview("live")
             self.browser.screenshot("overview", "live")
+            right = v["ov"]["left"] + v["ov"]["width"]
             self.assertTrue(v["tl"]["pos"]["live"])
-            self.assertAlmostEqual(v["knob"]["x"] + v["knob"]["width"] / 2,
-                                   v["ov"]["left"] + v["ov"]["width"], delta=1)
-            # A window longer than the recording (a session's first 30 s): the
-            # thumb is the whole track, a click on it still seeks, and its
-            # left edge zooms, the head held.
-            page.evaluate("() => KleinTimeline.setWindow(KleinTimeline.getWindow().t1, 3.6e9)")
-            v = overview("a window longer than the recording")
-            self.assertAlmostEqual(v["thumb"]["width"], v["ov"]["width"], delta=1)
-            at = v["ov"]["left"] + 0.4 * v["ov"]["width"]
-            mouse.click(at, y)
-            after = overview("a click on the thumb")
-            self.assertFalse(after["tl"]["pos"]["live"])
-            self.assertGreaterEqual(after["tl"]["pos"]["t"], overview_t(v, at - 1))
-            self.assertLessEqual(after["tl"]["pos"]["t"], overview_t(after, at + 1))
-            before, x = after, after["thumb"]["x"] + 1
-            self.browser.drag((x, y), (at, y))
-            v = overview("the left edge of a window longer than the recording")
-            self.assertGreaterEqual(v["tl"]["t1"], before["ov"]["tMax"])
-            self.assertLessEqual(v["tl"]["t1"], v["ov"]["tMax"])
-            self.assertGreaterEqual(v["tl"]["t0"], overview_t(before, at - 1))
-            self.assertLessEqual(v["tl"]["t0"], overview_t(v, at + 1))
-            page.evaluate("() => KleinTimeline.setWindow(KleinTimeline.getWindow().t1, 3e7)")
-            self.browser.go_live()
-            for _ in range(5):
-                page.click("#tl-zoom-in")                   # 30 s → 1 s, following the head
-            overview("zoomed in, live")
-            page.click("#tl-zoom-out")                      # 2 s
-            v = overview("zoomed out, live")
-            self.assertLess(v["thumb"]["width"], v["ov"]["width"] / 2)
-            # Paused (left of the thumb, which would pan): the window holds.
-            mouse.click((v["ov"]["left"] + v["thumb"]["x"]) / 2, y)
-            self.assertFalse(overview("paused")["tl"]["pos"]["live"])
-            self.assertNotEqual(page.evaluate("document.activeElement.id"), "overview",
-                                "a press doesn't focus the track: R and F keep working")
-            self.browser.screenshot("overview", "past")
-            mouse.move(lanes["x"] + 700, lanes["y"] + 40)
-            page.keyboard.down("Control")
-            mouse.wheel(0, 200)
-            page.keyboard.up("Control")
-            overview("Ctrl+wheel")
+            self.assertAlmostEqual(v["box"]["right"], right, delta=1)
+            self.assertAlmostEqual(mid(v["cursor"]), right, delta=1)
+            for button in ["#tl-zoom-in"] * 4 + ["#tl-zoom-out", "#tl-fit", "#tl-zoom-in"]:
+                page.click(button)
+                overview(button)
+            page.evaluate("() => KleinTimeline.setWindow(KleinTimeline.getWindow().t1, 2e6)")
+            ctrl_wheel(lanes["x"] + 700, lanes["y"] + 40, 200)
+            overview("Ctrl+wheel on the lanes")
             self.browser.drag((lanes["x"] + 700, lanes["y"] + 40), (lanes["x"] + 640, lanes["y"] + 40))
             v = overview("a lane drag")
-            self.browser.screenshot("overview", "zoomed")
-            # The thumb's body pans the window by what it moved...
-            before, thumb = v, v["thumb"]
-            self.browser.drag((thumb["x"] + thumb["width"] / 2, y),
-                              (thumb["x"] + thumb["width"] / 2 + 40, y))
-            v = overview("a thumb drag")
-            moved = v["tl"]["t0"] - before["tl"]["t0"]
-            self.assertGreaterEqual(moved, 39 * per_px(before))
-            self.assertLessEqual(moved, 41 * per_px(v))
-            self.assertEqual(v["tl"]["span"], before["tl"]["span"])
-            # ...an edge zooms it, the other edge held, the edge under the pointer.
-            for edge, dx in (("left", -30), ("right", -50)):
-                before, thumb = v, v["thumb"]
-                x = thumb["x"] + (thumb["width"] if edge == "right" else 0)
-                self.browser.drag((x, y), (x + dx, y))
-                v = overview(f"the {edge} edge dragged")
-                held, moved = ("t1", "t0") if edge == "left" else ("t0", "t1")
-                self.assertAlmostEqual(v["tl"][held], before["tl"][held], delta=1, msg=edge)
-                self.assertGreaterEqual(v["tl"][moved], overview_t(before, x + dx - 1), edge)
-                self.assertLessEqual(v["tl"][moved], overview_t(v, x + dx + 1), edge)
-                self.assertNotEqual(v["tl"]["span"], before["tl"]["span"])
-            # An edge dragged past the other one: the shortest window, that edge held.
-            before, thumb = v, v["thumb"]
-            self.browser.drag((thumb["x"] + thumb["width"], y), (thumb["x"] - 40, y))
-            self.frame()
-            v = page.evaluate(OVERVIEW)                     # the thumb: its 2 px border
-            self.assertEqual(v["tl"]["span"], 200)              # LADDER[0]
-            self.assertAlmostEqual(v["tl"]["t0"], before["tl"]["t0"], delta=1)
+            # The wheel over the overview pans the window as the Timeline's
+            # sideways wheel does (the first turn stops it following live);
+            # Ctrl+wheel there zooms.
+            mouse.move(v["box"]["left"] - 20, y)
+            mouse.wheel(0, -100)
+            before = overview("the wheel over the overview, off the head")
+            mouse.wheel(0, -100)
+            v = overview("the wheel over the overview")
+            tl, was = v["tl"], before["tl"]
+            self.assertEqual(tl["span"], was["span"])
+            self.assertAlmostEqual(tl["t1"] - was["t1"], -100 * was["span"] / before["ov"]["width"],
+                                   delta=was["span"] / before["ov"]["width"])
+            ctrl_wheel(v["box"]["left"] + 5, y, 200)
+            v = overview("Ctrl+wheel over the overview")
+            self.assertGreater(v["tl"]["span"], tl["span"])
+            # A press on the strip left of the box pauses there (the strip as
+            # held, so read while pressed), and a drag scrubs: the strip and
+            # the window hold still, the cursor's line under the pointer.
+            ov = v["ov"]
+            at = round((max(ov["left"], overview_x(v, ov["tMin"])) + v["box"]["left"]) / 2)
+            self.assertGreater(v["box"]["left"] - at, 4, "room left of the box")
+            per_px = ov["S"] / ov["width"]
+            mouse.move(at, y)
+            mouse.down()
+            try:
+                for x in (at, at + 3, at - 6):
+                    mouse.move(x, y)
+                    self.frame()
+                    held = page.evaluate(OVERVIEW)
+                    self.assertFalse(held["tl"]["pos"]["live"])
+                    self.assertAlmostEqual(held["tl"]["pos"]["t"], overview_t(held, x), delta=per_px)
+                    self.assertAlmostEqual(mid(held["cursor"]), x, delta=1)
+                    still = (held["tl"]["t0"], held["tl"]["t1"], held["ov"]["m0"])
+                    if x == at:
+                        pressed = still
+                    self.assertEqual(still, pressed, "the window and the strip hold still")
+                    self.assertLess(held["tl"]["pos"]["t"], held["tl"]["t0"], "left of the window")
+            finally:
+                mouse.up()
+            self.assertFalse(page.evaluate("!!document.activeElement.closest('#drawer')"),
+                             "a press doesn't focus the drawer: R and F keep working")
+            v = overview("after a scrub")
+            self.assertLessEqual(v["tl"]["t0"], v["tl"]["pos"]["t"])
+            self.assertLessEqual(v["tl"]["pos"]["t"], v["tl"]["t1"])
+            self.browser.screenshot("overview", "past")
+            # A click on the box without a drag puts the cursor there (the
+            # strip may scroll on with the head: between the reads around it).
+            x = round(v["box"]["left"] + v["box"]["width"] / 4)
+            mouse.click(x, y)
+            after = overview("a click on the box")
+            self.assertGreaterEqual(after["tl"]["pos"]["t"], overview_t(v, x - 1))
+            self.assertLessEqual(after["tl"]["pos"]["t"], overview_t(after, x + 1))
         finally:
             page.evaluate("() => { const w = KleinTimeline.getWindow();"
                           " if (w) KleinTimeline.setWindow(w.t1, 30000000); }")

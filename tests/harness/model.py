@@ -232,6 +232,10 @@ class Model:
                 out.add((board, key))
         return out
 
+    def count_in(self, a, b):
+        """``countIn``: the kept records of every segment with ``a < ts <= b``."""
+        return sum(1 for _s, records in self.segments.values() for r in records if a < r[0] <= b)
+
     def runs(self):
         """``treeRuns``: the segment ids, grouped where the tree changes."""
         out = []

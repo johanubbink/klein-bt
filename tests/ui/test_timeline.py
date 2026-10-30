@@ -55,7 +55,7 @@ SETTLED_US = 1_000_000          # how far behind the head the browser surely has
 RUNNING, OUTCOMES = 1, (2, 3, 4)
 MARK_SETTLED_US = 300_000       # on t11: how long until a single mark is surely drawn
 
-# The cards, the transport's clock and Live / Jump to live button and the
+# The cards, the transport's clock and Live / Go live button and the
 # Timeline's cursor, read in one task.
 _READ = """() => ({
   cards: [...document.querySelectorAll('#canvas g.node')].map(g => [
@@ -232,7 +232,7 @@ class TimelineTest(DashboardCase):
             self.assertAlmostEqual(self.x_of(t, tl), x, delta=1, msg="the playhead follows the pointer")
             self.assertTrue(view["past"])
             self.assertEqual(view["clock"], fmt_time(t))
-            self.assertEqual(view["state"], ["past", "Jump to live ⏭︎", False])
+            self.assertEqual(view["state"], ["past", "Go live ⏭︎", False])
             self.assert_cards(view, model.labels(*model.seq_at(t), dict(view["cards"])), f"at {t}")
         self.assertEqual(len({v["tl"]["pos"]["seq"] for _x, v in seen}), 5, "five moments")
 
@@ -691,7 +691,7 @@ class TimelineAcrossASwapTest(DashboardCase):
             last = paused["tl"]["pos"]["seg"]
             head_seq = page.evaluate("() => kleinDebug().segments.at(-1).headSeq")
             self.assertEqual((pos["seq"], pos["t"], pos["live"]), (head_seq, shown, False))
-            self.assertEqual(paused["state"], ["past", "Jump to live ⏭︎", False])
+            self.assertEqual(paused["state"], ["past", "Go live ⏭︎", False])
             self.assertEqual(paused["clock"], view["clock"])
             cards = dict(paused["cards"])
             self.assertEqual(cards, dict(view["cards"]))

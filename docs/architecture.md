@@ -461,7 +461,7 @@ decides what is displayed:
   written.
 - **An opened file** (`klein-bt --open`) is the same recording source, with
   three differences in wording only: "live" is the file's end, so the
-  drawer says `● End` there and offers **Jump to end** elsewhere (Esc and End
+  drawer says `● End` there and offers **Go to end** elsewhere (Esc and End
   return to the end too); without a sidecar the board panel says **No
   blackboard in this file.** at every moment (`body.no-blackboard`, which
   also hides the "sampled 2×/s" note); and the recorder pill and the
@@ -470,7 +470,7 @@ decides what is displayed:
   RUNNING pulse, like `body.telemetry-stale`, shows the blackboard's "sampled
   2×/s" note, and draws a thin amber edge round the visible canvas (right of
   the sidebar, above the drawer: `#past-edge`). Which moment is shown is the
-  drawer's clock, beside its **Jump to live** (see
+  drawer's clock, beside its **Go live** (see
   [The drawer](#the-drawer)).
 - **The drawer** (see [The drawer](#the-drawer)): `KleinDrawer.showRecording`
   and `KleinDrawer.update(rec, pos)` run on every render (the drawer reads
@@ -540,7 +540,7 @@ A bottom drawer ([`klein/static/drawer.js`](../klein/static/drawer.js)) holds
 the recording views in two 48 px rows over a scrollable body:
 
 - the **transport row**, shared by both tabs: the collapse button,
-  **|◀ ▶ ▶|**, `● Live` (or, in the past, **Jump to live ⏭**),
+  **|◀ ▶ ▶|**, `● Live` (or, in the past, **Go live ⏭**),
   the overview of the whole recording (taking the space left), then the
   clock;
 - the **tab row**: the **Log** and **Timeline** tabs, the compact filter
@@ -557,7 +557,7 @@ sidebar's width (see [The sidebar](#the-sidebar)).
   collapsed and back to the chosen height. Collapsed, only the transport
   row shows (49 px with the border, as wide as the sidebar's strip): the
   tree gets the whole canvas, and the overview, the step and play buttons
-  and Jump to live still move it. Height and collapsed state are kept in
+  and Go live still move it. Height and collapsed state are kept in
   `localStorage` (`klein.drawer`); without storage the drawer starts at
   300 px every time. The shown height is the `--drawer-height` custom
   property on `<html>`, so the hint line (`#watermark`) and the canvas's
@@ -574,8 +574,8 @@ sidebar's width (see [The sidebar](#the-sidebar)).
   an opened file's end the button is off.
   Beside them one button (`#tr-jump`) says where the cursor is: live, a
   green `● Live`, inert (disabled, but tinted as a state, not greyed); in
-  the past, paused or playing, an amber **Jump to live ⏭** that goes back.
-  For an opened file it reads `● End` at the end and **Jump to end ⏭**
+  the past, paused or playing, an amber **Go live ⏭** that goes back.
+  For an opened file it reads `● End` at the end and **Go to end ⏭**
   elsewhere. It has a fixed width so the overview beside it never moves.
   Each has a key (its tooltip names it; see Keys below): ←/→ step, Space
   plays or pauses, End (and Esc) goes live; Home has no button and pauses at
@@ -691,7 +691,7 @@ sidebar's width (see [The sidebar](#the-sidebar)).
   says "Blackboard history from this moment was dropped." instead
   (`Segment.bbDropped` in the mirror). Live keeps what it shows. The row is
   highlighted, the transport row's clock says `14:03:22.201 030` beside
-  **Jump to live**, and the canvas gets its amber edge. Recording goes on
+  **Go live**, and the canvas gets its amber edge. Recording goes on
   underneath. When eviction drops the moment shown (`KleinCursor.evicted`),
   the cursor pauses just after the oldest kept record, its Log row selected,
   and a pill says so for 6 s: "Older than the kept 10 min: moved to the oldest
@@ -699,7 +699,7 @@ sidebar's width (see [The sidebar](#the-sidebar)).
   previous/next row as listed: with no filter that is consecutive seqs, across
   segment boundaries; with one, the previous/next matching transition. From
   live, ↑ takes the newest row; at either end the cursor stays. **Esc**,
-  **End** or **Jump to live** goes back to live and scrolls to the newest row.
+  **End** or **Go live** goes back to live and scrolls to the newest row.
   When the cursor moves elsewhere (the Timeline's playhead, stepping,
   playing), the Log scrolls its row into view (the next listed row when the
   filter hides it), at once or when the tab is shown again; going live by any
@@ -789,7 +789,7 @@ sidebar's width (see [The sidebar](#the-sidebar)).
   | ← / → (and ↑ / ↓) | previous / next transition as filtered | \|◀ / ▶\| |
   | Space | play / pause (live: pause there; an opened file's end: nothing) | ▶ / ❚❚ |
   | Home | pause at the oldest kept moment: `rec.tMin`, the records of that µs applied (an opened file: its first moment) | — |
-  | End, Esc | go live (an opened file: its end) | Jump to live / end |
+  | End, Esc | go live (an opened file: its end) | Go live / Go to end |
   | `\` | zoom the Timeline to fit; on the Timeline tab only, the Log has no window | ⤢ |
 
   Unmodified presses only, except `\` typed with AltGr (reported as

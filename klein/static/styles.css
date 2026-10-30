@@ -838,7 +838,7 @@ body.viewing-past .status-pill.running { animation: none; }
 #drawer-handle:hover::after, #sidebar-handle:hover::after { background: var(--text-muted); }
 
 /* The drawer's two rows. The transport row, the collapsed strip on its
-   own: fold, |◀ ▶ ▶|, Live or Jump to live, the overview (overview.js)
+   own: fold, |◀ ▶ ▶|, Live or Go live, the overview (overview.js)
    taking what is left, then the clock. The tab row: the tabs, the filter,
    the Timeline's zoom and, at the far end, the recorder pill; hidden while
    the drawer is collapsed. */
@@ -880,11 +880,11 @@ body.viewing-past .status-pill.running { animation: none; }
 }
 /* Where the cursor is, beside the buttons, in one button of one width (the
    longest label's), so nothing beside it moves: an inert green "● Live" (or
-   "● End" for an opened file), or in the past an amber "Jump to live ⏭"
-   that goes back. */
+   "● End" for an opened file), or in the past an amber "Go live ⏭" (or
+   "Go to end ⏭") that goes back. */
 #tr-jump {
     flex-shrink: 0;
-    width: 100px;               /* "Jump to live ⏭", the longest */
+    width: 86px;                /* "Go to end ⏭", the longest (81 px in Chrome) */
     height: 28px;
     box-sizing: border-box;
     padding: 0 6px;

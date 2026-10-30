@@ -85,7 +85,7 @@ tab, even with the drawer folded:
   While live it reads ❚❚: press it to freeze the tree, the blackboard and
   the clock right where they are.
 - The green **● Live** says you are live. In the past it turns into
-  **Jump to live**, which takes you back; the tree gets a thin amber edge,
+  **Go live**, which takes you back; the tree gets a thin amber edge,
   and the clock beside the bar says which moment you see. Changes are marked
   in the past too: stepping or clicking shows which values just changed.
 - The bar is the whole recording, from the oldest moment kept to now.
@@ -110,7 +110,7 @@ Below it are two tabs, a filter and the recording pill:
   and its blackboard in a `.bb.jsonl` beside it.
 
 `klein-bt --open FILE.btlog` shows a saved recording without a robot, in the
-same Log and Timeline; **Jump to end** takes you to its end. Unzip a saved
+same Log and Timeline; **Go to end** takes you to its end. Unzip a saved
 `.zip` first; the `.bb.jsonl` beside the file brings its blackboard along.
 
 ## Set up your robot

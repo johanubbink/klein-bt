@@ -445,7 +445,7 @@ _READ_CONNECTION = """
 # frame, the second runs after it rendered).
 NEXT_FRAME = "() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))"
 
-# The drawer's "Jump to live" button ("Jump to end" for an opened file), in
+# The drawer's "Go live" button ("Go to end" for an opened file), in
 # its transport row.
 BACK_TO_LIVE = "#tr-jump"
 
@@ -547,7 +547,7 @@ class BrowserProbe:
         self.page.evaluate(NEXT_FRAME)
 
     def go_live(self):
-        """Back to live (what "Jump to live" and Esc do), unless already live."""
+        """Back to live (what "Go live" and Esc do), unless already live."""
         self.page.evaluate("() => { if (clock.mode !== 'live') KleinDrawer.goLive(); }")
         self.page.wait_for_function("!document.body.classList.contains('viewing-past')")
 

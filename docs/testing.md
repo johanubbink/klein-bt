@@ -272,7 +272,7 @@ python scripts/make_gifs.py --only rewind   # just one (hero, rewind); --keep ke
   stepped with |◀ |◀ |◀ ▶|, each step moving the selected row and flipping
   PickLock's card between RUNNING and FAILURE; then a Log row is clicked,
   `door_open` is hovered in the blackboard (its writers and reader outlined
-  on the tree), ▶ plays, and **Jump to live** brings it back to `● Live`.
+  on the tree), ▶ plays, and **Go live** brings it back to `● Live`.
 
 Chrome draws klein in an iframe inside a made-up browser outline (a tab, ←
 → ↻ and an address bar reading `http://localhost:8080`), styled from

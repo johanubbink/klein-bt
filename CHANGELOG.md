@@ -13,6 +13,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   up towards the right. A dashed edge marks where the recording starts,
   with `⇤ Recording starts` beside the axis; once old history was dropped
   it says so, as before.
+- **A shorter live button.** In the past it reads **Go live ⏭** (an opened
+  file: **Go to end ⏭**) instead of "Jump to live ⏭", so the overview
+  beside it gets the room.
 
 ## [0.7.0] - 2026-10-06
 

@@ -13,7 +13,7 @@ gateway hold exactly the same records:
   ``BlackboardTrack.at(t)``, the row's "to" on its card, nothing fading
   and the static change mark on exactly the keys the Model calls fresh, and
   the writer pulse on exactly those keys' writers (the layout's bindings); the
-  transport row's clock and its "Jump to live" button, and the canvas's
+  transport row's clock and its "Go live" button, and the canvas's
   amber edge;
 * the filter across both trees (every cell, Δ to the row above as listed),
   and a subtree-name click fills it without pausing;
@@ -22,7 +22,7 @@ gateway hold exactly the same records:
   it from a paused moment does not fade either;
 * ↑/↓ across a segment boundary, filtered ↓ to the next match, ↑ from live
   to the newest row, and the keyboard guards (sidebar, filter input); the
-  transport's |◀ ▶| and Jump to live, and their keys ←/→ and End, step the
+  transport's |◀ ▶| and Go live, and their keys ←/→ and End, step the
   same filtered rows from either tab and the keys don't scroll the drawer;
   Space plays and pauses, live too (a focused button keeps it), Home pauses at the
   model's state at the oldest kept moment, and no key acts with a modifier,
@@ -76,7 +76,7 @@ _ALL_ROW_TEXT = """async () => {
 }"""
 
 # The cursor as the page shows it, read in one task: the selected row, the
-# transport's clock and Live / Jump to live button, the cards and the
+# transport's clock and Live / Go live button, the cards and the
 # blackboard panel (each row's text by board/key).
 _VIEW = """() => {
   const sel = document.querySelector('#log-rows .log-row.selected:not([hidden])');
@@ -286,7 +286,7 @@ class LogTest(LogView, DashboardCase):
         self.assertTrue(v["past"] and v["note"], "paused, with the blackboard note")
         self.assertEqual(v["fading"], 0, "nothing fades in the past")
         self.assertEqual(v["clock"], fmt_time(t))
-        self.assertEqual(v["state"], ["past", "Jump to live ⏭︎", False])
+        self.assertEqual(v["state"], ["past", "Go live ⏭︎", False])
         self.assertTrue(v["edge"], "the canvas's amber edge")
         st = self.model.state_at_seq(seg, seq + 1)
         cards = dict(v["cards"])
@@ -547,7 +547,7 @@ class LogTest(LogView, DashboardCase):
         self.page.evaluate("() => document.activeElement && document.activeElement.blur()")
         self.page.keyboard.press("ArrowDown")
         self.assert_at(picks[i + 1])
-        # The transport's |◀ ▶| and Jump to live, and their keys ←/→ and
+        # The transport's |◀ ▶| and Go live, and their keys ←/→ and
         # End, step the same filtered rows from either tab; from live, ◀
         # takes the newest one and ▶ is off. A key that acts doesn't scroll
         # the drawer (a listener added after the page's sees it prevented).
@@ -769,7 +769,7 @@ class BackToLiveTest(LogView, DashboardCase):
                 self.assertTrue(0 < pos["t"] - at["t"] < 500_000, "the newest sample's time")
                 for when in ("now", "a second later"):
                     v = self.view()
-                    self.assertEqual(v["state"], ["past", "Jump to live ⏭︎", False], when)
+                    self.assertEqual(v["state"], ["past", "Go live ⏭︎", False], when)
                     self.assertEqual([v["cards"], v["boards"], v["clock"]],
                                      [live["cards"], live["boards"], live["clock"]], when)
                     model = Model(self.gw.require_debug_state())

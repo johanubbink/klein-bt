@@ -11,7 +11,7 @@ suite; see docs/testing.md, "Demo GIFs".
   the playhead dragged back into PickLock's retries, then on the Log tab
   |◀ |◀ |◀ ▶| steps (each flips PickLock's card), a Log row clicked,
   ``door_open`` hovered in the blackboard (its writers and reader outlined
-  on the tree), ▶ play, then Jump to live, back to ● Live.
+  on the tree), ▶ play, then Go live, back to ● Live.
 
 Needs Playwright (``pip install -e '.[dev]'``) and ``ffmpeg``. Chrome draws
 klein inside a plain, made-up browser outline (a wrapper page with a tab and

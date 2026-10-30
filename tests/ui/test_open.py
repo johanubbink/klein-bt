@@ -12,8 +12,9 @@ independent reader, and against Python's ``state_at`` on the same file:
   the sidecar's values on the blackboard panel, and the writer pulse on
   exactly the writers of the keys changed within a sample; the board with no lines
   (DoorClosed::7) shows "—"; Home goes to the file's first moment (Python's
-  state there), and Esc, End and the transport's "Jump to end" return to
-  the file's last state ("● End"), where ▶ is off (nothing to pause);
+  state there), and Esc, End and the transport's "Go to end" return to
+  the file's last state ("● End"), where ▶ is off (nothing to pause); that
+  button's one width fits "Go to end ⏭", so nothing beside it moves;
 * the Timeline's window, longer than the file, ends at the file's end, its
   start edge marked "Recording starts"; dragging the sidebar redraws it,
   though a file sends nothing more;
@@ -55,6 +56,15 @@ _READ_VIEW = """() => {
            pulses: (""" + PULSES + """)(),
            state: (j => [j.dataset.state, j.textContent, j.disabled])(document.getElementById('tr-jump')) };
 }"""
+
+# Whether the jump button's label fits inside its padding at its one width,
+# and where the overview beside it starts.
+_JUMP = """() => { const j = document.getElementById('tr-jump'), s = getComputedStyle(j);
+  const text = document.createRange();
+  text.selectNodeContents(j);
+  const room = j.clientWidth - parseFloat(s.paddingLeft) - parseFloat(s.paddingRight);
+  return [text.getBoundingClientRect().width <= room,
+          document.getElementById('overview').getBoundingClientRect().left]; }"""
 
 # Every Log row, as the Log computes it (the DOM holds only the rows in view).
 _ALL_ROWS = """() => { const R = KleinRecording, rows = R.logRows(shownRecording());
@@ -169,9 +179,11 @@ class OpenFileTest(DashboardCase):
         self.page.click('#log-rows .log-row[data-seq="0"]:not([hidden])')
         view = self.view()
         self.assertEqual(view["pos"]["seq"], 1)
-        self.assertEqual(view["state"], ["past", "Jump to end ⏭︎", False],
+        self.assertEqual(view["state"], ["past", "Go to end ⏭︎", False],
                          "a file has no live: its end")
         self.assertTrue(view["pastNote"])
+        fits, overview_left = self.page.evaluate(_JUMP)
+        self.assertTrue(fits, "the longest label fits the button's one width")
         seen = []
         while not seen or view["pos"]["seq"] != seen[-1]:   # the last row: it stays put
             seen.append(view["pos"]["seq"])
@@ -201,7 +213,7 @@ class OpenFileTest(DashboardCase):
                 "document.getElementById('tr-play').getAttribute('aria-label') === 'Pause'",
                 timeout=3000)
             self.page.click("#tr-play")
-        # Back to the end (Esc, End and Jump to end): "live" is the file's
+        # Back to the end (Esc, End and Go to end): "live" is the file's
         # last state.
         for how in ("Escape", "End", "#tr-jump"):
             if how != "Escape":                     # (Esc: from Home)
@@ -217,6 +229,7 @@ class OpenFileTest(DashboardCase):
             self.assertEqual(view["pos"]["seq"], len(self.records), how)
             self.assertEqual(view["state"], ["end", "End", True], how)
             self.assert_view_at(view)
+        self.assertEqual(self.page.evaluate(_JUMP), [True, overview_left], "nothing beside it moved")
         # At the end nothing advances, so nothing pauses: ▶ is off, Space does nothing.
         self.assertTrue(self.page.is_disabled("#tr-play"))
         self.browser.key(" ")

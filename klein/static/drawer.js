@@ -644,7 +644,7 @@ function stepRow(dir) {
 // ------------------------------------------------------------------ //
 // The transport row
 // ------------------------------------------------------------------ //
-// |◀ ▶ ▶| and Live/Jump to live (End/Jump to end for an opened file), from
+// |◀ ▶ ▶| and Live/Go live (End/Go to end for an opened file), from
 // either tab and folded; the clock is KleinCursor.shownTime.
 const prevButton = document.getElementById("tr-prev");
 const nextButton = document.getElementById("tr-next");
@@ -670,7 +670,7 @@ function paintTransport() {
     jumpButton.hidden = !pos;
     jumpButton.disabled = state !== "past";             // live (or at the end): a state
     if (jumpButton.dataset.state !== state) jumpButton.dataset.state = state;
-    setText(jumpButton, state === "past" ? (file ? "Jump to end ⏭︎" : "Jump to live ⏭︎")
+    setText(jumpButton, state === "past" ? (file ? "Go to end ⏭︎" : "Go live ⏭︎")
                                          : state === "end" ? "End" : "Live");
     setAttr(jumpButton, "title", state !== "past" ? (file ? "At the file's end" : "Live")
                                  : file ? "Go to the file's end (End, Esc)" : "Back to live (End, Esc)");

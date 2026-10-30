@@ -35,7 +35,9 @@ The code:
   values; `recording.js` and `cursor.js` mirror the recording (see
   [Browser model](#browser-model)); `drawer.js`, `timeline.js` and
   `overview.js` are the drawer, its Timeline tab and its overview. D3 is
-  vendored so it works without internet.
+  vendored so it works without internet. Dependabot can't see a vendored
+  file, so check [D3's releases](https://github.com/d3/d3/releases) when
+  cutting a klein release.
 
 ## Robot side: one socket, two pollers
 

@@ -76,7 +76,7 @@ blackboard included, and keeps the last 10 minutes. Change that with
 from Groot2 against the same robot at the same time: each would get only
 some of the transitions.
 
-![klein rewinding a live robot: scrub, step, hover a key, play, back to live](assets/klein-rewind.gif)
+![klein rewinding a live robot: hover the minimap (its scrollbar shows), drag its box back, click a burst, scrub, step, hover a key, play, back to live](assets/klein-rewind.gif)
 
 The drawer under the tree shows the recording. Its top row works in every
 tab, even with the drawer folded:
@@ -89,7 +89,7 @@ tab, even with the drawer folded:
   and the clock beside the bar says which moment you see. Changes are marked
   in the past too: stepping or clicking shows which values just changed.
 - The bar is a minimap of the recording, eight of the Timeline's windows
-  long, with now at its right edge: amber columns show how busy the robot
+  long (live, now is its right edge): amber columns show how busy the robot
   was, hatched stretches are outages, and a pink dashed line marks where
   the robot started another tree. Click or drag it to go to that moment;
   hover it for the time. On the Timeline tab a box on it is the Timeline's

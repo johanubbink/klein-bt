@@ -87,17 +87,15 @@ BLACKBOARD_POLL_INTERVAL = 0.5  # 2 Hz blackboard poll — values change slower 
 REQUEST_TIMEOUT = 2.0           # seconds to wait for a robot reply
 LAYOUT_RETRY_MAX = 5.0          # cap on handshake retry backoff
 
-# Static files served over HTTP at "/<name>" ("/" is "/index.html"). The
-# scripts are all the dashboard's own, and it needs every one of them to render.
+# Static files served over HTTP at "/<name>" ("/" is "/index.html"): every file
+# in static/ with one of these types, so a new script needs no list. The
+# dashboard can't render without the page, D3 and app.js.
 _CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
 }
-_STATIC_FILES = ("index.html", "styles.css", "d3.v7.min.js", "renderers.js", "recording.js",
-                 "cursor.js", "window.js", "drawer.js", "timeline.js", "overview.js", "app.js")
-_STATIC_ROUTES = {f"/{name}": (name, _CONTENT_TYPES[Path(name).suffix])
-                  for name in _STATIC_FILES}
+_RENDER_CRITICAL = ("index.html", "d3.v7.min.js", "app.js")
 _INDEX_FALLBACK = b"<!doctype html><h1>klein: index.html missing from package</h1>"
 
 # The recording's downloads (docs/architecture.md, "Browser side: one port"):
@@ -789,22 +787,26 @@ class KleinGateway:
     def _load_static(self):
         """Load the packaged static files into memory once, keyed by URL path.
 
-        A missing ``index.html`` falls back to a stub page; a missing script
-        (D3 or one of the dashboard's) just means that route 404s (and the
-        dashboard can't render).
+        A missing ``index.html`` falls back to a stub page; any other missing
+        file just means its route 404s (and, for D3 or a dashboard script,
+        that the dashboard can't render).
         """
-        for path, (filename, content_type) in _STATIC_ROUTES.items():
-            body = _load_asset(filename)
+        try:
+            names = sorted(f.name for f in STATIC_DIR.iterdir()
+                           if f.suffix in _CONTENT_TYPES)
+        except OSError:
+            names = []
+        for name in names:
+            body = _load_asset(name)
             if body is not None:
-                self._static[path] = (body, content_type)
+                self._static[f"/{name}"] = (body, _CONTENT_TYPES[Path(name).suffix])
+        for name in _RENDER_CRITICAL:
+            if f"/{name}" not in self._static:
+                print(f"[klein] warning: {name} not bundled; dashboard will not render.",
+                      file=sys.stderr)
         self._static.setdefault(
             "/index.html", (_INDEX_FALLBACK, "text/html; charset=utf-8")
         )
-        # The dashboard needs D3 and all of its own scripts to render at all.
-        for asset in _STATIC_FILES:
-            if asset.endswith(".js") and f"/{asset}" not in self._static:
-                print(f"[klein] warning: {asset} not bundled; dashboard will not render.",
-                      file=sys.stderr)
 
     async def run(self, open_browser=False):
         """Serve HTTP+WebSocket on one port; load the layout and poll forever."""

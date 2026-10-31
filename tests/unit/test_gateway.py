@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import io
 import json
+import re
 import socket
 import sys
 import time
@@ -548,21 +549,35 @@ class StaticAssetsTest(GatewayTestCase):
     def request(self, path):
         return answer(self.gw, path)
 
-    def test_real_assets_loaded(self):
-        self.assertIn("/index.html", self.gw._static)
-        self.assertIn("/styles.css", self.gw._static)
-        self.assertIn("/app.js", self.gw._static)
-        self.assertIn("/d3.v7.min.js", self.gw._static)
-        html_body, html_ct = self.gw._static["/index.html"]
-        self.assertIn(html_ct, "text/html; charset=utf-8")
-        self.assertIn(b"klein", html_body)
-        _css_body, css_ct = self.gw._static["/styles.css"]
-        self.assertEqual(css_ct, "text/css; charset=utf-8")
-        _js_body, js_ct = self.gw._static["/app.js"]
-        self.assertEqual(js_ct, "text/javascript; charset=utf-8")
-        d3_body, d3_ct = self.gw._static["/d3.v7.min.js"]
-        self.assertEqual(d3_ct, "text/javascript; charset=utf-8")
-        self.assertGreater(len(d3_body), 200000)
+    def test_every_static_file_served(self):
+        # Every file in static/ is served at "/<name>" with its type, so a new
+        # script needs no list; the package ships the whole directory.
+        files = sorted(gateway.STATIC_DIR.iterdir())
+        self.assertGreaterEqual({f.name for f in files},
+                                {"index.html", "styles.css", "d3.v7.min.js", "app.js"})
+        for f in files:
+            with self.subTest(f.name):
+                r = self.request(f"/{f.name}")
+                self.assertEqual(r.status_code, 200)
+                self.assertEqual(r.body, f.read_bytes())
+                self.assertEqual(r.headers["Content-Type"], gateway._CONTENT_TYPES[f.suffix])
+        pyproject = (Path(__file__).resolve().parents[2] / "pyproject.toml").read_text()
+        self.assertIn('klein = ["static/*"]', pyproject)
+
+    def test_every_script_reference_resolves(self):
+        # The page's <script src>s and every relative import between the
+        # dashboard's modules name a file in static/.
+        static = gateway.STATIC_DIR
+        refs = [("index.html", src) for src in
+                re.findall(r'<script[^>]*\ssrc="/([^"]+)"', (static / "index.html").read_text())]
+        for js in sorted(static.glob("*.js")):
+            refs += [(js.name, name) for name in
+                     re.findall(r'^\s*(?:import|export)\b[^;]*?\bfrom\s+"\./([^"]+)"',
+                                js.read_text(), re.M)]
+        self.assertIn(("index.html", "app.js"), refs)
+        for where, name in refs:
+            with self.subTest(f"{where} -> {name}"):
+                self.assertTrue((static / name).is_file())
 
     def test_routes(self):
         self.assertIsNone(self.request("/ws"))          # deferred to the upgrade
@@ -578,19 +593,6 @@ class StaticAssetsTest(GatewayTestCase):
                 self.assertEqual(r.status_code, status)
                 self.assertEqual(r.body, body)
         self.assertEqual(self.request("/").headers["Content-Type"], "text/html; charset=utf-8")
-
-    def test_recording_model_scripts_served_and_packaged(self):
-        pyproject = (Path(__file__).resolve().parents[2] / "pyproject.toml").read_text()
-        html = self.gw._static["/index.html"][0].decode()
-        for name in ("recording.js", "cursor.js", "window.js", "drawer.js", "timeline.js",
-                     "overview.js"):
-            with self.subTest(name):
-                r = self.request(f"/{name}")
-                self.assertEqual(r.status_code, 200)
-                self.assertEqual(r.headers["Content-Type"], "text/javascript; charset=utf-8")
-                self.assertIn(f'"static/{name}"', pyproject)
-                # Before app.js, which builds its store at load time.
-                self.assertLess(html.index(f'src="/{name}"'), html.index('src="/app.js"'))
 
     def test_missing_files_fall_back(self):
         # Simulate a package where none of the static assets are bundled.

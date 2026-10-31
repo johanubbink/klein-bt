@@ -1,10 +1,11 @@
 // view.js — what the dashboard shows, decided without the DOM: at each render
 // the source (the recording at the cursor, or the latest frames), the clock
 // after the render's rewrites, the tree, the status and the blackboard
-// panel's input (frame, panel); and each blackboard row's change marks
-// (rowMarks). app.js computes them and then applies them: the painters, the
-// body classes, the banners, the rows' classes. Pure: no DOM, no d3.
-// See docs/architecture.md, "Rendering".
+// panel's input (frame, panel); each blackboard row's change marks
+// (rowMarks); and what the Timeline's window shows (timelineWindow). app.js
+// and timeline.js compute them and then apply them: the painters, the body
+// classes, the banners, the rows' classes, the lanes. Pure: no DOM, no d3.
+// See docs/architecture.md, "Rendering" and "The drawer".
 
 import * as R from "./recording.js";
 import * as C from "./cursor.js";
@@ -167,4 +168,68 @@ function rowMarks({ change, t, mode, primed, reducedMotion, shown, seen }) {
     return { streaming, marked: rule.still && news, fire, fade };
 }
 
-export { frame, panel, rowMarks };
+// ------------------------------------------------------------------ //
+// The Timeline's window: what its lanes show from t0 to t1
+// ------------------------------------------------------------------ //
+// Where segment i of rec ends: its end, else where the next one begins,
+// else the time shown at the head (KleinCursor.headTime).
+function segmentEnd(rec, i) {
+    const s = rec.segments[i], next = rec.segments[i + 1];
+    return s.tEnd !== null ? s.tEnd : next ? next.tBegin : C.headTime(rec);
+}
+
+// Segment s's stretch, to `end`, as a band over the rows of seg's tree: the
+// robot ran another tree, or another run of the same one (a new layout).
+function treeBand(s, seg, end) {
+    const name = R.treeName(s.layout);
+    const title = name === R.treeName(seg.layout) ? `Earlier run of ${name}`
+                                                   : `The robot ran another tree: ${name}`;
+    return { from: s.tBegin, to: end, kind: "tree", label: `tree: ${name}`, title };
+}
+
+// Segment s's marks from t0 to t1 (KleinRecording.timelineMarks), joined
+// uid by uid to those per holds already.
+function addMarks(per, s, t0, t1) {
+    const all = R.intervalsAll(s, s.uids, t0, t1);
+    for (const uid of s.uids) {
+        const marks = R.timelineMarks(all[uid]);
+        const into = per.get(uid);
+        if (!into) per.set(uid, marks);
+        else for (const k of Object.keys(marks)) into[k].push(...marks[k]);
+    }
+}
+
+// The Timeline's window from t0 to t1, drawn for the tree of segment `seg`
+// (the cursor's): what its lanes show, for timeline.js to paint. Returns
+//   count     the kept transitions in it (t0 < ts <= t1, as countIn)
+//   tooMany   more than maxRecords: no bars ("Zoom in to see bars"), so
+//             rebuilding them stays inside a frame's budget
+//   per       Map uid -> timelineMarks over every segment of that tree in
+//             the window (a resume after an outage is the same tree),
+//             oldest first; empty when tooMany
+//   bands     [{from, to, kind, label, title}] over every row, the bands
+//             the window overlaps: kind "tree" where the robot ran another
+//             tree (or another run of it), then kind "gap" for each gap
+//             (label its kind: not recorded)
+//   edge      where the recording starts (rec.tMin) when that is inside
+//             the window, else null
+function timelineWindow(rec, seg, t0, t1, maxRecords) {
+    const count = R.countIn(rec, [t0, t1])[0];
+    const tooMany = count > maxRecords;
+    const per = new Map();
+    const bands = [];
+    rec.segments.forEach((s, i) => {
+        const end = segmentEnd(rec, i);
+        if (end < t0 || s.tBegin > t1) return;
+        if (!R.sameTree(s, seg)) bands.push(treeBand(s, seg, end));
+        else if (!tooMany) addMarks(per, s, t0, Math.min(t1, end));
+    });
+    for (const gap of R.gapsIn(rec, t0, t1)) {
+        bands.push({ from: gap.tFrom, to: gap.tTo, kind: "gap", label: gap.kind,
+                     title: `Not recorded (${gap.kind})` });
+    }
+    const edge = rec.tMin >= t0 && rec.tMin <= t1 ? rec.tMin : null;
+    return { count, tooMany, per, bands, edge };
+}
+
+export { frame, panel, rowMarks, timelineWindow };

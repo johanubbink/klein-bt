@@ -2,8 +2,9 @@
 ``static/recording.js``), run under gjs against what the Python model says.
 
 A seeded Python ``Recording`` (``make_vectors.build_named``: a same-tree
-restart, then a tree swap, small chunks with the oldest evicted, a subtree in
-each tree) is streamed through ``klein.streaming`` into the browser store; for several filters every row
+restart, a tree swap, then a new run of the first tree after an outage, small
+chunks with the oldest evicted, a subtree in each tree) is streamed through
+``klein.streaming`` into the browser store; for several filters every row
 must equal the Python record it stands for, with the node and subtree names
 taken from the layout and ``from`` from Python's ``state_at_seq``. Skips
 without gjs.
@@ -68,7 +69,7 @@ class LogRowsTest(unittest.TestCase):
     def test_rows_equal_the_python_records(self):
         data, rec = vectors()
         # The scenario is what the docstring says, and the filters bite.
-        self.assertEqual([s.layout.generation for s in rec.segments], [1, 1, 2])
+        self.assertEqual([s.layout.generation for s in rec.segments], [1, 1, 2, 3])
         counts = [len(expected_rows(rec, f)) for f in FILTERS]
         self.assertTrue(counts[0] > counts[1] > 0 and counts[-1] == 0, counts)
         assert_vectors_pass(self, data)

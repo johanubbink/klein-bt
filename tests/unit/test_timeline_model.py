@@ -9,7 +9,14 @@
   here;
 * ``timelineSections`` lists a tree as sections per subtree, with folds and
   filters, as written again here in a different shape (a flat walk, then
-  grouping by owning section).
+  grouping by owning section);
+* ``timelineWindow`` (``static/view.js``) gives a window's transition count,
+  its marks per uid over every segment of the drawn tree (joined across a
+  restart), the bands of other trees (another tree, or a new run of the
+  same one) and gaps, and the recording's start edge, from each tree's side:
+  windows over everything, the evicted start, the start edge at either end,
+  across the restart, the gap and the new run, between and just touching
+  segments, the open tail past the head and past it, and too many records.
 
 Skips without gjs.
 """
@@ -18,10 +25,12 @@ from unittest import mock
 
 from klein import recording
 from tests.harness.js import assert_vectors_pass
-from tests.make_vectors import STATIC, build_named, intervals, store_cases
+from tests.harness.model import Model
+from tests.make_vectors import STATIC, build_named, dump, intervals, store_cases
 
 RUNNING, SUCCESS, FAILURE, SKIPPED = 1, 2, 3, 4
 OUTCOMES = (SUCCESS, FAILURE, SKIPPED)
+MAX_RECORDS = 20_000                # timeline.js's MAX_WINDOW_RECORDS
 
 
 def marks(ivs):
@@ -122,6 +131,74 @@ def sections(tree, folded, needle):
     return item(by_id[tree["id"]])
 
 
+def tree_name(layout):
+    return layout.tree.get("root_tree_id") or layout.tree["name"]
+
+
+def window(rec, seg, t0, t1, most):
+    """``timelineWindow``, from its definition: the transitions in the window
+    (counted by the harness Model); each segment in it, to its end (else the
+    next one's begin, else the head's time), as its marks per uid when it ran
+    seg's layout and the window holds at most ``most``, else as a band; the
+    gaps it overlaps; the recording's start when inside it."""
+    model = Model(dump(rec))
+    count = model.count_in(t0, t1)
+    per, bands = {}, []
+    for i, s in enumerate(rec.segments):
+        later = rec.segments[i + 1:]
+        end = s.t_end if s.t_end is not None else later[0].t_begin if later else model.head_time()
+        if end < t0 or s.t_begin > t1:
+            continue
+        if s.layout.generation != seg.layout.generation:
+            name = tree_name(s.layout)
+            title = (f"Earlier run of {name}" if name == tree_name(seg.layout)
+                     else f"The robot ran another tree: {name}")
+            bands.append({"from": s.t_begin, "to": end, "kind": "tree", "label": f"tree: {name}",
+                          "title": title})
+        elif count <= most:
+            for uid in s.layout.uids:
+                for kind, shapes in marks(intervals(s, uid, t0, min(t1, end))).items():
+                    per.setdefault(uid, {}).setdefault(kind, []).extend(shapes)
+    bands += [{"from": a, "to": b, "kind": "gap", "label": kind, "title": f"Not recorded ({kind})"}
+              for a, b, kind in rec.gaps if b >= t0 and a <= t1]
+    return {"count": count, "tooMany": count > most, "per": [[u, m] for u, m in sorted(per.items())],
+            "bands": bands, "edge": rec.t_min if t0 <= rec.t_min <= t1 else None}
+
+
+def window_cases(rec):
+    """``timelineWindow`` over a table of windows, from the side of each
+    tree (the cursor's segment saved as ``seg<id>``)."""
+    s0, s1, s2, s3 = rec.segments
+    t_min, head = rec.t_min, Model(dump(rec)).head_time()
+    windows = {
+        "everything": (t_min - 1000, head + 1000),
+        "the evicted start": (s0.t_begin, t_min - 1),
+        "the start edge at t0": (t_min, t_min + 2000),
+        "the start edge at t1": (t_min - 2000, t_min),
+        "across the restart": (s0.t_end - 3000, s1.t_begin + 3000),
+        "between two segments": (s0.t_end + 1, s1.t_begin - 1),
+        "touching both": (s0.t_end, s1.t_begin),
+        "across the gap and the new run": (s2.t_end - 2000, s3.t_begin + 2000),
+        "the open tail": (s3.t_begin + 1000, head + 500),
+        "past the head's time": (head + 10, head + 1000),
+    }
+    cases = []
+    for what, (t0, t1) in windows.items():
+        for s in (s0, s2, s3):
+            cases.append({"name": f"timelineWindow {what}, seg {s.id}",
+                          "call": "KleinView.timelineWindow",
+                          "args": [{"$ref": "s_rec"}, {"$ref": f"seg{s.id}"}, t0, t1, MAX_RECORDS],
+                          "expect": window(rec, s, t0, t1, MAX_RECORDS)})
+    t0, t1 = windows["everything"]
+    count = Model(dump(rec)).count_in(t0, t1)
+    for most in (count - 1, count):
+        cases.append({"name": f"timelineWindow everything, at most {most}",
+                      "call": "KleinView.timelineWindow",
+                      "args": [{"$ref": "s_rec"}, {"$ref": f"seg{s0.id}"}, t0, t1, most],
+                      "expect": window(rec, s0, t0, t1, most)})
+    return cases
+
+
 def vectors():
     """Called with CHUNK_SIZE patched to 8, as ``build_named`` wants."""
     rec, frames = build_named()
@@ -158,7 +235,9 @@ def vectors():
                       "call": "KleinRecording.timelineSections",
                       "args": [TREE, list(folded), needle],
                       "expect": sections(TREE, set(folded), needle)})
-    return {"modules": {"KleinRecording": str(STATIC / "recording.js")}, "cases": cases}, rec
+    cases += window_cases(rec)
+    return {"modules": {"KleinRecording": str(STATIC / "recording.js"),
+                        "KleinView": str(STATIC / "view.js")}, "cases": cases}, rec
 
 
 class TimelineModelTest(unittest.TestCase):
@@ -183,6 +262,15 @@ class TimelineModelTest(unittest.TestCase):
     def test_helpers_equal_the_python_references(self):
         data, rec = vectors()
         self.assertGreater(rec.segments[0].start_seq, 0, "a chunk was evicted")
+        # The windows hold each kind of band, the start edge and none, bars
+        # and none, and too many records.
+        got = [c["expect"] for c in data["cases"] if c["name"].startswith("timelineWindow")]
+        self.assertEqual({b["title"] for w in got for b in w["bands"]},
+                         {"Earlier run of MainTree", "The robot ran another tree: MainTree",
+                          "The robot ran another tree: PatrolTree", "Not recorded (outage)"})
+        self.assertEqual({w["edge"] for w in got}, {None, rec.t_min})
+        self.assertEqual({bool(w["per"]) for w in got}, {True, False})
+        self.assertEqual({w["tooMany"] for w in got}, {True, False})
         assert_vectors_pass(self, data)
 
 

@@ -122,19 +122,24 @@ CROSS = layout(tree={**_node(1, "Sequence", [
 PATROL = layout(tree={**_node(1, "ReactiveSequence", [
     _node(2, "VisitWaypoints", [_node(3, "MoveTo"), _node(4, "Dwell")], subtree=True)]),
     "root_tree_id": "PatrolTree"}, uids=[1, 2, 3, 4], generation=2)
+# CROSS's XML loaded again: a new layout of a tree of the same name.
+CROSS_AGAIN = layout(tree=CROSS.tree, uids=CROSS.uids, generation=3)
 
 
 def build_named():
     """``(recording, frames)`` on ``CROSS`` and ``PATROL``: a same-tree
-    restart, then a tree swap, the oldest chunks evicted; ``frames`` is every
-    frame a dashboard subscribed from the start got. Build it under a small
-    chunk size."""
+    restart, then a tree swap, then after an outage ``CROSS_AGAIN``, left
+    open with a blackboard sample after the head; the oldest chunks evicted.
+    ``frames`` is every frame a dashboard subscribed from the start got.
+    Build it under a small chunk size."""
     rng = random.Random(8)
     rec = Recording(keep_us=40_000)
     frames = []
     Streamer(rec, lambda clients, f: frames.append(f)).subscribe("x")
     t = T0
-    for tree, count in ((CROSS, 40), (CROSS, 15), (PATROL, 20)):
+    for tree, count in ((CROSS, 40), (CROSS, 15), (PATROL, 20), (CROSS_AGAIN, 10)):
+        if tree is CROSS_AGAIN:
+            rec.add_gap(t - 500, t, "outage")
         live = set()
         rec.begin_segment(tree, t, bytes(tree.size))
         for _ in range(count):
@@ -150,8 +155,11 @@ def build_named():
             rec.advance_head(t)
             rec.evict(t)
             t += 30
+        if tree is CROSS_AGAIN:
+            break
         rec.end_segment(t)
         t += 500
+    rec.add_blackboard(t, {"Main": {"door": "open"}})
     return rec, frames
 
 
@@ -658,13 +666,19 @@ def bb_change_vectors():
 # Tree runs and counts, expected from the harness Model
 # --------------------------------------------------------------------------- #
 def dump(rec):
-    """What ``GET /debug/state`` dumps of rec's segments and records: all
-    the Model needs for tree runs."""
+    """What ``GET /debug/state`` dumps of rec's segments, records, head and
+    blackboards: all the Model needs for tree runs, counts and the head's
+    time."""
     return {"segments": [{"id": s.id, "t_begin": s.t_begin, "start_seq": s.start_seq,
                           "head_seq": s.head_seq, "start_state": list(s.state_at_seq(s.start_seq)),
                           "layout_id": s.layout.generation} for s in rec.segments],
             "records": [[ts, uid, status] for s in rec.segments
-                        for _seq, ts, uid, status in s.iter_records(s.start_seq, s.head_seq)]}
+                        for _seq, ts, uid, status in s.iter_records(s.start_seq, s.head_seq)],
+            "head": rec.head,
+            "blackboard": [{"seg": s.id, "t_start": s.blackboard.t_start,
+                            "boards": dict(s.blackboard.boards),
+                            "changes": [list(c) for c in s.blackboard.changes()]}
+                           for s in rec.segments]}
 
 
 def _tree_run_cases(name, rec):

@@ -421,6 +421,13 @@ here as app.js imports it (`import * as KleinRecording from
   the panel as it is. `rowMarks({change, t, mode, primed, reducedMotion,
   shown, seen})` is one blackboard row's marks at a paint, `{streaming,
   marked, fire, fade}`, `fade` being `"restart"`, `"clear"` or `"keep"`.
+  `timelineWindow(rec, seg, t0, t1, maxRecords)` is what the Timeline's
+  window shows for segment `seg`'s tree (see [The drawer](#the-drawer)):
+  `{count, tooMany, per, bands, edge}`, the transitions in it, whether
+  that is more than `maxRecords` (then no bars), the marks per uid
+  (`timelineMarks`), the bands of other trees and gaps with their labels
+  and tooltips, and `rec.tMin` when the recording starts inside it (else
+  null).
 
 `app.js` routes binary frames and the recording's message types to the store.
 
@@ -811,9 +818,10 @@ sidebar's width (see [The sidebar](#the-sidebar)).
     subtree name), folded away or not; sections around them stay as dimmed
     context headers. The fold is still shown, and applies again when the
     filter is cleared.
-  - **Bars.** From `intervalsAll` and `timelineMarks` over the window, for
-    every segment of the drawn tree in it (a resume after an outage is the
-    same tree): an amber bar per RUNNING span, capped by a 3 px mark in the
+  - **Bars.** From `KleinView.timelineWindow`: `intervalsAll` and
+    `timelineMarks` over the window, for every segment of the drawn tree in
+    it (a resume after an outage is the same tree): an amber bar per
+    RUNNING span, capped by a 3 px mark in the
     outcome's colour (green SUCCESS, red FAILURE, blue SKIPPED; none when
     still running or halted), and a single 3 px mark for an outcome reached
     in the tick it started. Shapes on the same pixel are drawn once. Not

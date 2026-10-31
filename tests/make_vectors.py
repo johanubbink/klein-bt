@@ -553,7 +553,7 @@ def bb_change_vectors():
     its return and keeps Sub/goal's set value as the base (not a change)."""
     cases = (_bb_change_cases("bb") + _bb_change_cases("bb_evicted", evict_before=5.2)
              + bb_frame_vectors())
-    return {"module": [str(STATIC / "recording.js")], "cases": cases}
+    return {"modules": {"KleinRecording": str(STATIC / "recording.js")}, "cases": cases}
 
 
 # --------------------------------------------------------------------------- #
@@ -647,8 +647,9 @@ def vectors():
                  + _tree_run_cases("live", rec) + _tree_run_cases("late", rec)
                  + _count_cases("live", rec) + _count_cases("late", rec)
                  + _window_cases("live", rec) + _growing_cases())
-    return {"module": [str(STATIC / "recording.js"), str(STATIC / "cursor.js"),
-                       str(STATIC / "window.js")],
+    return {"modules": {"KleinRecording": str(STATIC / "recording.js"),
+                        "KleinCursor": str(STATIC / "cursor.js"),
+                        "KleinWindow": str(STATIC / "window.js")},
             "cases": cases}
 
 

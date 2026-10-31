@@ -158,7 +158,7 @@ def vectors():
                       "call": "KleinRecording.timelineSections",
                       "args": [TREE, list(folded), needle],
                       "expect": sections(TREE, set(folded), needle)})
-    return {"module": [str(STATIC / "recording.js")], "cases": cases}, rec
+    return {"modules": {"KleinRecording": str(STATIC / "recording.js")}, "cases": cases}, rec
 
 
 class TimelineModelTest(unittest.TestCase):

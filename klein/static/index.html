@@ -214,13 +214,8 @@
          round the visible canvas. -->
     <div id="past-edge" aria-hidden="true"></div>
 
-    <script src="/renderers.js"></script>
-    <script src="/recording.js"></script>
-    <script src="/cursor.js"></script>
-    <script src="/window.js"></script>
-    <script src="/drawer.js"></script>
-    <script src="/timeline.js"></script>
-    <script src="/overview.js"></script>
-    <script src="/app.js"></script>
+    <!-- The dashboard is ES modules, with no build step: app.js imports the
+         rest. They use the global d3 the classic script above defines. -->
+    <script type="module" src="/app.js"></script>
 </body>
 </html>

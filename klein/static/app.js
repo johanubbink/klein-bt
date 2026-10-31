@@ -1,3 +1,16 @@
+// app.js — the dashboard's entry point: index.html loads it as a module and
+// it imports the rest. It holds the tree canvas, the sidebar and its
+// blackboards, the banners, the WebSocket, and the one render path.
+// See docs/architecture.md.
+
+import * as KleinRenderers from "./renderers.js";
+import * as KleinRecording from "./recording.js";
+import * as KleinCursor from "./cursor.js";
+import * as KleinWindow from "./window.js";
+import * as KleinDrawer from "./drawer.js";
+import * as KleinTimeline from "./timeline.js";
+import * as KleinOverview from "./overview.js";
+
 let rootNodeSnapshot = null;
 
 // The dashboard depends on two links: browser <-> klein (this WebSocket)
@@ -1354,7 +1367,8 @@ function seek(next) {
     clock = next;
     requestRender({ boards: true });
 }
-KleinDrawer.onSeek(seek);
+// Arrows, so a render or requestRender a test swaps in reaches the drawer too.
+KleinDrawer.connect({ seek, render: () => render(), requestRender: () => requestRender(), showBanner });
 KleinOverview.onSeek(seek);
 KleinTimeline.connect({
     seek,
@@ -1496,11 +1510,11 @@ function render() {
 
 // Read-only facts about the mirror and the display, for the test harness
 // (BrowserProbe): `displayed` is the state last painted.
-window.kleinDebug = () => {
+function kleinDebug() {
     const rec = shownRecording();
     return { ...(rec ? KleinRecording.describe(rec) : {}),
              displaySource, displayed: lastStatusMap };
-};
+}
 
 // ------------------------------------------------------------------ //
 // Gateway WebSocket connection
@@ -1600,4 +1614,31 @@ function fillLegendGlyphs() {
 window.addEventListener("DOMContentLoaded", () => {
     fillLegendGlyphs();
     connectGatewayPipeline();
+});
+
+// ------------------------------------------------------------------ //
+// Page globals, for the tests and scripts
+// ------------------------------------------------------------------ //
+// The modules share nothing through window. The UI tests, BrowserProbe
+// (tests/harness/probes.py) and scripts/ run code in the page that reads and
+// drives the dashboard by name, so those names go on window here, and only
+// here: the modules as app.js imports them, and app.js's own state and
+// functions. Variables are accessors, so a read is current. A test can set
+// recordingSupport and swap render, requestRender, showTree or paintStatus:
+// app.js's own calls use the new one from then on.
+Object.assign(window, {
+    KleinRenderers, KleinRecording, KleinCursor, KleinWindow, KleinDrawer, KleinTimeline,
+    KleinOverview, kleinDebug, recordingStore, shownRecording, seek, frameTrack, svg,
+    zoomBehavior, bbGroupEls, bbGroupOpen, renderBlackboards, resetBlackboards, banners,
+    showBanner, hideBanner, sidebarWidth, visibleViewport, runningFrontier,
+});
+Object.defineProperties(window, {
+    clock: { get: () => clock },
+    rootNodeSnapshot: { get: () => rootNodeSnapshot },
+    renderQueued: { get: () => renderQueued },
+    recordingSupport: { get: () => recordingSupport, set: (v) => { recordingSupport = v; } },
+    render: { get: () => render, set: (f) => { render = f; } },
+    requestRender: { get: () => requestRender, set: (f) => { requestRender = f; } },
+    showTree: { get: () => showTree, set: (f) => { showTree = f; } },
+    paintStatus: { get: () => paintStatus, set: (f) => { paintStatus = f; } },
 });

@@ -1,34 +1,34 @@
-// Run a DOM-free JavaScript module against a JSON vector file, under gjs.
+// Run DOM-free JavaScript modules against a JSON vector file, under gjs.
 //
 //     gjs -m tests/js/run.js VECTORS.json
 //
 // Exit status: 0 when every case passes, 1 when any fails, 2 when the vectors
-// or the module cannot be loaded. The Python side (tests/harness/js.py) runs
+// or a module cannot be loaded. The Python side (tests/harness/js.py) runs
 // this and skips when gjs is not installed.
 //
 // A vector file:
 //
-//   { "module": "selftest_model.js",   // path relative to the vector file
+//   { "modules": { "Model": "selftest_model.js" },   // paths relative to the vector file
 //     "cases": [
-//       { "name": "adds",  "call": "add", "args": [1, 2], "expect": 3 },
-//       { "name": "store", "call": "makeCounter", "args": [], "save": "c" },
+//       { "name": "adds",  "call": "Model.add", "args": [1, 2], "expect": 3 },
+//       { "name": "store", "call": "Model.makeCounter", "args": [], "save": "c" },
 //       { "name": "use",   "call": "$c.inc", "args": [], "expect": 1 },
-//       { "name": "ref",   "call": "size", "args": [{ "$ref": "c" }], "expect": 1 } ] }
+//       { "name": "ref",   "call": "Model.size", "args": [{ "$ref": "c" }], "expect": 1 } ] }
 //
-// "module" may also be a list, loaded in order like <script> tags. In "args",
-// {"$base64": "..."} stands for those bytes as an ArrayBuffer.
+// "modules" names each module's exports, as app.js imports them (`import * as
+// KleinRecording from "./recording.js"`). In "args", {"$base64": "..."} stands
+// for those bytes as an ArrayBuffer.
 //
-// "call" names a function of the module (dotted paths allowed) or, with a
-// leading "$", a method on a value an earlier case saved; "get" in its place
-// names a value the same way and reads it. "expect" is
+// "call" names a function (a dotted path: a module's name, then its export)
+// or, with a leading "$", a method on a value an earlier case saved; "get" in
+// its place names a value the same way and reads it. "expect" is
 // compared as canonical JSON: object keys sorted, a Map as its entries sorted
 // by key, a Set as its sorted values. Every case needs an "expect", except a
 // setup case that only "save"s its result.
 //
-// Modules are the dashboard's plain <script> files, which have no build step
-// and so no `export`: the source runs inside a function given `module`,
-// `exports` and a stand-in `window`, and its API is whatever it put on
-// module.exports or window, plus any top-level name a case calls.
+// The modules are the dashboard's own ES modules, imported as the browser
+// does (no build step), each once: one that imports another shares it, as in
+// the page.
 
 import System from "system";
 import GLib from "gi://GLib";
@@ -55,20 +55,6 @@ function canonical(value) {
         }
         return v;
     });
-}
-
-function loadScript(path, cases) {
-    const module = { exports: {} };
-    const window = {};
-    // Top-level names the cases call, so plain `function f() {}` files work too.
-    const names = new Set(cases.map((c) => c.call || c.get).filter((n) => !n.startsWith("$"))
-                               .map((n) => n.split(".")[0]));
-    const grab = [...names].map((n) => `${n}: typeof ${n} === "undefined" ? undefined : ${n}`);
-    const body = readText(path) + `\n;return {${grab.join(", ")}};`;
-    const locals = new Function("module", "exports", "window", body)(module, module.exports, window);
-    const api = Object.assign({}, window, module.exports);
-    for (const [k, v] of Object.entries(locals)) if (v !== undefined && !(k in api)) api[k] = v;
-    return api;
 }
 
 // [the value at a dotted path, the object holding it].
@@ -104,17 +90,15 @@ function substitute(value, saved) {
     return value;
 }
 
-function main(argv) {
+async function main(argv) {
     const vectorsPath = GLib.canonicalize_filename(argv[0], GLib.get_current_dir());
-    let vectors, api;
+    let vectors;
+    const api = {};
     try {
         vectors = JSON.parse(readText(vectorsPath));
-        // A list of modules is loaded in order, like <script> tags.
-        api = {};
-        for (const module of [].concat(vectors.module)) {
-            const loaded = loadScript(GLib.canonicalize_filename(
-                module, GLib.path_get_dirname(vectorsPath)), vectors.cases);
-            for (const [k, v] of Object.entries(loaded)) if (!(k in api)) api[k] = v;
+        for (const [name, module] of Object.entries(vectors.modules)) {
+            const path = GLib.canonicalize_filename(module, GLib.path_get_dirname(vectorsPath));
+            api[name] = await import(GLib.filename_to_uri(path, null));
         }
     } catch (e) {
         print(`load error: ${e}`);
@@ -155,4 +139,4 @@ function main(argv) {
     return failed ? 1 : 0;
 }
 
-System.exit(main(System.programArgs));
+System.exit(await main(System.programArgs));

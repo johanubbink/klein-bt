@@ -7,12 +7,10 @@
 // turn the wheel, to pan; Ctrl+wheel zooms. The window is KleinWindow's
 // (window.js). See docs/architecture.md, "The drawer".
 
-(function () {
-"use strict";
-
-const R = globalThis.KleinRecording;
-const C = globalThis.KleinCursor;
-const W = globalThis.KleinWindow;
+import * as R from "./recording.js";
+import * as C from "./cursor.js";
+import * as W from "./window.js";
+import * as KleinDrawer from "./drawer.js";
 
 const ZOOM = 8;                     // the strip is this many of the Timeline's windows
 const COLUMN = 2;                   // px: an activity column, about
@@ -317,5 +315,9 @@ function debug() {
     };
 }
 
-globalThis.KleinOverview = { update, debug, onSeek: (fn) => { seek = fn; } };
-})();
+// app.js gives its seek (above).
+function onSeek(fn) {
+    seek = fn;
+}
+
+export { update, debug, onSeek };

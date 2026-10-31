@@ -7,17 +7,14 @@
 // are computed from the browser's recording mirror (KleinRecording.intervalsAll
 // and timelineMarks), so dragging the playhead, stepping and playing only move
 // the cursor (app.js seek hook) and never ask the gateway. The window shown
-// is KleinWindow's (window.js). Loaded after drawer.js and before app.js,
-// which calls KleinTimeline.update on every render and connects its hooks
-// (KleinTimeline.connect).
+// is KleinWindow's (window.js). app.js calls KleinTimeline.update on every
+// render and connects its hooks (KleinTimeline.connect).
 // See docs/architecture.md, "The drawer".
 
-(function () {
-"use strict";
-
-const R = globalThis.KleinRecording;
-const C = globalThis.KleinCursor;
-const W = globalThis.KleinWindow;
+import * as R from "./recording.js";
+import * as C from "./cursor.js";
+import * as W from "./window.js";
+import * as KleinDrawer from "./drawer.js";
 
 const TICK_SPACING = 100;           // px between axis labels, about
 const MARK = 3;                     // px: an outcome cap or a single mark
@@ -461,8 +458,9 @@ function debug() {
     return { ...W.get(), left: rulerTrack.getBoundingClientRect().left, width: trackWidth(), pos, barsT1 };
 }
 
-globalThis.KleinTimeline = {
-    update, revealRows, debug,
-    connect: (h) => { hooks = { ...hooks, ...h }; },
-};
-})();
+// app.js gives its hooks (above).
+function connect(h) {
+    hooks = { ...hooks, ...h };
+}
+
+export { update, revealRows, debug, connect };

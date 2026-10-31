@@ -6,13 +6,15 @@
 //
 // The drawer's height lives in the --drawer-height custom property on <html>,
 // so the hint line (#watermark) rises with it in CSS alone; app.js reads the
-// drawer's top edge for the camera (visibleViewport). Loaded before app.js,
-// which calls KleinDrawer.showRecording and KleinDrawer.update on every
-// render and moves its cursor when the drawer asks (KleinDrawer.onSeek).
+// drawer's top edge for the camera (visibleViewport). app.js calls
+// KleinDrawer.showRecording and KleinDrawer.update on every render, and the
+// drawer calls back through the hooks app.js connects (KleinDrawer.connect):
+// to move its cursor, to render, and to show a banner.
 // See docs/architecture.md, "The drawer".
 
-(function () {
-"use strict";
+import * as R from "./recording.js";
+import * as C from "./cursor.js";
+import * as W from "./window.js";
 
 const DEFAULT_HEIGHT = 300;             // px
 const MAX_FRACTION = 0.8;               // of the window's height
@@ -25,6 +27,10 @@ const chipLabel = chip.querySelector(".drawer-chip-label");
 const chipStats = chip.querySelector(".drawer-chip-stats");
 const note = document.getElementById("drawer-note");
 const tabs = [...drawer.querySelectorAll('[role="tab"]')];
+
+// app.js: move the shared cursor, render at once, ask for a render, and show
+// a banner.
+let hooks = { seek() {}, render() {}, requestRender() {}, showBanner() {} };
 
 // Follow a press on el (its pointerdown event) to its release: move(e) on
 // each pointermove, then end(e) on pointerup or pointercancel. Pointer
@@ -148,7 +154,7 @@ const drawerPane = pane({
     clamp: (h) => Math.round(Math.max(minHeight() + TAB_ROW_HEIGHT,
                                       Math.min(h, window.innerHeight * MAX_FRACTION))),
     labels: ["Collapse drawer", "Expand drawer"],
-    onResize: () => requestRender(),
+    onResize: () => hooks.requestRender(),
 });
 
 // The tabs share the scrolling body, so each keeps its own scroll position.
@@ -166,7 +172,7 @@ for (const tab of tabs) {
         drawerBody.scrollTop = scrollTops[tab.id] || 0;
         paintKey = null;            // the Log's rows were not kept current while hidden
         revealed = null;            // and the cursor may have moved meanwhile
-        render();
+        hooks.render();
     });
 }
 
@@ -317,7 +323,7 @@ async function saveZip() {
         if (response.ok) blob = await response.blob();
     } catch (e) { /* below */ }
     if (!blob) {
-        showBanner("saved", "Save failed", { kind: "error", timeout: 4000 });
+        hooks.showBanner("saved", "Save failed", { kind: "error", timeout: 4000 });
         return;
     }
     const name = /filename="([^"]+)"/.exec(
@@ -328,7 +334,7 @@ async function saveZip() {
     a.download = name;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 60_000);
-    showBanner("saved", `Saved ${name}`, { timeout: 4000 });
+    hooks.showBanner("saved", `Saved ${name}`, { timeout: 4000 });
 }
 saveButton.addEventListener("click", saveZip);
 
@@ -345,8 +351,6 @@ saveButton.addEventListener("click", saveZip);
 // exact (scale 1).
 // Clicking a row pauses the shared cursor just after that transition; the
 // tree and blackboard then show that moment (app.js render()).
-const R = globalThis.KleinRecording;
-const C = globalThis.KleinCursor;
 const ROW_HEIGHT = 20;              // px, as .log-row
 const OVERSCAN = 4;                 // rows kept beyond each edge of the view
 // Browsers cap an element's height (Chrome near 3.3e7 px, Firefox near
@@ -360,7 +364,6 @@ const logEmpty = document.getElementById("log-empty");
 const logDropped = document.getElementById("log-dropped");
 const filterInput = document.getElementById("drawer-filter");
 
-let seek = () => {};                // app.js: moves the shared cursor (onSeek)
 let rec = null;                     // the recording and position last shown
 let pos = null;
 let rows = { count: 0, parts: [] }; // KleinRecording.logRows
@@ -618,7 +621,7 @@ function update(recording, position) {
 // press before the next frame acts from there.
 function setClock(clock) {
     pos = C.cursorPos(clock, performance.now(), rec);
-    seek(clock);
+    hooks.seek(clock);
 }
 
 // Pause just after the record (segId, seq).
@@ -794,7 +797,7 @@ window.addEventListener("keydown", (event) => {
         break;
     case "\\":
         if (selectedTab() !== "timeline") return;
-        globalThis.KleinWindow.fit();
+        W.fit();
         break;
     default:
         return;
@@ -813,9 +816,12 @@ function debugRows() {
     return { count: rows.count, keys, filter: filterInput.value };
 }
 
-globalThis.KleinDrawer = {
+// app.js gives its hooks (above).
+function connect(h) {
+    hooks = { ...hooks, ...h };
+}
+
+export {
     showRecording, summary, update, formatTime, formatClock, debugRows, goLive,
-    keptSpan, droppedNote, pane, drag, selectedTab, shownTab,
-    onSeek: (fn) => { seek = fn; },
+    keptSpan, droppedNote, pane, drag, selectedTab, shownTab, connect,
 };
-})();

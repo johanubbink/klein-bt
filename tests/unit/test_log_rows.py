@@ -60,7 +60,7 @@ def vectors():
             cases.append({"name": f"{needle!r}: index of {seg}:{seq}",
                           "call": "KleinRecording.logRowIndex", "args": [ref, seg, seq],
                           "expect": index})
-    return {"module": [str(STATIC / "recording.js")], "cases": cases}, rec
+    return {"modules": {"KleinRecording": str(STATIC / "recording.js")}, "cases": cases}, rec
 
 
 class LogRowsTest(unittest.TestCase):

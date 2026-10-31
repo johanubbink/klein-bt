@@ -36,8 +36,11 @@ The code:
   [Browser model](#browser-model)); `window.js` is the Timeline's window,
   which the Timeline and the overview both show and move; `drawer.js`,
   `timeline.js` and `overview.js` are the drawer, its Timeline tab and its
-  overview. D3 is vendored so it works without internet. Dependabot can't
-  see a vendored file, so check
+  overview. They are native ES modules with no build step: `index.html`
+  loads D3 as a classic script (the modules use its global `d3`) and
+  `app.js` as a module, which imports the rest; each module imports what it
+  uses and exports its interface. D3 is vendored so it works without
+  internet. Dependabot can't see a vendored file, so check
   [D3's releases](https://github.com/d3/d3/releases) when cutting a klein
   release.
 
@@ -369,13 +372,14 @@ from the frames the gateway streams. Everything that shows a past moment
 locally from that mirror; **scrubbing never asks the backend anything.** The
 mirror holds everything the gateway keeps.
 
-The mirror is two classic scripts with no DOM and no d3, and the Timeline's
-window a third, so the tests run them under `gjs` against vectors
-`tests/make_vectors.py` builds from the Python model. That pins the two
-implementations together.
+The mirror is two ES modules with no DOM and no d3, and the Timeline's
+window a third, so the tests import them under `gjs` and run them against
+vectors `tests/make_vectors.py` builds from the Python model. That pins the
+two implementations together. Each is named here as app.js imports it
+(`import * as KleinRecording from "./recording.js"`).
 
 - [`klein/static/recording.js`](../klein/static/recording.js) →
-  `globalThis.KleinRecording`. `createStore()` returns a store whose
+  `KleinRecording`. `createStore()` returns a store whose
   `ingest(message)` takes a parsed text frame or a binary `ArrayBuffer`;
   `store.recording` is the one recording klein streams. The Python model's
   queries have mirrors here (`stateAtSeq`, `seqAtTime`, `stateAt`, `bbAt`,
@@ -383,7 +387,7 @@ implementations together.
   the Timeline (`intervalsAll`, `timelineMarks`, `timelineSections`) and
   the overview (`treeRuns`, `countIn`, `busiestColumn`) need.
 - [`klein/static/cursor.js`](../klein/static/cursor.js) →
-  `globalThis.KleinCursor`. A clock is data: `live()`, `pause(segId, seq,
+  `KleinCursor`. A clock is data: `live()`, `pause(segId, seq,
   t?)`, `play(fromSegId, fromSeq, nowMs, t?)` (1× only).
   `cursorPos(clock, nowMs, recording)` gives `{seg, seq, t, live, mode}`,
   `mode` being `"live"`, `"playing"` or `"paused"`: live is the last
@@ -397,7 +401,7 @@ implementations together.
   the overview and Home use it. `evicted` says whether eviction dropped the
   moment a clock shows.
 - [`klein/static/window.js`](../klein/static/window.js) →
-  `globalThis.KleinWindow`: the Timeline's window (its rules: see
+  `KleinWindow`: the Timeline's window (its rules: see
   [The drawer](#the-drawer)). `sync(rec, pos)` applies them once per
   render, and `get()` is `{t0, t1, span, follow}` (null without a
   recording). The reader's moves (`set`, `zoomBy`, `step`, `fit`, `reveal`)
@@ -490,7 +494,7 @@ decides what is displayed:
   on the canvas, `KleinWindow.sync(rec, pos)` (the Timeline's window),
   `KleinTimeline.update(rec, pos, hierarchy)` and
   `KleinOverview.update(rec, pos)`, which both paint that window. They move the cursor through one `seek(clock)`
-  (`KleinDrawer.onSeek`, `KleinTimeline.connect`, `KleinOverview.onSeek`),
+  (`KleinDrawer.connect`, `KleinTimeline.connect`, `KleinOverview.onSeek`),
   which sets the clock and asks for a render, and the window through
   `KleinWindow`'s moves, which repaint both at once (`onMove`); the
   Timeline's chevrons fold the canvas through `toggleFold` / `foldOthers`, the
@@ -503,7 +507,9 @@ decides what is displayed:
 `window.kleinDebug()` is read-only, for the test harness: the mirror's
 `describe(rec)` facts (when there is a recording) plus `displaySource`
 (`"recording"` or `"frames"`) and `displayed`, the `{uid: {status, from}}`
-last painted.
+last painted. It is one of the page globals app.js sets for the tests and
+`scripts/`, in one block at its end; the modules themselves share nothing
+through `window` (see [testing.md](testing.md), "Probes").
 
 Because the mock answers `S` and then steps, the drain after a reply already
 holds the next tick, so live cards can be one poll ahead of the latest

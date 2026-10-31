@@ -12,9 +12,6 @@
 // No DOM and no d3: plain functions over plain data, so it runs under gjs.
 // See docs/architecture.md, "Browser model".
 
-(function () {
-"use strict";
-
 // Groot2 status bytes, as in klein/groot2_protocol.py.
 const IDLE = 0, RUNNING = 1, SUCCESS = 2, FAILURE = 3, SKIPPED = 4;
 const IDLE_TRANSITION = 10;
@@ -768,12 +765,17 @@ function describe(rec) {
     };
 }
 
-globalThis.KleinRecording = {
+function createStore() {
+    return new Store();
+}
+
+function createTrack() {
+    return new BlackboardTrack();
+}
+
+export {
     decodeState, stateAtSeq, seqAtTime, stateAt, timeAtSeq, recordsRange, intervals,
     bbAt, bbChange, BB_RECENT, describe, logRows, logRowAt, logRowIndex, intervalsAll, timelineMarks,
     timelineSections, historyDropped, gapsIn, treeName, eachNode, sameTree, treeRuns,
-    countIn, busiestColumn,
-    createStore: () => new Store(),
-    createTrack: () => new BlackboardTrack(),
+    countIn, busiestColumn, createStore, createTrack,
 };
-})();

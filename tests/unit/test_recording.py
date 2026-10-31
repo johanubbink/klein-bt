@@ -328,6 +328,15 @@ class EvictionTest(unittest.TestCase):
         rec.evict(5_000)
         self.assertEqual((rec.transitions_capped, rec.blackboard_capped), (False, False))
 
+        rec = Recording(keep_us=1_000, bb_max_bytes=100_000)
+        rec.begin_segment(None, 0, bytes(4))
+        rec.add_blackboard(0, {"Main": {"path": "x" * 60_000}})
+        rec.end_segment(10)
+        seg = rec.begin_segment(None, 20, bytes(4))
+        rec.add_blackboard(1_011, {"Main": {"path": "y" * 60_000}})
+        rec.evict(1_011)        # the first segment left the window: its blackboard counts no more
+        self.assertEqual((rec.segments, rec.blackboard_capped), ([seg], False))
+
 
 class SegmentsTest(unittest.TestCase):
     def test_evicted_segments_and_gaps_are_dropped(self):

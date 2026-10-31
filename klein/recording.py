@@ -473,42 +473,63 @@ class Recording:
         return runs
 
     def evict(self, now):
-        """Apply the time window, the total cap and the blackboard sub-cap."""
-        before = self.extent()
-        cutoff = now - self.keep_us
+        """Apply the keep window, the blackboard sub-cap and the total cap, in
+        that order, then drop what is left empty and say which limit binds."""
+        before, cutoff = self.extent(), now - self.keep_us
+        self._evict_window(cutoff)
+        bb_cut = self._cap_blackboard()
+        transitions_cut = self._cap_total()
+        self._drop_dead(cutoff)
+        self._update_capped(cutoff, bb_cut, transitions_cut)
+        if self.extent() != before:
+            self._notify("evict")
+
+    def _evict_window(self, cutoff):
+        """The keep window: sealed chunks wholly before ``cutoff``, and the
+        blackboard before it (all of an ended segment's that ended before it)."""
         while (segment := self._oldest_sealed()) and segment.chunks[0].ts[-1] < cutoff:
             segment._drop_first_chunk()
         for segment in self.segments:
-            if segment.t_end is not None and segment.t_end < cutoff:
+            if _ended_before(segment, cutoff):
                 segment.blackboard.clear()
             else:
                 segment.blackboard.evict_before(cutoff)
-        bb_cut = False
-        while self.bytes_used()[1] > self.bb_max_bytes and self._evict_oldest_blackboard():
-            bb_cut = True
 
-        # Last, so the blackboard is already within its sub-cap and can't push
-        # out transitions that fit beside it.
-        transitions_cut = False
+    def _cap_blackboard(self):
+        """The blackboard sub-cap: the oldest changes go while over it. True
+        if it cut any."""
+        cut = False
+        while self.bytes_used()[1] > self.bb_max_bytes and self._evict_oldest_blackboard():
+            cut = True
+        return cut
+
+    def _cap_total(self):
+        """The total cap: the oldest sealed chunks go while over it. True if it
+        cut any. Applied after the sub-cap, so the blackboard can't push out
+        transitions that fit beside it."""
+        cut = False
         total = sum(self.bytes_used())
         while total > self.max_bytes and (segment := self._oldest_sealed()):
             total -= segment.chunks[0].nbytes
             segment._drop_first_chunk()
-            transitions_cut = True
+            cut = True
+        return cut
 
-        # An ended segment wholly before the window has nothing left to show.
-        self.segments = [s for s in self.segments if s.t_end is None or s.t_end >= cutoff]
+    def _drop_dead(self, cutoff):
+        """An ended segment wholly before the window has nothing left to show,
+        nor a gap that ends before the earliest retained time."""
+        self.segments = [s for s in self.segments if not _ended_before(s, cutoff)]
         self.gaps = [gap for gap in self.gaps if self.t_min is not None and gap[1] >= self.t_min]
 
-        # A cap's cut stays the binding limit until the window's cutoff passes it.
+    def _update_capped(self, cutoff, bb_cut, transitions_cut):
+        """Set the capped flags: a cap's cut stays the binding limit until the
+        window's cutoff passes it."""
         bb_start = min((s.blackboard.t_start for s in self.segments
                         if s.blackboard.t_start is not None), default=None)
-        self.transitions_capped = transitions_cut or (
-            self.transitions_capped and self.t_min is not None and self.t_min > cutoff)
-        self.blackboard_capped = bb_cut or (
-            self.blackboard_capped and bb_start is not None and bb_start > cutoff)
-        if self.extent() != before:
-            self._notify("evict")
+        self.transitions_capped = _still_capped(
+            transitions_cut, self.transitions_capped, self.t_min, cutoff)
+        self.blackboard_capped = _still_capped(
+            bb_cut, self.blackboard_capped, bb_start, cutoff)
 
     def _oldest_sealed(self):
         """The segment holding the oldest chunk that can no longer grow, if any."""
@@ -529,6 +550,17 @@ class Recording:
                 return True
             return False
         return False
+
+
+def _ended_before(segment, t):
+    """Whether ``segment`` ended before ``t`` (an open one hasn't)."""
+    return segment.t_end is not None and segment.t_end < t
+
+
+def _still_capped(cut, capped, start, cutoff):
+    """Whether a size cap binds a history that starts at ``start``: it cut
+    now, or it had and the window's ``cutoff`` hasn't passed the cut yet."""
+    return cut or (capped and start is not None and start > cutoff)
 
 
 def snapshot_run(run):

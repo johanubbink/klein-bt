@@ -322,16 +322,19 @@ seen, as a pure data model (no asyncio, no ZeroMQ). The gateway feeds it (see
   corrects it. `diff_to_transitions(a, b)` gives the transitions that turn
   one state into another; saving a `.btlog` uses it to re-create a run's
   starting state.
-- **Eviction** drops whole sealed chunks, oldest first across segments: first
-  those older than the keep window (`--record-buffer`). Next it trims the
-  blackboard (see below), and only then drops more chunks while the total
-  still exceeds the size cap. After eviction a segment's `t_start` is the
-  last evicted record's time, and `state_at` returns None before it. An
-  ended segment wholly before the window is dropped. Because only whole
-  sealed chunks go, a slow tree can keep up to 1023 records older than the
-  window. `extent()` is what eviction can change (the earliest time, and per
-  segment its first seq, `t_start` and blackboard start); the listener hears
-  `evict` only when it changed.
+- **Eviction** (`Recording.evict`) applies its policies in a fixed order. The
+  keep window (`--record-buffer`) goes first: whole sealed chunks older than
+  it go, oldest first across segments, and so does the blackboard before it.
+  Next the blackboard sub-cap trims the blackboard (see below), and only then
+  the total size cap drops more chunks while the total still exceeds it.
+  After eviction a segment's `t_start` is the last evicted record's time, and
+  `state_at` returns None before it. An ended segment wholly before the
+  window is dropped (its blackboard, cleared by the window, counts against
+  neither cap), and so is a gap that ends before the earliest retained time.
+  Because only whole sealed chunks go, a slow tree can keep up to 1023
+  records older than the window. `extent()` is what eviction can change (the
+  earliest time, and per segment its first seq, `t_start` and blackboard
+  start); the listener hears `evict` only when it changed.
 - **Blackboard track**, one per segment: per `(board, key)`, the times and
   JSON strings of each change (as the robot sent them, so an object's fields
   keep its order), or a removal marker. Unchanged values (compared with

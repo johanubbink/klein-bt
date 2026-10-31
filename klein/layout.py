@@ -1,14 +1,17 @@
 """klein.layout — a FULLTREE reply's XML, unrolled into the dashboard's tree.
 
-Pure parsing with no gateway state: the node categories and port directions
-from ``<TreeNodesModel>``, every ``<SubTree>`` reference stitched in place of
-its ``<BehaviorTree>`` definition (``unroll_tree``), each node's uid, ports and
+Pure parsing with no gateway state: ``parse_layout`` turns the XML into a
+``TreeLayout`` holding the node categories and port directions from
+``<TreeNodesModel>``, every ``<SubTree>`` reference stitched in place of its
+``<BehaviorTree>`` definition (``unroll_tree``), each node's uid, ports and
 blackboard bindings, and the blackboard names to ask the robot for. The
-gateway calls it once per handshake (and once per ``--open``) and keeps the
-result.
+gateway calls it once per handshake that brings a new XML (and once per
+``--open``) and keeps the result.
 """
 
+import dataclasses
 import re
+import xml.etree.ElementTree as ET
 
 from .groot2_protocol import (
     BUILTIN_CATEGORIES,
@@ -337,58 +340,17 @@ class _Unroller:
     def unroll_node(self, element, scope, beneath, expanding=frozenset()):
         """Recursively convert a layout element into a nested dict.
 
-        ``<SubTree ID="X">`` references are stitched in place: the SubTree node
-        keeps its own UID and gains the matching ``<BehaviorTree>`` definition
-        as its child, so *every* UID — the reference and all inner nodes — maps
-        cleanly onto incoming status packets. ``expanding`` guards against
-        cyclic subtree references. ``scope`` is the blackboard the element's
-        ports are read against. ``beneath`` collects ``{(board, key): dir}``
-        merged over this node's bindings and all its descendants'.
+        ``<SubTree>`` references are stitched in place (``_unroll_subtree``).
+        ``expanding`` guards against cyclic subtree references. ``scope`` is
+        the blackboard the element's ports are read against. ``beneath``
+        collects ``{(board, key): dir}`` merged over this node's bindings and
+        all its descendants'.
         """
+        if element.tag == "SubTree":
+            return self._unroll_subtree(element, scope, beneath, expanding)
         node_type = element.tag
         ports = extract_ports(element)
         bindings = _Bindings()
-
-        if node_type == "SubTree":
-            subtree_id = element.get("ID")
-            board = element.get("_fullpath") or subtree_id
-            child_scope = self._subtree_scope(board, ports, scope)
-            # The SubTree node itself sits on the parent's board: its hooks run
-            # there, and each remap names a parent key.
-            hooks = {p: v for p, v in ports.items() if p in SCRIPT_HOOKS}
-            self._bindings("SubTree", hooks, scope, bindings)
-            node = {
-                "id": self._next_id(),
-                "uid": extract_uid(element),
-                "type": "SubTree",
-                "category": CATEGORY_SUBTREE,
-                "name": element.get("name") or subtree_id or "SubTree",
-                "subtree_id": subtree_id,
-                "is_subtree_root": True,
-                # This instance's blackboard, named exactly as
-                # extract_blackboard_names asks the robot for it — the dashboard
-                # pairs each board with the node that owns it.
-                "board": board,
-                "ports": ports,
-                "children": [],
-            }
-            inner = {}
-            subtree_root = self.all_behavior_trees.get(subtree_id)
-            if subtree_root is not None and subtree_id not in expanding:
-                node["children"] = [self.unroll_node(
-                    subtree_root, child_scope, inner, expanding | {subtree_id})]
-            # A remap's direction is what the subtree does with it: the merged
-            # directions of the inner bindings that land on the same entry.
-            for port, key in child_scope.remap.items():
-                target = scope.resolve(key)
-                bindings.add(port, inner.get(target, UNKNOWN_DIRECTION), target,
-                             _trimmed(ports[port], " "))
-            bindings.merge_boards_into(beneath)
-            for board_key, direction in inner.items():
-                _merge_into(beneath, board_key, direction)
-            node["bindings"] = bindings.as_list()
-            return node
-
         registration_id = element.get("ID") if node_type in NODE_CATEGORIES else node_type
         self._bindings(registration_id, ports, scope, bindings)
         bindings.merge_boards_into(beneath)
@@ -403,6 +365,53 @@ class _Unroller:
             "children": [self.unroll_node(child, scope, beneath, expanding)
                          for child in element],
         }
+
+    def _unroll_subtree(self, element, scope, beneath, expanding):
+        """A ``<SubTree ID="X">`` reference, stitched in place: the SubTree
+        node keeps its own UID and gains the matching ``<BehaviorTree>``
+        definition as its child, so *every* UID — the reference and all inner
+        nodes — maps cleanly onto incoming status packets. The inner nodes
+        read their ports against the subtree instance's own board."""
+        ports = extract_ports(element)
+        bindings = _Bindings()
+        subtree_id = element.get("ID")
+        board = element.get("_fullpath") or subtree_id
+        child_scope = self._subtree_scope(board, ports, scope)
+        # The SubTree node itself sits on the parent's board: its hooks run
+        # there, and each remap names a parent key.
+        hooks = {p: v for p, v in ports.items() if p in SCRIPT_HOOKS}
+        self._bindings("SubTree", hooks, scope, bindings)
+        node = {
+            "id": self._next_id(),
+            "uid": extract_uid(element),
+            "type": "SubTree",
+            "category": CATEGORY_SUBTREE,
+            "name": element.get("name") or subtree_id or "SubTree",
+            "subtree_id": subtree_id,
+            "is_subtree_root": True,
+            # This instance's blackboard, named exactly as
+            # extract_blackboard_names asks the robot for it — the dashboard
+            # pairs each board with the node that owns it.
+            "board": board,
+            "ports": ports,
+            "children": [],
+        }
+        inner = {}
+        subtree_root = self.all_behavior_trees.get(subtree_id)
+        if subtree_root is not None and subtree_id not in expanding:
+            node["children"] = [self.unroll_node(
+                subtree_root, child_scope, inner, expanding | {subtree_id})]
+        # A remap's direction is what the subtree does with it: the merged
+        # directions of the inner bindings that land on the same entry.
+        for port, key in child_scope.remap.items():
+            target = scope.resolve(key)
+            bindings.add(port, inner.get(target, UNKNOWN_DIRECTION), target,
+                         _trimmed(ports[port], " "))
+        bindings.merge_boards_into(beneath)
+        for board_key, direction in inner.items():
+            _merge_into(beneath, board_key, direction)
+        node["bindings"] = bindings.as_list()
+        return node
 
     @staticmethod
     def _subtree_scope(board, ports, parent):
@@ -468,3 +477,47 @@ def unroll_tree(root, node_categories, generation):
     tree["root_tree_id"] = main_tree_id
     tree["board"] = root_board
     return tree, unroller.node_seq
+
+
+# --------------------------------------------------------------------------- #
+# The parsed tree, as the gateway keeps it
+# --------------------------------------------------------------------------- #
+@dataclasses.dataclass(frozen=True, eq=False)
+class TreeLayout:
+    """One parsed FULLTREE XML: what the gateway keeps until a handshake
+    brings a different XML, and what each recording segment carries.
+    Segments recorded while the XML is unchanged share one, which is what
+    groups them into one tree run (compared by identity)."""
+    generation: int             # the handshake's number; prefixes every node id
+    xml: str                    # the FULLTREE XML, to spot an unchanged tree
+    tree: dict                  # the unrolled tree, as sent to dashboards
+    uids: list                  # every node uid, sorted
+    node_count: int             # nodes unrolled, uid or not
+    categories: dict            # registration name -> category, from <TreeNodesModel>
+    blackboard_names: list      # subtree instance paths to ask for, in tree order
+
+    @property
+    def size(self):
+        """The state's length: max uid + 1."""
+        return self.uids[-1] + 1 if self.uids else 1
+
+    @property
+    def blackboard_request(self):
+        """The BLACKBOARD request's argument frame, ``b"name1;name2"``."""
+        return ";".join(self.blackboard_names).encode("utf-8")
+
+
+def parse_layout(xml, generation):
+    """The ``TreeLayout`` of a FULLTREE reply's ``xml``; ``generation``
+    prefixes every node id, so two handshakes' trees never share one.
+
+    Raises ``ET.ParseError`` (not XML) or ``ValueError`` (no usable
+    ``<BehaviorTree>`` block).
+    """
+    root = ET.fromstring(xml)
+    # Built before unrolling, because unroll_tree stamps each node's category
+    # from it.
+    categories = parse_node_categories(root)
+    tree, node_count = unroll_tree(root, categories, generation)
+    return TreeLayout(generation, xml, tree, sorted(collect_uids(tree)), node_count,
+                      categories, extract_blackboard_names(root))

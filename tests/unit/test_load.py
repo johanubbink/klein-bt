@@ -92,7 +92,7 @@ class SidecarTest(ScratchDirTest):
 
     def test_the_sidecar_gives_every_layout_board_and_its_values_at_every_time(self):
         gw = self.open_t11()
-        self.assertEqual(gw._blackboard_names, T11_BOARDS)
+        self.assertEqual(gw.tree.blackboard_names, T11_BOARDS)
         segment = gw.recording.segments[0]
         track = segment.blackboard
         first = segment.t_begin

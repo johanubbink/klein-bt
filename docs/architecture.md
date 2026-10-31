@@ -19,9 +19,10 @@ The code:
   and the decoding of reply payloads (status, transitions, blackboards). The
   gateway decodes with it and the mock robot encodes with it. The protocol is
   described in [protocol.md](protocol.md).
-- [`klein/layout.py`](../klein/layout.py): a FULLTREE reply's XML unrolled into
-  the dashboard's tree: subtrees stitched in, node uids, ports and categories,
-  and the blackboard names to ask for.
+- [`klein/layout.py`](../klein/layout.py): `parse_layout(xml, generation)`, a
+  FULLTREE reply's XML unrolled into the dashboard's tree: a `TreeLayout`
+  with subtrees stitched in, node uids, ports and categories, and the
+  blackboard names to ask for.
 - [`klein/robot_link.py`](../klein/robot_link.py): `RobotLink`, the one
   ZeroMQ REQ socket to the robot ([Robot side](#robot-side-one-socket-two-pollers)).
 - [`klein/gateway.py`](../klein/gateway.py): the asyncio process. It holds the
@@ -67,8 +68,10 @@ The gateway takes the link as `link=`, so the tests run it against a fake
 robot with no socket.
 
 At startup the gateway sends a FULLTREE request, retrying with backoff until the
-robot answers. It parses the XML into one unrolled tree and caches the result as
-a JSON frame that every new dashboard gets.
+robot answers. It parses the XML (`parse_layout`) into one `TreeLayout`, the
+unrolled tree and what klein needs to know about it, and keeps it as
+`gateway.tree` until a handshake brings a different XML. Every dashboard gets
+its tree as a `layout` frame.
 
 Two pollers then share the socket:
 
@@ -109,8 +112,8 @@ Rules that keep this safe:
 - Only a successful FULLTREE reply updates the stored UUID. If a re-handshake
   fails, the next poll still mismatches and tries again.
 - Only the status poller triggers a re-handshake, so two can't overlap. The
-  blackboard poller notes the layout generation before each request and drops
-  any reply that lands after a swap.
+  blackboard poller notes the loaded `TreeLayout` before each request and drops
+  any reply that lands after a swap replaced it.
 - If the XML is unchanged (a plain restart), klein keeps the current layout and
   the canvas doesn't flash.
 
@@ -125,11 +128,10 @@ and why it loses nothing, is in [protocol.md](protocol.md#how-klein-records).
   `t_begin` and anchors `RobotClock`), the baseline `S` (a uid-indexed state
   of length max uid + 1), then `begin_segment`, which opens a new
   **segment**.
-- **The layout** a segment carries is a `recording.Layout` (generation, XML,
-  unrolled tree, uids), one per parsed XML. A handshake that keeps the layout
-  (a same-tree restart or an outage resume) reuses it, so `Recording.runs()`
-  keeps those segments in one tree run; a new XML gets a new `Layout` and
-  starts a new run.
+- **The layout** a segment carries is the gateway's `TreeLayout`, one per
+  parsed XML. A handshake that keeps the layout (a same-tree restart or an
+  outage resume) reuses it, so `Recording.runs()` keeps those segments in one
+  tree run; a new XML gets a new `TreeLayout` and starts a new run.
 - **Each status cycle** while armed: `S` is broadcast, then `t` is drained.
   The drained offsets plus `t_begin` are appended, eviction runs, and the head
   moves to the robot's time now. Each blackboard sample stored runs eviction
@@ -137,7 +139,7 @@ and why it loses nothing, is in [protocol.md](protocol.md#how-klein-records).
   over the caps.
 - **Overflow**: a drain of exactly 1000 adds an `overflow` gap from the
   previous record to the drain's first, appends the drain and re-arms with the
-  same `Layout`: a new segment, same run.
+  same `TreeLayout`: a new segment, same run.
 - **Outage**: a request timeout from either poller or the handshake (`T`)
   marks that the robot may have gone; a good `S` clears the mark, so a lone
   timed-out `B` changes nothing. A timed-out `S` ends the open segment at the
@@ -181,7 +183,7 @@ blackboard may use at most 64 MiB (`Recording`'s defaults).
 `klein-bt --open FILE.btlog` shows a FileLogger2 file (Groot2's, a robot's
 own, or one klein saved) with **no robot**: no ZeroMQ request is ever sent,
 and `--robot-*` and `--record-buffer` are ignored. `KleinGateway.open_file`
-reads the file (`read_btlog`), parses its XML with the same `_parse_layout` a
+reads the file (`read_btlog`), parses its XML with the same `parse_layout` a
 handshake uses, and `load_btlog` turns it and its `FILE.bb.jsonl` sidecar, if
 there is one, into an ordinary `Recording` (how the file maps onto it is in
 [protocol.md](protocol.md#opening-a-file)). A `Streamer` with `source:
@@ -198,10 +200,11 @@ stopped mid-write) is ignored, with a note.
 
 ## Subtree unrolling
 
-FULLTREE returns one `<BehaviorTree>` block per subtree definition. The gateway
-puts each block in place of the `<SubTree>` node that references it. The
-reference keeps its own UID and gets the block as its child, so every UID in a
-STATUS reply maps to a node on screen. Cyclic references are guarded against.
+FULLTREE returns one `<BehaviorTree>` block per subtree definition.
+`parse_layout` puts each block in place of the `<SubTree>` node that
+references it. The reference keeps its own UID and gets the block as its
+child, so every UID in a STATUS reply maps to a node on screen. Cyclic
+references are guarded against.
 
 Each node carries its ports: the XML attributes the author wrote, minus `name`,
 `ID`, `_uid` and `_fullpath`. Scripting hooks like `_skipIf` and `_onSuccess`
@@ -242,10 +245,11 @@ key as `Blackboard::getEntry` does (`src/blackboard.cpp`):
 - A `<SubTree>` binding's direction is what the nodes inside do with that
   entry, merged; `"inout"` if none of them touches it.
 
-Node `id`s include a per-handshake generation counter, so two different trees
-never share ids. The dashboard's D3 join is keyed on `id`, so without this a
-new tree's nodes could reuse the old tree's cards and labels. A reconnect
-replays the cached layout with the same ids, so nothing is redrawn.
+Node `id`s include the generation `parse_layout` is given, which the gateway
+bumps per tree it parses, so two different trees never share ids. The
+dashboard's D3 join is keyed on `id`, so without this a new tree's nodes could
+reuse the old tree's cards and labels. A reconnect gets the kept layout with
+the same ids, so nothing is redrawn.
 
 ## Node categories
 
@@ -279,7 +283,7 @@ seen, as a pure data model (no asyncio, no ZeroMQ). The gateway feeds it (see
   approximate. `decode_state` gives the `{uid: {status, from}}` shape the
   dashboard paints. A plain 0 only exists before a node's first run, so
   `equivalent` treats it as equal to any `10 + X`.
-- **Segment**: one continuous arm (`r start`), with its `Layout` (segments of
+- **Segment**: one continuous arm (`r start`), with its `TreeLayout` (segments of
   the same XML share one), a baseline state and `t_begin`/`t_end`. Times are
   absolute robot µs. Records are `(ts, uid, status)`, stored in **chunks** of
   up to 1024 in `array` columns (~11 B per record). Each chunk keeps a
@@ -290,7 +294,7 @@ seen, as a pure data model (no asyncio, no ZeroMQ). The gateway feeds it (see
   records with `ts <= t`, so records sharing a µs are all included and the
   cursor can still step between them by seq.
 - **Recording**: the segments in time order, gaps (`outage`, `overflow`) and
-  the head time. `runs()` groups consecutive segments sharing a `Layout` into
+  the head time. `runs()` groups consecutive segments sharing a `TreeLayout` into
   tree runs: a same-XML restart stays in its run, a swap starts a new one.
   One `.btlog` is saved per run (`klein/btlog.py`, `export_run`; see
   [protocol.md](protocol.md#saving-a-recording)). `snapshot_run(run)` copies
@@ -362,7 +366,7 @@ a worker thread (`asyncio.to_thread`), so polling and streaming go on. The
 single-file routes export only their own file.
 
 Dashboards only receive. On connect, a dashboard gets the recording's
-backfill (while recording), the cached layout, the last blackboard frame and
+backfill (while recording), the layout, the last blackboard frame and
 the robot's reachability, then the live stream.
 
 | type | when | content |
@@ -374,8 +378,9 @@ the robot's reachability, then the live stream.
 | `notice` | on a tree swap | `{text}` |
 | `rec`, `segment`, `segment_end`, `gap`, `bb`, `head`, `evict`, `backfill_done`, binary records | backfill on connect, then as the recording changes | the recording; see [protocol.md](protocol.md#streaming-the-recording-klein--dashboard) |
 
-Every frame type except `notice` is cached for new clients (the recording's
-frames by being rebuilt from the recording as a backfill). A notice is about
+Every frame type except `notice` is cached for new clients (the layout by
+being rebuilt from the kept `TreeLayout`, the recording's frames from the
+recording as a backfill). A notice is about
 something that just happened, so a late client doesn't get it.
 
 ## Browser model

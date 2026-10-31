@@ -65,8 +65,8 @@ from .groot2_protocol import (
     parse_status,
 )
 from .btlog import BtlogError, export_blackboard, export_run, load_btlog, read_btlog
-from .layout import collect_uids, extract_blackboard_names, parse_node_categories, unroll_tree
-from .recording import Layout, RobotClock, decode_state, snapshot_run
+from .layout import parse_layout
+from .recording import RobotClock, decode_state, snapshot_run
 from .robot_link import REQUEST_TIMEOUT, RobotLink, RobotRefused, RobotTimeout
 from .streaming import Streamer
 
@@ -129,7 +129,6 @@ class KleinGateway:
         self.streamer = (None if recording is None else
                          Streamer(recording, websockets.broadcast, name=self.robot_endpoint))
         self._clock = RobotClock()          # klein's monotonic clock -> robot µs
-        self._recorded_tree = None          # the segments' layout object; new per XML
         self._armed = False                 # an open segment is taking `t` drains
         self._cannot_record = False         # this publisher answered `r` with an error
         self._file = None                   # the opened .btlog's name (--open): no robot
@@ -138,20 +137,12 @@ class KleinGateway:
         # segment ends at the head, the last time klein heard from it.
         self._timed_out = False
 
-        self._node_categories = {}          # registration name -> category, from <TreeNodesModel>
-        self.tree_structure = None          # unrolled nested dict sent to clients
-        self._layout_json = None            # cached layout frame, rebuilt each handshake
+        # The loaded tree (klein/layout.py), replaced only by a handshake that
+        # brings a different XML. The segments recorded under it share it.
+        self.tree = None
+        self._tree_uuid = None              # publisher UUID the loaded tree came from
+        self._blackboard_json = None        # the last blackboard frame, for late-joining clients
         self.clients = set()
-
-        # Blackboards: one per subtree instance, named by the paths in the layout.
-        self._blackboard_names = []          # subtree instance paths, in tree order
-        self._blackboard_request = None      # pre-encoded b"name1;name2" request payload
-        self._blackboard_json = None         # cached last frame, for late-joining clients
-
-        self._node_seq = 0                  # node count of the loaded tree
-        self._layout_generation = 0         # bumped per handshake; prefixes node ids
-        self._tree_uuid = None              # publisher UUID the loaded layout came from
-        self._layout_xml = None             # raw FULLTREE XML, to spot an unchanged tree
 
         # Robot reachability, mirrored to dashboards so a blank canvas is never
         # ambiguous. Starts "not connected" until the first successful handshake.
@@ -164,32 +155,11 @@ class KleinGateway:
         self._static = {}
 
     # ------------------------------------------------------------------ #
-    # Layout: FULLTREE handshake + recursive subtree unrolling
+    # Layout: the FULLTREE handshake (the unrolling is klein/layout.py)
     # ------------------------------------------------------------------ #
-    def _parse_layout(self, xml_str):
-        """Parse FULLTREE XML and build the unrolled tree structure."""
-        root = ET.fromstring(xml_str)
-        self._layout_xml = xml_str      # what the current layout was built from
-
-        # Built before unrolling, because unroll_tree stamps each node's
-        # category from it. Rebuilt per handshake, so re-handshaking against a
-        # different tree never carries the previous tree's node types over.
-        self._node_categories = parse_node_categories(root)
-
-        self.tree_structure, self._node_seq = unroll_tree(
-            root, self._node_categories, self._layout_generation + 1)
-        self._layout_generation += 1
-        # Serialize once: the layout is immutable until the next handshake, so
-        # every connecting (or reconnecting) client is sent this same frame.
-        self._layout_json = json.dumps({"type": "layout", "data": self.tree_structure})
-        # One object per parsed XML: segments recorded while the tree is
-        # unchanged share it, which is what groups them into one run.
-        self._recorded_tree = Layout(self._layout_generation, xml_str, self.tree_structure,
-                                     sorted(collect_uids(self.tree_structure)))
-
-        self._blackboard_names = extract_blackboard_names(root)
-        self._blackboard_request = ";".join(self._blackboard_names).encode("utf-8")
-        self._blackboard_json = None    # values from the previous tree are stale
+    def _layout_frame(self):
+        """The ``layout`` frame: the loaded tree, unrolled."""
+        return json.dumps({"type": "layout", "data": self.tree.tree})
 
     def _broadcast(self, frame):
         """Send one pre-serialized frame to every dashboard, if any is watching."""
@@ -275,11 +245,11 @@ class KleinGateway:
         """
         path = Path(path)
         log = read_btlog(path.read_bytes())
-        self._parse_layout(log.xml)
+        self.tree = parse_layout(log.xml, 1)
         sidecar = path.with_suffix(".bb.jsonl")
         try:
             text = sidecar.read_text(encoding="utf-8") if sidecar.is_file() else None
-            self.recording = load_btlog(log, self._recorded_tree, self._blackboard_names, text)
+            self.recording = load_btlog(log, self.tree, text)
         except IndexError:                  # a record's uid past the state's end
             raise BtlogError("a record names a node uid the file's tree doesn't have")
         except (ValueError, KeyError, TypeError) as exc:     # the sidecar, not UTF-8 or not ours
@@ -312,32 +282,34 @@ class KleinGateway:
                 # A restarted robot publishes a fresh UUID even when it is running
                 # the very same tree, and re-parsing then would retire every node
                 # id and rebuild the identical canvas — a flash reporting nothing.
-                changed = xml_str != self._layout_xml
+                changed = self.tree is None or xml_str != self.tree.xml
                 if changed:
-                    self._parse_layout(xml_str)
+                    generation = self.tree.generation + 1 if self.tree else 1
+                    self.tree = parse_layout(xml_str, generation)
+                    self._blackboard_json = None    # the previous tree's values are stale
                 # Read from this same reply, so the loaded tree and the UUID the
                 # status poller compares against are always one publisher's. After
-                # _parse_layout, so a parse failure leaves the previous UUID in
+                # parse_layout, so a parse failure leaves the previous UUID in
                 # place and the mismatch keeps driving the retry.
                 self._tree_uuid = reply.tree_uuid
                 self._mark_connected()
                 await self._arm()           # every handshake, the unchanged-XML one too
                 if not changed:
                     print(f"[klein] robot restarted with the same tree "
-                          f"({self._node_seq} nodes); layout kept.")
+                          f"({self.tree.node_count} nodes); layout kept.")
                     return False
                 print(
                     f"[klein] tree layout loaded from {self.robot_endpoint} "
-                    f"({self._node_seq} nodes unrolled)."
+                    f"({self.tree.node_count} nodes unrolled)."
                 )
-                if not self._node_categories:
+                if not self.tree.categories:
                     # Once per handshake: otherwise grey nodes read as a klein bug.
                     print(
                         "[klein] robot sent no <TreeNodesModel>; node categories "
                         "fall back to the BehaviorTree.CPP builtin table.",
                         file=sys.stderr,
                     )
-                self._broadcast(self._layout_json)  # dashboards that connected while we waited
+                self._broadcast(self._layout_frame())   # dashboards that connected while we waited
                 return True
             except (RobotTimeout, RobotRefused, ValueError, ET.ParseError) as exc:
                 if isinstance(exc, RobotTimeout):
@@ -388,7 +360,7 @@ class KleinGateway:
                 return
             start_us = int(reply.body)
             reply = await self.link.request(REQ_STATUS)
-            tree = self._recorded_tree
+            tree = self.tree
             baseline = bytearray(tree.size)
             for uid, status in iter_status(reply.body):
                 if uid < tree.size:
@@ -489,21 +461,20 @@ class KleinGateway:
         means two handshakes can never overlap.
         """
         while True:
-            if self._idle() or not self._blackboard_request:
+            if self._idle() or self.tree is None or not self.tree.blackboard_names:
                 await asyncio.sleep(BLACKBOARD_POLL_INTERVAL)
                 continue
             try:
                 # Captured before the await: a swap can land while this request
                 # is in flight, and a reply for the retired tree must be dropped —
                 # caching it would undo the _blackboard_json = None that
-                # _parse_layout just wrote, leaving the next dashboard to connect
+                # fetch_layout just wrote, leaving the next dashboard to connect
                 # a list of dead boards that no later frame would ever clear.
-                names = self._blackboard_names
-                generation = self._layout_generation
-                reply = await self.link.request(REQ_BLACKBOARD, self._blackboard_request)
+                tree = self.tree
+                reply = await self.link.request(REQ_BLACKBOARD, tree.blackboard_request)
                 received = time.monotonic()
-                if self._layout_generation == generation:
-                    boards = parse_blackboard(reply.body, names)
+                if self.tree is tree:
+                    boards = parse_blackboard(reply.body, tree.blackboard_names)
                     # Broadcast even when empty, so the dashboard can say so.
                     # t (klein's clock, µs) times the changes without a recording.
                     self._blackboard_json = json.dumps(
@@ -712,8 +683,8 @@ class KleinGateway:
         try:
             if self.streamer is not None:
                 self.streamer.subscribe(websocket)  # synchronous: nothing can overtake it
-            if self._layout_json is not None:
-                await websocket.send(self._layout_json)
+            if self.tree is not None:
+                await websocket.send(self._layout_frame())
             # else: fetch_layout() will broadcast the layout to us once it loads.
             if self._blackboard_json is not None:
                 # Don't make a new dashboard wait half a second for its first values.

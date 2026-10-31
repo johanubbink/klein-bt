@@ -144,25 +144,26 @@ def export_blackboard(run, tree_id):
     return "".join(entry + "\n" for entry in lines).encode("utf-8")
 
 
-def load_btlog(log, layout, boards=(), sidecar=None):
+def load_btlog(log, layout, sidecar=None):
     """A ``Recording`` of one parsed file (``read_btlog``), as the gateway
     would have recorded it: one ended segment from ``first_timestamp``,
     replayed from all-IDLE as Groot2 starts a file, with its head at the last
     record.
 
-    ``layout`` is the segment's layout (``.size``: the state length, max uid
-    + 1). ``sidecar`` is the ``.bb.jsonl`` text (``export_blackboard``), or
-    None. Its lines become blackboard samples holding every board in
-    ``boards`` (the layout's, in tree order), so a board with no lines (no
-    keys of its own) still shows, empty, as it does live. The first sample is
-    at the first line, or at the sidecar's start when it has none.
+    ``layout`` is the file's ``TreeLayout`` (``parse_layout`` of its XML),
+    the segment's layout. ``sidecar`` is the ``.bb.jsonl`` text
+    (``export_blackboard``), or None. Its lines become blackboard samples
+    holding every board in the layout's ``blackboard_names``, so a board with
+    no lines (no keys of its own) still shows, empty, as it does live. The
+    first sample is at the first line, or at the sidecar's start when it has
+    none.
     """
     recording = Recording()
     segment = recording.begin_segment(layout, log.first_timestamp, bytes(layout.size))
     recording.append([(log.first_timestamp + offset, uid, status)
                       for offset, uid, status in log.records])
     if sidecar is not None:
-        _load_blackboard(recording, sidecar, boards)
+        _load_blackboard(recording, sidecar, layout.blackboard_names)
     recording.end_segment(segment.last_ts)
     recording.advance_head(segment.last_ts)
     return recording

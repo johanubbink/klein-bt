@@ -12,7 +12,6 @@ import json
 import signal
 import time
 import unittest
-import xml.etree.ElementTree as ET
 
 from klein import layout, mock_robot
 from klein.groot2_protocol import parse_blackboard
@@ -310,9 +309,8 @@ class T11RecordingTest(SavedRunChecks, unittest.TestCase):
             downloads = _download_runs(gw)
             truth = robot.ground_truth()
             seq = tap.request_sequence(ignore="B")
-            root = ET.fromstring(robot.xml)
-            names = layout.extract_blackboard_names(root)
-            boards = parse_blackboard(robot_request(robot.port, "B", ";".join(names).encode())[1])
+            parsed = layout.parse_layout(robot.xml, 1)
+            boards = parse_blackboard(robot_request(robot.port, "B", parsed.blackboard_request)[1])
         self.assertEqual(len(state["segments"]), 1, state["segments"])
         segment = state["segments"][0]
         records = [tuple(r) for r in state["records"]]
@@ -333,8 +331,7 @@ class T11RecordingTest(SavedRunChecks, unittest.TestCase):
         log, changes = self.check_saved_run(downloads[0], state, [segment["id"]], robot.xml)
         # After a whole mission, every key a node writes is on the board its
         # binding names, as the robot itself reports it.
-        tree, _ = layout.unroll_tree(root, layout.parse_node_categories(root), 1)
-        written = [b for bindings in _collect(tree, "bindings")
+        written = [b for bindings in _collect(parsed.tree, "bindings")
                    for b in bindings if b["dir"] != "in"]
         self.assertTrue(written)
         for b in written:

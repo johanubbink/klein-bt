@@ -16,12 +16,22 @@ from klein.gateway import KleinGateway
 from klein.groot2_protocol import (HEADER_FORMAT, PROTOCOL_ID, REQ_BLACKBOARD, REQ_FULLTREE,
                                    REQ_GET_TRANSITIONS, REQ_STATUS, REQ_TOGGLE_RECORDING,
                                    STATUS_RECORD_FORMAT, encode_transition)
-from klein.recording import Layout
+from klein.layout import TreeLayout
 from klein.robot_link import Reply, RobotRefused, RobotTimeout
 
 # The UUID the mock publishes by default, and one that is deliberately not it.
 UUID_A = mock_robot.DEFAULT_TREE_UUID
 UUID_B = b"\xaa" * len(UUID_A)
+
+# A tree from a robot too old to send <TreeNodesModel>: custom nodes, no model.
+MODEL_LESS_XML = """<root BTCPP_format="4" main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <Sequence _uid="1">
+      <Inverter _uid="2"><Dock _uid="3" pad="1"/></Inverter>
+      <Sequence _uid="4"><Wait _uid="5" msec="500"/></Sequence>
+    </Sequence>
+  </BehaviorTree>
+</root>"""
 
 STATE_VALUES = [0, 1, 2, 3, 4, 10, 11, 12, 13, 14]     # every STATUS-encoded value
 # What a robot can report: never "was IDLE" (10), which transitions can't make.
@@ -62,8 +72,11 @@ def collect_ids(node):
 
 
 def layout(tree=None, uids=(1,), generation=1, xml=""):
-    """A ``klein.recording.Layout``; each call is a new tree run's."""
-    return Layout(generation, xml, tree if tree is not None else {}, sorted(uids))
+    """A ``klein.layout.TreeLayout`` with no blackboards; each call is a new
+    tree run's."""
+    uids = sorted(uids)
+    return TreeLayout(generation, xml, tree if tree is not None else {}, uids,
+                      node_count=len(uids), categories={}, blackboard_names=[])
 
 
 def random_records(rng, n, uids, t0=1_000_000, idle_on_idle=False):

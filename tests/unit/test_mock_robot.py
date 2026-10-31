@@ -17,7 +17,7 @@ import xml.etree.ElementTree as ET
 
 from klein import layout, mock_robot
 from tests.harness import btlog_ref
-from tests.helpers import collect_uids, new_gateway
+from tests.helpers import collect_uids
 from klein.groot2_protocol import (
     HEADER_FORMAT,
     NODE_CATEGORIES,
@@ -389,19 +389,17 @@ class EveryTreeTest(unittest.TestCase):
     def test_layout_matches_the_declarations(self):
         for tree in mock_robot.TREES.values():
             with self.subTest(tree=tree.name):
-                gw = new_gateway(self)
-                gw._parse_layout(tree.xml)
-                uids = collect_uids(gw.tree_structure)
+                parsed = layout.parse_layout(tree.xml, 1)
+                uids = collect_uids(parsed.tree)
                 self.assertEqual(sorted(uids), sorted(tree.uids))
 
                 root = ET.fromstring(tree.xml)
                 self.assertEqual(list(tree.blackboard(0)), tree.blackboard_names)
-                self.assertEqual(layout.extract_blackboard_names(root),
-                                 tree.blackboard_names)
+                self.assertEqual(parsed.blackboard_names, tree.blackboard_names)
                 # Each key a node reads or writes is served on the board BT.CPP
                 # would keep it on (remapped keys on the parent's).
                 boards = tree.blackboard(0)
-                nodes = [gw.tree_structure]
+                nodes = [parsed.tree]
                 while nodes:
                     node = nodes.pop()
                     nodes.extend(node["children"])
@@ -409,7 +407,7 @@ class EveryTreeTest(unittest.TestCase):
                         self.assertIn(b["key"], boards[b["board"]], (node["uid"], b))
 
                 # Every node type is declared in the model, in the shared vocabulary.
-                model = layout.parse_node_categories(root)
+                model = parsed.categories
                 self.assertTrue(set(model.values()) <= NODE_CATEGORIES)
                 used = {
                     node.tag

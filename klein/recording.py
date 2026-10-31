@@ -16,7 +16,6 @@ segment, so the state at seq ``n`` is the state after the segment's first
 
 import array
 import bisect
-import dataclasses
 import json
 
 from .groot2_protocol import IDLE_TRANSITION, NodeStatus, decode_status
@@ -88,26 +87,8 @@ def diff_to_transitions(current, target):
 
 
 # --------------------------------------------------------------------------- #
-# Layouts, segments and chunks
+# Segments and chunks
 # --------------------------------------------------------------------------- #
-@dataclasses.dataclass(frozen=True, eq=False)
-class Layout:
-    """One parsed tree XML: its handshake ``generation``, the ``xml``, the
-    unrolled ``tree`` sent to dashboards and its sorted ``uids``. Segments
-    recorded while the XML is unchanged share one, which is what groups them
-    into one run (compared by identity)."""
-    generation: int
-    xml: str
-    tree: dict
-    uids: list
-
-    @property
-    def size(self):
-        """The state's length: max uid + 1."""
-        return self.uids[-1] + 1 if self.uids else 1
-
-
-
 class Chunk:
     """Up to ``CHUNK_SIZE`` records, plus the state before its first one."""
 
@@ -143,7 +124,8 @@ class Segment:
     """One continuous arm: everything recorded between one ``r start`` and the
     next arm, swap or outage.
 
-    ``layout`` is whatever the caller passes; segments of the same tree may
+    ``layout`` is the tree it was recorded under, a ``klein.layout.TreeLayout``
+    (``generation``, ``xml``, ``tree``, ``uids``); segments of the same XML
     share one object. ``t_start`` is the earliest time ``state_at`` can answer:
     ``t_begin``, or once chunks are evicted, the last evicted record's time.
     """

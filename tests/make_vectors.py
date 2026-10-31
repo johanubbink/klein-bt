@@ -12,7 +12,8 @@ Functions the Python model has (``state_at_seq``, ``seq_at_time``,
 ``iter_records``, ``BlackboardTrack.at``) give their own expectations; the
 rest (``intervals``, ``timeAtSeq``, the cursor) are written out
 here in Python from their definitions in docs/architecture.md, "Browser
-model".
+model", and the Timeline's window (``window.js``) step by step from its
+rules in "The drawer".
 
 Chunks are 8 records here, not 1024, so the vectors stay small: the browser
 takes chunk boundaries from the frames and never assumes a size.
@@ -32,7 +33,7 @@ from unittest import mock
 from klein import recording
 from klein.recording import BlackboardTrack, Recording, apply_transition, decode_state
 from klein.streaming import Streamer
-from tests.harness.model import BB_RECENT, Model
+from tests.harness.model import BB_RECENT, BB_STREAMING, Model
 from tests.helpers import layout
 
 STATIC = Path(__file__).resolve().parents[1] / "klein" / "static"
@@ -121,19 +122,24 @@ CROSS = layout(tree={**_node(1, "Sequence", [
 PATROL = layout(tree={**_node(1, "ReactiveSequence", [
     _node(2, "VisitWaypoints", [_node(3, "MoveTo"), _node(4, "Dwell")], subtree=True)]),
     "root_tree_id": "PatrolTree"}, uids=[1, 2, 3, 4], generation=2)
+# CROSS's XML loaded again: a new layout of a tree of the same name.
+CROSS_AGAIN = layout(tree=CROSS.tree, uids=CROSS.uids, generation=3)
 
 
 def build_named():
     """``(recording, frames)`` on ``CROSS`` and ``PATROL``: a same-tree
-    restart, then a tree swap, the oldest chunks evicted; ``frames`` is every
-    frame a dashboard subscribed from the start got. Build it under a small
-    chunk size."""
+    restart, then a tree swap, then after an outage ``CROSS_AGAIN``, left
+    open with a blackboard sample after the head; the oldest chunks evicted.
+    ``frames`` is every frame a dashboard subscribed from the start got.
+    Build it under a small chunk size."""
     rng = random.Random(8)
     rec = Recording(keep_us=40_000)
     frames = []
     Streamer(rec, lambda clients, f: frames.append(f)).subscribe("x")
     t = T0
-    for tree, count in ((CROSS, 40), (CROSS, 15), (PATROL, 20)):
+    for tree, count in ((CROSS, 40), (CROSS, 15), (PATROL, 20), (CROSS_AGAIN, 10)):
+        if tree is CROSS_AGAIN:
+            rec.add_gap(t - 500, t, "outage")
         live = set()
         rec.begin_segment(tree, t, bytes(tree.size))
         for _ in range(count):
@@ -149,8 +155,11 @@ def build_named():
             rec.advance_head(t)
             rec.evict(t)
             t += 30
+        if tree is CROSS_AGAIN:
+            break
         rec.end_segment(t)
         t += 500
+    rec.add_blackboard(t, {"Main": {"door": "open"}})
     return rec, frames
 
 
@@ -367,6 +376,78 @@ def _cursor_cases(name, rec):
 
 
 # --------------------------------------------------------------------------- #
+# The Timeline's window (window.js)
+# --------------------------------------------------------------------------- #
+def _window(t1, span, follow):
+    return {"t0": t1 - span, "t1": t1, "span": span, "follow": follow}
+
+
+def _window_call(w, name, call, args, expect):
+    """``call`` on the window saved as ``w`` (it returns nothing), then the
+    window its ``get()`` gives."""
+    return [{"name": f"{name}: {call}", "call": f"${w}.{call}", "args": args, "save": f"{w}_"},
+            {"name": f"{name}: get after {call}", "call": f"${w}.get", "expect": expect}]
+
+
+def _paused_at(rec, t):
+    """The cursor paused at robot time t, as KleinCursor.pauseAt gives it."""
+    segment = [s for s in rec.segments if s.t_begin <= t][-1]
+    return {"seg": segment.id, "seq": segment.seq_at_time(t), "t": t, "live": False}
+
+
+def _window_cases(name, rec):
+    """A fresh ``KleinWindow`` over the recording (3 ms kept), one call at a
+    time, each expecting the window after it (the steps say what each pins)."""
+    ref = {"$ref": f"{name}_rec"}
+    head, t_min = rec.head, rec.t_min       # no blackboard sample after the head
+    live, at = _head_pos(rec), lambda t: _paused_at(rec, t)
+    c = t_min + 1200                        # where the scrubs leave the cursor
+    steps = [
+        ("live: 30 s, longer than the recording, ends at the head",
+         "sync", [ref, live], _window(head, 30_000_000, True)),
+        ("1 ms at the head follows", "set", [head, 1000], _window(head, 1000, True)),
+        ("panned off the head, it stops following", "set", [head - 500],
+         _window(head - 500, 1000, False)),
+        ("live, it stays there", "sync", [ref, live], _window(head - 500, 1000, False)),
+        ("never before the oldest record", "set", [t_min - 5000],
+         _window(t_min + 1000, 1000, False)),
+        ("never past the head; back on it, it follows", "set", [head + 5000],
+         _window(head, 1000, True)),
+        ("a cursor moved outside is centred", "sync", [ref, at(t_min + 1500)],
+         _window(t_min + 2000, 1000, True)),
+        ("paused, panned off the cursor", "set", [head], _window(head, 1000, False)),
+        ("a cursor that stayed is left outside", "sync", [ref, at(t_min + 1500)],
+         _window(head, 1000, False)),
+        ("a scrub holds it", "hold", [True], _window(head, 1000, False)),
+        ("held, a moved cursor is left outside", "sync", [ref, at(c)],
+         _window(head, 1000, False)),
+        ("the playhead's release leaves it", "hold", [False], _window(head, 1000, False)),
+        ("and so does the next sync", "sync", [ref, at(c)], _window(head, 1000, False)),
+        ("the overview's release reveals the cursor, centred", "reveal", [],
+         _window(c + 500, 1000, False)),
+        ("zoomed around an anchor, 200 µs at least", "zoomBy", [-1e4, c + 250],
+         _window(c + 300, 200, False)),
+        ("panned back over the cursor", "set", [c + 150], _window(c + 150, 200, False)),
+        ("+ around the cursor in view", "step", [1], _window(c + 375, 500, False)),
+        ("panned off the cursor", "set", [c + 1000], _window(c + 1000, 500, False)),
+        ("+ around the middle", "step", [1], _window(c + 1250, 1000, False)),
+        ("zoomed around an anchor outside, held at its edge", "zoomBy", [-1e4, t_min - 10**6],
+         _window(c + 450, 200, False)),
+        ("1 h at most, which ends at the head", "zoomBy", [1e4, c + 500],
+         _window(head, 3_600_000_000, False)),
+        ("+ at the longest rung", "step", [1], _window(head, 3_600_000_000, False)),
+        ("fit: everything kept", "fit", [], _window(head, head - t_min, False)),
+        ("back to live, it follows", "sync", [ref, live], _window(head, head - t_min, True)),
+        ("live, − keeps the head at the right edge", "step", [-1], _window(head, 2000, True)),
+    ]
+    w = f"{name}_window"
+    cases = [{"name": f"{w}: a fresh one", "call": "KleinWindow.create", "save": w}]
+    for i, (what, call, args, expect) in enumerate(steps):
+        cases += _window_call(w, f"{w} {i}: {what}", call, args, expect)
+    return cases
+
+
+# --------------------------------------------------------------------------- #
 # bbChange, expected from the harness Model (not from klein)
 # --------------------------------------------------------------------------- #
 SEC = 1_000_000
@@ -425,7 +506,102 @@ def _bb_change_cases(name, evict_before=None):
             cases.append({"name": f"{name}: bbChange {board}/{key} at {(t - T0) / SEC:+}",
                           "call": "KleinRecording.bbChange",
                           "args": [{"$ref": f"{name}_track"}, board, key, t], "expect": expect})
+    return cases + _row_mark_sweep(name, model, seg, times)
+
+
+FADE = 1_800_000                    # µs: the fade's length (styles.css, --fade)
+
+
+def _row_mark_sweep(name, model, seg, times):
+    """``rowMarks`` for every key shown at each of ``times``, given its
+    ``bbChange`` from the Model: paused, the static marks are exactly the
+    keys the Model calls fresh; painted live at each time in turn, a key's
+    writers fire exactly when it is fresh and changed since the last paint
+    (not at its first)."""
+    cases, seen = [], {}
+    for t in times:
+        fresh = model.bb_fresh(seg, t)
+        for board, keys in sorted((model.bb_at(seg, t) or {}).items()):
+            for key in sorted(keys):
+                t_change, recent = model.bb_change(seg, board, key, t)
+                change, streaming = {"tChange": t_change, "recent": recent}, recent >= BB_STREAMING
+                at = f"{board}/{key} at {(t - T0) / SEC:+}"
+                paused = {"change": change, "t": t, "mode": "paused", "primed": True,
+                          "reducedMotion": False, "shown": True, "seen": t_change}
+                cases.append({"name": f"{name}: rowMarks paused {at}", "call": "KleinView.rowMarks",
+                              "args": [paused], "expect": {
+                                  "streaming": streaming, "marked": (board, key) in fresh,
+                                  "fire": False, "fade": "clear"}})
+                live = {**paused, "mode": "live"}
+                if (board, key) in seen:
+                    live["seen"] = seen[(board, key)]
+                else:
+                    del live["seen"]                    # the row's first paint
+                fire = (board, key) in fresh and "seen" in live and t_change != live["seen"]
+                over = t_change is None or t - t_change >= FADE
+                fade = "restart" if fire else "clear" if streaming or over else "keep"
+                cases.append({"name": f"{name}: rowMarks live {at}", "call": "KleinView.rowMarks",
+                              "args": [live], "expect": {
+                                  "streaming": streaming, "marked": False, "fire": fire,
+                                  "fade": fade}})
+                seen[(board, key)] = t_change
     return cases
+
+
+def _row_mark_cases():
+    """``rowMarks``, behaviour by behaviour (docs/architecture.md,
+    "Rendering"), each written out as ``(streaming, marked, fire, fade)``."""
+    t = 10 * SEC
+    news = {"tChange": t - 100_000, "recent": 1}            # a change 0.1 s ago
+    painted = t - 600_000                                   # the change painted before it
+    live = {"t": t, "mode": "live", "primed": True, "reducedMotion": False, "shown": True,
+            "change": news, "seen": painted}
+    paused = {**live, "mode": "paused"}
+    ago = lambda us, recent=1: {"tChange": t - us, "recent": recent}
+    table = [
+        ("live, a change as it passes fades, and its writers fire", live,
+         (False, False, True, "restart")),
+        ("playing, alike", {**live, "mode": "playing"}, (False, False, True, "restart")),
+        ("just under a sample old is still news", {**live, "change": ago(499_999)},
+         (False, False, True, "restart")),
+        ("a change painted already: its fade runs on", {**live, "seen": news["tChange"]},
+         (False, False, False, "keep")),
+        ("a row's first paint is not a change", {k: v for k, v in live.items() if k != "seen"},
+         (False, False, False, "keep")),
+        ("a row painted before any change", {**live, "seen": None},
+         (False, False, True, "restart")),
+        ("after a mode or source switch the rows are only primed", {**live, "primed": False},
+         (False, False, False, "keep")),
+        ("a hidden row (a closed board) never starts a fade, its writers still fire",
+         {**live, "shown": False}, (False, False, True, "clear")),
+        ("BB_STREAMING changes in 3 s stream: no fade, no pulse",
+         {**live, "change": ago(100_000, BB_STREAMING)}, (True, False, False, "clear")),
+        ("one fewer is not streaming", {**live, "change": ago(100_000, BB_STREAMING - 1)},
+         (False, False, True, "restart")),
+        ("a change first painted a sample late is not news", {**live, "change": ago(500_000)},
+         (False, False, False, "keep")),
+        ("a fade still running is kept", {**live, "change": ago(FADE - 1), "seen": t - FADE + 1},
+         (False, False, False, "keep")),
+        ("a fade run out is cleared", {**live, "change": ago(FADE), "seen": t - FADE},
+         (False, False, False, "clear")),
+        ("a key that never changed", {**live, "change": {"tChange": None, "recent": 0},
+                                      "seen": None}, (False, False, False, "clear")),
+        ("paused, news is marked and nothing fades", paused, (False, True, False, "clear")),
+        ("paused, a hidden row's key is marked too", {**paused, "shown": False},
+         (False, True, False, "clear")),
+        ("paused, streaming is not marked", {**paused, "change": ago(100_000, BB_STREAMING)},
+         (True, False, False, "clear")),
+        ("paused, an old change is not marked", {**paused, "change": ago(500_000)},
+         (False, False, False, "clear")),
+        ("reduced motion, news is marked instead of fading", {**live, "reducedMotion": True},
+         (False, True, False, "clear")),
+        ("reduced motion, streaming is not marked",
+         {**live, "reducedMotion": True, "change": ago(100_000, BB_STREAMING)},
+         (True, False, False, "clear")),
+    ]
+    return [{"name": f"rowMarks: {what}", "call": "KleinView.rowMarks", "args": [args],
+             "expect": dict(zip(("streaming", "marked", "fire", "fade"), want))}
+            for what, args, want in table]
 
 
 # The status frames' samples without a recording: BB_SAMPLES (a change, a
@@ -477,23 +653,32 @@ def bb_frame_vectors():
 
 def bb_change_vectors():
     """Whole and after an eviction that cuts between Main/k's removal and
-    its return and keeps Sub/goal's set value as the base (not a change)."""
+    its return and keeps Sub/goal's set value as the base (not a change);
+    each row's marks (``KleinView.rowMarks``) at every time, against the
+    Model, and behaviour by behaviour."""
     cases = (_bb_change_cases("bb") + _bb_change_cases("bb_evicted", evict_before=5.2)
-             + bb_frame_vectors())
-    return {"module": [str(STATIC / "recording.js")], "cases": cases}
+             + bb_frame_vectors() + _row_mark_cases())
+    return {"modules": {"KleinRecording": str(STATIC / "recording.js"),
+                        "KleinView": str(STATIC / "view.js")}, "cases": cases}
 
 
 # --------------------------------------------------------------------------- #
 # Tree runs and counts, expected from the harness Model
 # --------------------------------------------------------------------------- #
 def dump(rec):
-    """What ``GET /debug/state`` dumps of rec's segments and records: all
-    the Model needs for tree runs."""
+    """What ``GET /debug/state`` dumps of rec's segments, records, head and
+    blackboards: all the Model needs for tree runs, counts and the head's
+    time."""
     return {"segments": [{"id": s.id, "t_begin": s.t_begin, "start_seq": s.start_seq,
                           "head_seq": s.head_seq, "start_state": list(s.state_at_seq(s.start_seq)),
                           "layout_id": s.layout.generation} for s in rec.segments],
             "records": [[ts, uid, status] for s in rec.segments
-                        for _seq, ts, uid, status in s.iter_records(s.start_seq, s.head_seq)]}
+                        for _seq, ts, uid, status in s.iter_records(s.start_seq, s.head_seq)],
+            "head": rec.head,
+            "blackboard": [{"seg": s.id, "t_start": s.blackboard.t_start,
+                            "boards": dict(s.blackboard.boards),
+                            "changes": [list(c) for c in s.blackboard.changes()]}
+                           for s in rec.segments]}
 
 
 def _tree_run_cases(name, rec):
@@ -519,10 +704,13 @@ def _count_cases(name, rec):
     return cases
 
 
-def _busiest_growing_cases(d=50):
-    """``busiestColumn`` asked again as the recording grows, at one column
-    length (as the overview asks it): a drain adding to the column the last
-    one ended in, then a new segment after a gap."""
+def _growing_cases(d=50):
+    """``busiestColumn`` (at one column length, as the overview asks it) and
+    two windows, asked again as the recording grows: a drain adding to the
+    column the last one ended in, then a new segment after a gap. Live, a
+    200 µs window follows the head. Paused, a 30 s one (longer than the
+    recording, so at the head) holds still while a scrub lasts and catches
+    up with the head after the release."""
     rec, frames, ref = Recording(), [], {"$ref": "grow_rec"}
     Streamer(rec, lambda clients, f: frames.append(f)).subscribe("grow")
     a, b = _layout(1, [1, 2, 3]), _layout(2, [1, 2, 3, 4])
@@ -532,7 +720,22 @@ def _busiest_growing_cases(d=50):
              lambda: (rec.end_segment(T0 + 300), rec.add_gap(T0 + 300, T0 + 400, "outage"),
                       rec.begin_segment(b, T0 + 400, bytearray(b.size)),
                       rec.append([(T0 + 401, 4, 1), (T0 + 420, 4, 2), (T0 + 449, 1, 1)]))]
+    # After each step, given the cursor live and paused at T0 + 10: the
+    # windows' calls, [(window, call, args, the window expected)]. The heads
+    # are T0 + 20, + 200 and + 449.
+    wide = lambda t: _window(t, 30_000_000, True)      # 30 s: longer than the recording
+    windows = [
+        lambda live, paused: [("following", "sync", [ref, live], wide(T0 + 20)),
+                              ("following", "set", [T0 + 20, 200], _window(T0 + 20, 200, True)),
+                              ("held", "sync", [ref, paused], wide(T0 + 20)),
+                              ("held", "hold", [True], wide(T0 + 20))],
+        lambda live, paused: [("following", "sync", [ref, live], _window(T0 + 200, 200, True)),
+                              ("held", "sync", [ref, paused], wide(T0 + 20)),
+                              ("held", "hold", [False], wide(T0 + 20))],
+        lambda live, paused: [("held", "sync", [ref, paused], wide(T0 + 449))]]
     cases = store_cases("grow", frames)
+    cases += [{"name": f"grow: a {w} window", "call": "KleinWindow.create", "save": f"grow_{w}"}
+              for w in ("following", "held")]
     for i, step in enumerate(steps):
         del frames[:]
         step()
@@ -542,7 +745,220 @@ def _busiest_growing_cases(d=50):
         cases.append({"name": f"grow: busiestColumn {d} after step {i}",
                       "call": "KleinRecording.busiestColumn", "args": [ref, d],
                       "expect": Model(dump(rec)).busiest_column(d)})
+        for w, call, args, expect in windows[i](_head_pos(rec), _paused_at(rec, T0 + 10)):
+            cases += _window_call(f"grow_{w}", f"grow: the {w} window after step {i}",
+                                  call, args, expect)
     return cases
+
+
+# --------------------------------------------------------------------------- #
+# What one render shows (view.js)
+# --------------------------------------------------------------------------- #
+# The latest frames, for when the recording isn't the source: a tree of their
+# own, a status, the boards (None before the first blackboard frame) and
+# their track, fed one sample at the gateway's own clock (FRAMES_T).
+FRAMES_TREE = {"id": "9:1", "uid": 1, "name": "FromFrames", "children": []}
+FRAMES_STATUS = {"1": {"status": "RUNNING", "from": "IDLE"}}
+FRAMES_BOARDS = {"Main": {"x": 1}}
+FRAMES_T = 42_000_000
+# What the blackboard panel says when it lists no board.
+NONE_TEXT = "This robot reports no blackboards."
+EARLY_TEXT = "No blackboard sample yet at this moment."
+DROPPED_TEXT = "Blackboard history from this moment was dropped."
+FILE_TEXT = "No blackboard in this file."
+WAITING_TEXT = "Waiting for values…"
+
+
+def _frames(boards=FRAMES_BOARDS):
+    return {"tree": FRAMES_TREE, "status": FRAMES_STATUS, "boards": boards,
+            "track": {"$ref": "frames_track"}}
+
+
+def _status(segment, seq):
+    return {str(uid): v for uid, v in decode_state(segment.state_at_seq(seq),
+                                                   segment.layout.uids).items()}
+
+
+def _of_recording(rec, clock, now):
+    """What a frame shows of ``rec`` at ``clock``: the position (cursor_pos),
+    its segment, tree and state."""
+    pos = cursor_pos(clock, now, rec)
+    segment = next(s for s in rec.segments if s.id == pos["seg"])
+    return {"pos": pos, "source": "recording", "seg.id": segment.id,
+            "tree.id": segment.layout.tree["id"], "status": _status(segment, pos["seq"])}
+
+
+# What a frame of the latest frames shows (the cursor aside).
+OF_FRAMES = {"source": "frames", "seg": None, "tree": FRAMES_TREE, "status": FRAMES_STATUS,
+             "t": FRAMES_T, "mode": "live", "viewingPast": False, "noBoards": False}
+
+
+def _frame_cases(name, rec, clock, expect, panels=(), now=0, support="on", frames=None):
+    """``KleinView.frame`` saved as ``name`` and each path of ``expect`` read
+    from it; then ``KleinView.panel`` at it for each ``(wasLive, want)`` in
+    ``panels``, ``want`` None (the panel left as it is) or paths to read."""
+    frames = frames or _frames()
+    args = {"rec": rec, "clock": clock, "nowMs": now, "frames": frames, "support": support}
+    cases = [{"name": f"{name}: frame", "call": "KleinView.frame", "args": [args], "save": name}]
+    cases += [{"name": f"{name}: {path}", "get": f"${name}.{path}", "expect": value}
+              for path, value in expect.items()]
+    for was_live, want in panels:
+        p = f"{name}_panel_{'live' if was_live else 'past'}"
+        call = {"name": p, "call": "KleinView.panel", "args": [{"$ref": name}, frames, was_live]}
+        if want is None:
+            cases.append({**call, "expect": None})
+            continue
+        cases.append({**call, "save": p})
+        cases += [{"name": f"{p}: {path}", "get": f"${p}.{path}", "expect": value}
+                  for path, value in want.items()]
+    return cases
+
+
+def _frame_scenario():
+    """A robot's recording streamed into a store a step at a time (before
+    and after its backfill, a first segment, the first chunk and blackboard
+    evicted, the robot gone, a tree swap), with a frame after each step;
+    then an opened file without a sidecar."""
+    rec, sent = Recording(keep_us=2_000), []
+    Streamer(rec, lambda clients, f: sent.append(f)).subscribe("view")
+    ref, at = {"$ref": "view_rec"}, lambda t: T0 + t
+    cases = [{"name": "view: a store", "call": "KleinRecording.createStore", "save": "view"},
+             {"name": "frames: a track", "call": "KleinRecording.createTrack",
+              "save": "frames_track"},
+             {"name": "frames: a sample", "call": "$frames_track.addBoards",
+              "args": [FRAMES_T, FRAMES_BOARDS], "save": "frames_track_"}]
+
+    def feed(step, count=None):
+        out = [{"name": f"view: ingest {step}.{i}", "call": "$view.ingest", "args": [_arg(f)],
+                "expect": True} for i, f in enumerate(sent[:count])]
+        del sent[:count]
+        return out + [{"name": f"view: the recording after {step}", "get": "$view.recording",
+                       "save": "view_rec"}]
+
+    live, still = {"mode": "live"}, {"evicted": False, "playing": False}
+    # Without a recording, and before its backfill is done: the frames.
+    cases += _frame_cases("no recording", None, live, {
+        **OF_FRAMES, **still, "clock": live, "pos": None}, panels=[
+        (True, {"boards": FRAMES_BOARDS, "opts.t": FRAMES_T, "opts.mode": "live",
+                "opts.track.tLast": FRAMES_T, "opts.empty": NONE_TEXT})])
+    cases += _frame_cases("no blackboard frame yet", None, live, {"source": "frames"},
+                          frames=_frames(boards=None), panels=[
+        (True, None), (False, {"boards": {}, "opts.empty": WAITING_TEXT, "opts.mode": "live"})])
+    cases += feed("rec", 1)
+    cases += _frame_cases("before the backfill", ref, live, {**OF_FRAMES, "pos": None})
+    cases += feed("backfill")
+    cases += _frame_cases("nothing recorded yet", ref, live, {**OF_FRAMES, "pos": None})
+
+    # A first segment: transitions to +500 µs, blackboard samples at +250,
+    # +450 and, after the head, +600.
+    a = _layout(1, [1, 2, 3])
+    rec.begin_segment(a, T0, bytearray(a.size))
+    rec.append([(at(100), 1, 1), (at(100), 2, 1), (at(200), 2, 2), (at(300), 3, 1),
+                (at(400), 3, 3), (at(500), 1, 2)])
+    rec.add_blackboard(at(250), {"Main": {"n": 1}})
+    rec.add_blackboard(at(450), {"Main": {"n": 2}})
+    rec.advance_head(at(500))
+    rec.add_blackboard(at(600), {"Main": {"n": 3}})
+    cases += feed("a segment")
+    seg = rec.segments[0]
+    cases += _frame_cases("live", ref, live, {
+        **_of_recording(rec, live, 0), **still, "clock": live, "t": at(600), "mode": "live",
+        "viewingPast": False, "noBoards": False}, panels=[
+        (True, {"boards": {"Main": {"n": 3}}, "opts.t": at(600), "opts.mode": "live",
+                "opts.track.tLast": at(600), "opts.empty": NONE_TEXT})])
+    cases += _frame_cases("live, a robot that can't record", ref, live,
+                          {"source": "recording"}, support="unsupported")
+    paused = {"mode": "paused", "seg": 0, "seq": 5}
+    cases += _frame_cases("paused in the past", ref, paused, {
+        **_of_recording(rec, paused, 0), **still, "clock": paused, "t": at(400),
+        "mode": "paused", "viewingPast": True, "noBoards": False}, panels=[
+        (True, {"boards": seg.blackboard.at(at(400)), "opts.t": at(400),
+                "opts.mode": "paused", "opts.empty": NONE_TEXT})])
+    early = {"mode": "paused", "seg": 0, "seq": 3}
+    cases += _frame_cases("paused before the first sample", ref, early, {
+        "t": at(200), "viewingPast": True}, panels=[
+        (True, {"boards": {}, "opts.t": at(200), "opts.empty": EARLY_TEXT})])
+    playing = {"mode": "playing", "seg": 0, "seq": 3, "startMs": 1000}
+    cases += _frame_cases("playing", ref, playing, {
+        **_of_recording(rec, playing, 1000.125), "clock": playing, "evicted": False,
+        "playing": True, "t": at(325), "mode": "playing", "viewingPast": True}, now=1000.125,
+        panels=[(False, {"boards": seg.blackboard.at(at(325)), "opts.mode": "playing"})])
+    cases += _frame_cases("playing reaches the head", ref, playing, {
+        **_of_recording(rec, live, 0), **still, "clock": live, "t": at(600), "mode": "live",
+        "viewingPast": False}, now=1000.5)
+
+    # Eviction: 16 more transitions to +3700 µs and a sample at +3000, then
+    # everything before +1700 µs dropped: the first chunk (to seq 8) and the
+    # blackboard before it.
+    rec.append([(at(700 + 200 * i), 1 + i % 3, 1 + i % 2) for i in range(16)])
+    rec.add_blackboard(at(3000), {"Main": {"n": 4}})
+    rec.advance_head(at(3700))
+    rec.evict(at(3700))
+    assert seg.start_seq == 8 and seg.blackboard.t_start == at(1700)
+    cases += feed("an eviction")
+    clamped = {"mode": "paused", "seg": 0, "seq": 9}     # just after the oldest kept record
+    assert evicted(early, 0, rec) and not evicted(clamped, 0, rec)
+    cases += _frame_cases("a pause whose moment was evicted", ref, early, {
+        **_of_recording(rec, clamped, 0), "clock": clamped, "evicted": True,
+        "playing": False, "t": at(1100), "mode": "paused", "viewingPast": True}, panels=[
+        (True, {"boards": {}, "opts.empty": DROPPED_TEXT})])
+    cases += _frame_cases("then it stays", ref, clamped, {"clock": clamped, "evicted": False})
+
+    # The robot gone: the segment ended. Live, its head stays the source
+    # until klein says the robot is back but can't record.
+    rec.end_segment(at(3800))
+    cases += feed("the robot gone")
+    kept = {"mode": "paused", "seg": 0, "seq": 20}
+    head = {**_of_recording(rec, live, 0), "t": at(3700), "viewingPast": False}
+    cases += _frame_cases("ended, live", ref, live, head)
+    cases += _frame_cases("ended, live, back unable to record", ref, live, {
+        **OF_FRAMES, **still, "clock": live, "pos": head["pos"]}, support="unsupported",
+        panels=[(True, {"boards": FRAMES_BOARDS, "opts.t": FRAMES_T,
+                        "opts.track.tLast": FRAMES_T})])
+    cases += _frame_cases("ended, paused, back unable to record", ref, kept, {
+        **_of_recording(rec, kept, 0), "viewingPast": True}, support="unsupported", panels=[
+        (True, {"boards": seg.blackboard.at(at(3300)), "opts.mode": "paused"})])
+
+    # A tree swap: the new segment has no blackboard sample yet.
+    b = _layout(2, [1, 2, 3, 4])
+    rec.begin_segment(b, at(4000), bytearray(b.size))
+    rec.append([(at(4100), 4, 1)])
+    rec.advance_head(at(4100))
+    cases += feed("a tree swap")
+    cases += _frame_cases("a new tree, live", ref, live, {
+        **_of_recording(rec, live, 0), "t": at(4100), "viewingPast": False}, panels=[
+        (True, None), (False, {"boards": {}, "opts.empty": WAITING_TEXT, "opts.mode": "live"})])
+
+    # An opened file without a .bb.jsonl sidecar.
+    opened, sent_file = Recording(), []
+    c = _layout(3, [1, 2])
+    opened.begin_segment(c, T0, bytearray(c.size))
+    opened.append([(at(10), 1, 1), (at(20), 2, 1), (at(30), 2, 2)])
+    opened.advance_head(at(30))
+    opened.end_segment(at(30))
+    Streamer(opened, lambda clients, f: sent_file.append(f), source="file",
+             name="alone.btlog").subscribe("file")
+    cases += store_cases("opened", sent_file)
+    file_ref, end = {"$ref": "opened_rec"}, {"mode": "paused", "seg": 0, "seq": 2}
+    for name, clock, past in (("a file without a sidecar, at its end", live, False),
+                              ("a file without a sidecar, paused", end, True)):
+        cases += _frame_cases(name, file_ref, clock, {
+            **_of_recording(opened, clock, 0), "viewingPast": past, "noBoards": True},
+            support="file", panels=[(True, {"boards": {}, "opts.empty": FILE_TEXT,
+                                            "opts.mode": "paused" if past else "live"})])
+    return cases
+
+
+def frame_vectors():
+    """The view's frame and the blackboard panel's input (``KleinView.frame``
+    and ``panel``), case by case: which source shows, the clock rewritten,
+    the flags and the panel's words by hand from docs/architecture.md,
+    "Rendering"; the position, state and boards from the Python model."""
+    with mock.patch.object(recording, "CHUNK_SIZE", CHUNK_SIZE):
+        cases = _frame_scenario()
+    return {"modules": {"KleinRecording": str(STATIC / "recording.js"),
+                        "KleinView": str(STATIC / "view.js")},
+            "cases": cases}
 
 
 def vectors():
@@ -552,8 +968,10 @@ def vectors():
                  + _cursor_cases("live", rec) + _cursor_cases("late", rec)
                  + _tree_run_cases("live", rec) + _tree_run_cases("late", rec)
                  + _count_cases("live", rec) + _count_cases("late", rec)
-                 + _busiest_growing_cases())
-    return {"module": [str(STATIC / "recording.js"), str(STATIC / "cursor.js")],
+                 + _window_cases("live", rec) + _growing_cases())
+    return {"modules": {"KleinRecording": str(STATIC / "recording.js"),
+                        "KleinCursor": str(STATIC / "cursor.js"),
+                        "KleinWindow": str(STATIC / "window.js")},
             "cases": cases}
 
 

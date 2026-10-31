@@ -265,8 +265,7 @@ class EvictionTest(DashboardCase):
         thumb pans the window by what it moved, and a press beside the thumb
         brings the window there, the cursor left live."""
         page, drag, view = self.page, self.browser.drag, self.overview
-        follow = """() => KleinTimeline.setWindow(KleinCursor.headTime(shownRecording()),
-                                                 KleinTimeline.getWindow().span)"""
+        follow = "() => KleinWindow.set(KleinCursor.headTime(shownRecording()))"
         page.click("#drawer-tab-timeline")
         self.addCleanup(page.evaluate, follow)
         self.addCleanup(self.zoom_to, 30_000_000)

@@ -14,7 +14,6 @@ from klein.recording import (
     CHUNK_SIZE,
     BlackboardTrack,
     Recording,
-    RobotClock,
     Segment,
     apply_transition,
     decode_state,
@@ -329,6 +328,15 @@ class EvictionTest(unittest.TestCase):
         rec.evict(5_000)
         self.assertEqual((rec.transitions_capped, rec.blackboard_capped), (False, False))
 
+        rec = Recording(keep_us=1_000, bb_max_bytes=100_000)
+        rec.begin_segment(None, 0, bytes(4))
+        rec.add_blackboard(0, {"Main": {"path": "x" * 60_000}})
+        rec.end_segment(10)
+        seg = rec.begin_segment(None, 20, bytes(4))
+        rec.add_blackboard(1_011, {"Main": {"path": "y" * 60_000}})
+        rec.evict(1_011)        # the first segment left the window: its blackboard counts no more
+        self.assertEqual((rec.segments, rec.blackboard_capped), ([seg], False))
+
 
 class SegmentsTest(unittest.TestCase):
     def test_evicted_segments_and_gaps_are_dropped(self):
@@ -385,14 +393,6 @@ class SegmentsTest(unittest.TestCase):
         self.assertEqual(rec.runs(), [[a1, a2], [b], [a3]])
         rec.evict(3001 + 10_000)                            # a1 goes entirely
         self.assertEqual(rec.runs(), [[a2], [b], [a3]])
-
-
-class RobotClockTest(unittest.TestCase):
-    def test_maps_to_the_round_trip_midpoint(self):
-        clock = RobotClock()
-        clock.arm(1_000_000, 10.0, 10.002)
-        self.assertEqual(clock.robot_us(10.001), 1_000_000)
-        self.assertEqual(clock.robot_us(11.501), 2_500_000)
 
 
 class BoundsTest(unittest.TestCase):

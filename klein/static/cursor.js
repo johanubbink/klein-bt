@@ -9,12 +9,9 @@
 // scrubbing and playing differ only in the clock. The optional t is a time
 // between seq's record and the next one (the Timeline's playhead dropped
 // between transitions); without it the time is that of seq's record. Pure: no
-// DOM, no d3, and it needs recording.js loaded first.
+// DOM, no d3.
 
-(function () {
-"use strict";
-
-const R = () => globalThis.KleinRecording;
+import * as R from "./recording.js";
 
 function live() {
     return { mode: "live" };
@@ -70,7 +67,7 @@ function cursorPos(clock, nowMs, recording) {
     // while the moment it has reached is still kept.
     const kept = from.id === clock.seg && fromSeq === clock.seq;
     const start = clock.t !== undefined && (kept || clock.mode === "playing")
-        ? clock.t : R().timeAtSeq(from, fromSeq);
+        ? clock.t : R.timeAtSeq(from, fromSeq);
     if (clock.mode === "paused") {
         return { seg: from.id, seq: fromSeq, t: start, live: false, mode: "paused" };
     }
@@ -80,7 +77,7 @@ function cursorPos(clock, nowMs, recording) {
     let i = recording.segments.indexOf(from);
     while (i + 1 < recording.segments.length && recording.segments[i + 1].tBegin <= t) i++;
     const seg = recording.segments[i];
-    let seq = t < seg.tStart ? seg.startSeq : R().seqAtTime(seg, t);
+    let seq = t < seg.tStart ? seg.startSeq : R.seqAtTime(seg, t);
     if (seg === from) seq = Math.max(seq, fromSeq);
     return { seg: seg.id, seq, t, live: false, mode: "playing" };
 }
@@ -105,8 +102,7 @@ function pauseAt(recording, t) {
     let seg = recording.segments[0];
     for (const s of recording.segments) if (s.tBegin <= t) seg = s;
     t = Math.max(t, seg.tStart);
-    return pause(seg.id, R().seqAtTime(seg, t), t);
+    return pause(seg.id, R.seqAtTime(seg, t), t);
 }
 
-globalThis.KleinCursor = { live, pause, play, cursorPos, shownTime, headTime, pauseAt, evicted };
-})();
+export { live, pause, play, cursorPos, shownTime, headTime, pauseAt, evicted };

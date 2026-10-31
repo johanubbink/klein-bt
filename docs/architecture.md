@@ -19,36 +19,75 @@ The code:
   and the decoding of reply payloads (status, transitions, blackboards). The
   gateway decodes with it and the mock robot encodes with it. The protocol is
   described in [protocol.md](protocol.md).
-- [`klein/layout.py`](../klein/layout.py): a FULLTREE reply's XML unrolled into
-  the dashboard's tree: subtrees stitched in, node uids, ports and categories,
-  and the blackboard names to ask for.
+- [`klein/layout.py`](../klein/layout.py): `parse_layout(xml, generation)`, a
+  FULLTREE reply's XML unrolled into the dashboard's tree: a `TreeLayout`
+  with subtrees stitched in, node uids, ports and categories, and the
+  blackboard names to ask for.
+- [`klein/robot_link.py`](../klein/robot_link.py): `RobotLink`, the one
+  ZeroMQ REQ socket to the robot ([Robot side](#robot-side-one-socket-two-pollers)).
+- [`klein/recorder.py`](../klein/recorder.py): `Recorder`, the recording
+  session: arming, `t` drains, overflow and outage gaps, and a publisher that
+  can't record ([Recording](#recording)).
+- [`klein/routes.py`](../klein/routes.py): `Routes`, the plain-HTTP side of
+  the one port: the static files, the recording's downloads and
+  `/debug/state` ([Browser side](#browser-side-one-port)).
 - [`klein/gateway.py`](../klein/gateway.py): the asyncio process. It holds the
-  ZeroMQ client, the pollers and the HTTP + WebSocket server.
+  robot link, the recorder, the pollers, the routes and the WebSocket server.
 - [`klein/cli.py`](../klein/cli.py): the `klein-bt` command, which parses the
   flags and runs the gateway.
 - [`klein/recording.py`](../klein/recording.py): the recording model
   ([Recording model](#recording-model)). [`klein/streaming.py`](../klein/streaming.py)
   streams it to dashboards, and [`klein/btlog.py`](../klein/btlog.py) saves and
   loads it as `.btlog` files.
-- [`klein/static/`](../klein/static/): the dashboard. `app.js` handles state,
-  the WebSocket, the tree and the sidebar; `renderers.js` formats blackboard
-  values; `recording.js` and `cursor.js` mirror the recording (see
-  [Browser model](#browser-model)); `drawer.js`, `timeline.js` and
-  `overview.js` are the drawer, its Timeline tab and its overview. D3 is
-  vendored so it works without internet. Dependabot can't see a vendored
-  file, so check [D3's releases](https://github.com/d3/d3/releases) when
-  cutting a klein release.
+- [`klein/static/`](../klein/static/): the dashboard. `app.js` is its
+  composition root: the WebSocket, the one render path, the connection line,
+  the banners and the sidebar's pane. `tree.js` is the tree canvas (cards,
+  folding, the camera); `blackboard.js` the sidebar's blackboard panel and
+  its links to the cards; `ui.js` the toolkit the views share (drags,
+  panels, writes, words); `renderers.js` formats blackboard values;
+  `recording.js` and `cursor.js` mirror the recording (see
+  [Browser model](#browser-model)); `window.js` is the Timeline's window,
+  which the Timeline and the overview both show and move; `view.js` decides
+  what each render shows (see [Rendering](#rendering)). `drawer.js` is the
+  drawer itself (its pane, tabs, recorder pill and Save), and its parts are
+  `transport.js` (the transport row's buttons, clock and keys), `log.js`
+  (the Log tab), `timeline.js` (the Timeline tab) and `overview.js` (the
+  overview). They are native ES modules with no build step: `index.html`
+  loads D3 as a classic script (the modules use its global `d3`) and
+  `app.js` as a module, which imports the rest; each module imports what it
+  uses and exports its interface. D3 is vendored so it works without
+  internet. Dependabot can't see a vendored file, so check
+  [D3's releases](https://github.com/d3/d3/releases) when cutting a klein
+  release.
 
 ## Robot side: one socket, two pollers
 
-The gateway keeps one ZeroMQ REQ socket to the robot. REQ/REP is strictly
-send-then-receive, so every request goes through one `asyncio.Lock`. If a
-request times out, the socket is stuck mid-exchange, so klein throws it away
-and opens a new one.
+The gateway keeps one ZeroMQ REQ socket to the robot, behind a `RobotLink`
+(`klein/robot_link.py`). REQ/REP is strictly send-then-receive, so every
+request goes through one `asyncio.Lock`. If a request times out, the socket
+is stuck mid-exchange, so the link throws it away and opens a new one.
+
+`await link.request(kind, payload)` returns a `Reply(tree_uuid, body)`: the
+tree UUID from the reply header (`None` if the header is too short to hold
+one) and frame 1. Everything else is one of two exceptions, and they mean
+different things to the gateway:
+
+- `RobotTimeout`: no reply within `REQUEST_TIMEOUT` (2 s), or a socket
+  fault. This is evidence of an outage ([Recording](#recording)); the status
+  poller reports the robot lost.
+- `RobotRefused`: the robot answered with an error frame, or without a
+  payload frame. The robot is there, so it is never an outage. A refused `r`
+  means the publisher can't record; any other refused request is skipped
+  (the handshake retries it).
+
+The gateway takes the link as `link=`, so the tests run it against a fake
+robot with no socket.
 
 At startup the gateway sends a FULLTREE request, retrying with backoff until the
-robot answers. It parses the XML into one unrolled tree and caches the result as
-a JSON frame that every new dashboard gets.
+robot answers. It parses the XML (`parse_layout`) into one `TreeLayout`, the
+unrolled tree and what klein needs to know about it, and keeps it as
+`gateway.tree` until a handshake brings a different XML. Every dashboard gets
+its tree as a `layout` frame.
 
 Two pollers then share the socket:
 
@@ -89,48 +128,57 @@ Rules that keep this safe:
 - Only a successful FULLTREE reply updates the stored UUID. If a re-handshake
   fails, the next poll still mismatches and tries again.
 - Only the status poller triggers a re-handshake, so two can't overlap. The
-  blackboard poller notes the layout generation before each request and drops
-  any reply that lands after a swap.
+  blackboard poller notes the loaded `TreeLayout` before each request and drops
+  any reply that lands after a swap replaced it.
 - If the XML is unchanged (a plain restart), klein keeps the current layout and
   the canvas doesn't flash.
 
 ## Recording
 
-The gateway owns one `Recording` (see [Recording model](#recording-model)) and
-feeds it from the robot's transition buffer. The request order on the wire,
+The gateway owns one `Recording` (see [Recording model](#recording-model)),
+and a `Recorder` (`klein/recorder.py`) feeds it from the robot's transition
+buffer. The gateway says when: `arm(tree)` after each handshake, `drain()`
+after each good status poll, `add_blackboard` with each blackboard sample,
+`note_timeout()` when any request times out and `robot_lost()` when a status
+poll does. The recorder keeps the session's state: whether it is `armed`,
+its `state` for the drawer (`"on"`, `"unsupported"`, or `"off"` with
+`--record-buffer 0`, when it sends and records nothing), and whether a
+request timed out since the last good poll. The request order on the wire,
 and why it loses nothing, is in [protocol.md](protocol.md#how-klein-records).
 
 - **Arming** runs at the end of every successful handshake, including one
   that found the XML unchanged: `r start` (its reply is the segment's
-  `t_begin` and anchors `RobotClock`), the baseline `S` (a uid-indexed state
-  of length max uid + 1), then `begin_segment`, which opens a new
-  **segment**.
-- **The layout** a segment carries is a `recording.Layout` (generation, XML,
-  unrolled tree, uids), one per parsed XML. A handshake that keeps the layout
-  (a same-tree restart or an outage resume) reuses it, so `Recording.runs()`
-  keeps those segments in one tree run; a new XML gets a new `Layout` and
-  starts a new run.
+  `t_begin`), the baseline `S` (a uid-indexed state of length max uid + 1),
+  then `begin_segment`, which opens a new **segment**.
+- **The layout** a segment carries is the gateway's `TreeLayout`, one per
+  parsed XML. A handshake that keeps the layout (a same-tree restart or an
+  outage resume) reuses it, so `Recording.runs()` keeps those segments in one
+  tree run; a new XML gets a new `TreeLayout` and starts a new run.
 - **Each status cycle** while armed: `S` is broadcast, then `t` is drained.
   The drained offsets plus `t_begin` are appended, eviction runs, and the head
   moves to the robot's time now. Each blackboard sample stored runs eviction
   too, so a dashboard connecting between two drains is never told sizes
   over the caps.
 - **Overflow**: a drain of exactly 1000 adds an `overflow` gap from the
-  previous record to the drain's first, appends the drain and re-arms with the
-  same `Layout`: a new segment, same run.
+  previous record to the drain's first, appends the drain
+  (`append_after_overflow`) and re-arms with the same `TreeLayout`: a new
+  segment, same run.
 - **Outage**: a request timeout from either poller or the handshake (`T`)
   marks that the robot may have gone; a good `S` clears the mark, so a lone
   timed-out `B` changes nothing. A timed-out `S` ends the open segment at the
-  head, the last drain and so the last time klein heard from the robot; the
-  re-handshake when telemetry resumes re-arms and adds an `outage` gap from
-  that end to the new `t_begin`. If only a `B` timed out and the robot is
-  back as a new publisher by the next `S`, the re-arm ends the segment the
-  same way and adds the same gap. A restart quick enough that nothing times
-  out arrives as a new UUID: a new segment in the same run, with no gap.
+  head (`end_at_head`), the last drain and so the last time klein heard from
+  the robot; the re-handshake when telemetry resumes re-arms and adds an
+  `outage` gap from that end (`ended_at`) to the new `t_begin`. If only a
+  `B` timed out and the robot is back as a new publisher by the next `S`,
+  the re-arm ends the segment the same way and adds the same gap. A restart
+  quick enough that nothing times out arrives as a new UUID: a new segment
+  in the same run, with no gap.
 - **Tree swap**: the re-handshake re-arms; `begin_segment` ends the old
   segment at the new one's `t_begin`.
-- **Blackboard**: each successful `B` is added to the open segment at
-  `RobotClock`'s robot time.
+- **Blackboard**: each successful `B` is added to the open segment at the
+  robot's time: the recorder maps klein's monotonic clock onto the robot's
+  µs, taking the `r start` reply's timestamp as the midpoint of its round
+  trip.
 - **No recording support** (`r` errors, BT.CPP < 4.3.3): the open segment
   ends, no new one begins and no `t` is sent to that publisher; the next
   handshake tries again.
@@ -161,7 +209,7 @@ blackboard may use at most 64 MiB (`Recording`'s defaults).
 `klein-bt --open FILE.btlog` shows a FileLogger2 file (Groot2's, a robot's
 own, or one klein saved) with **no robot**: no ZeroMQ request is ever sent,
 and `--robot-*` and `--record-buffer` are ignored. `KleinGateway.open_file`
-reads the file (`read_btlog`), parses its XML with the same `_parse_layout` a
+reads the file (`read_btlog`), parses its XML with the same `parse_layout` a
 handshake uses, and `load_btlog` turns it and its `FILE.bb.jsonl` sidecar, if
 there is one, into an ordinary `Recording` (how the file maps onto it is in
 [protocol.md](protocol.md#opening-a-file)). A `Streamer` with `source:
@@ -178,10 +226,11 @@ stopped mid-write) is ignored, with a note.
 
 ## Subtree unrolling
 
-FULLTREE returns one `<BehaviorTree>` block per subtree definition. The gateway
-puts each block in place of the `<SubTree>` node that references it. The
-reference keeps its own UID and gets the block as its child, so every UID in a
-STATUS reply maps to a node on screen. Cyclic references are guarded against.
+FULLTREE returns one `<BehaviorTree>` block per subtree definition.
+`parse_layout` puts each block in place of the `<SubTree>` node that
+references it. The reference keeps its own UID and gets the block as its
+child, so every UID in a STATUS reply maps to a node on screen. Cyclic
+references are guarded against.
 
 Each node carries its ports: the XML attributes the author wrote, minus `name`,
 `ID`, `_uid` and `_fullpath`. Scripting hooks like `_skipIf` and `_onSuccess`
@@ -222,10 +271,11 @@ key as `Blackboard::getEntry` does (`src/blackboard.cpp`):
 - A `<SubTree>` binding's direction is what the nodes inside do with that
   entry, merged; `"inout"` if none of them touches it.
 
-Node `id`s include a per-handshake generation counter, so two different trees
-never share ids. The dashboard's D3 join is keyed on `id`, so without this a
-new tree's nodes could reuse the old tree's cards and labels. A reconnect
-replays the cached layout with the same ids, so nothing is redrawn.
+Node `id`s include the generation `parse_layout` is given, which the gateway
+bumps per tree it parses, so two different trees never share ids. The
+dashboard's D3 join is keyed on `id`, so without this a new tree's nodes could
+reuse the old tree's cards and labels. A reconnect gets the kept layout with
+the same ids, so nothing is redrawn.
 
 ## Node categories
 
@@ -259,7 +309,7 @@ seen, as a pure data model (no asyncio, no ZeroMQ). The gateway feeds it (see
   approximate. `decode_state` gives the `{uid: {status, from}}` shape the
   dashboard paints. A plain 0 only exists before a node's first run, so
   `equivalent` treats it as equal to any `10 + X`.
-- **Segment**: one continuous arm (`r start`), with its `Layout` (segments of
+- **Segment**: one continuous arm (`r start`), with its `TreeLayout` (segments of
   the same XML share one), a baseline state and `t_begin`/`t_end`. Times are
   absolute robot µs. Records are `(ts, uid, status)`, stored in **chunks** of
   up to 1024 in `array` columns (~11 B per record). Each chunk keeps a
@@ -270,7 +320,7 @@ seen, as a pure data model (no asyncio, no ZeroMQ). The gateway feeds it (see
   records with `ts <= t`, so records sharing a µs are all included and the
   cursor can still step between them by seq.
 - **Recording**: the segments in time order, gaps (`outage`, `overflow`) and
-  the head time. `runs()` groups consecutive segments sharing a `Layout` into
+  the head time. `runs()` groups consecutive segments sharing a `TreeLayout` into
   tree runs: a same-XML restart stays in its run, a swap starts a new one.
   One `.btlog` is saved per run (`klein/btlog.py`, `export_run`; see
   [protocol.md](protocol.md#saving-a-recording)). `snapshot_run(run)` copies
@@ -282,16 +332,19 @@ seen, as a pure data model (no asyncio, no ZeroMQ). The gateway feeds it (see
   corrects it. `diff_to_transitions(a, b)` gives the transitions that turn
   one state into another; saving a `.btlog` uses it to re-create a run's
   starting state.
-- **Eviction** drops whole sealed chunks, oldest first across segments: first
-  those older than the keep window (`--record-buffer`). Next it trims the
-  blackboard (see below), and only then drops more chunks while the total
-  still exceeds the size cap. After eviction a segment's `t_start` is the
-  last evicted record's time, and `state_at` returns None before it. An
-  ended segment wholly before the window is dropped. Because only whole
-  sealed chunks go, a slow tree can keep up to 1023 records older than the
-  window. `extent()` is what eviction can change (the earliest time, and per
-  segment its first seq, `t_start` and blackboard start); the listener hears
-  `evict` only when it changed.
+- **Eviction** (`Recording.evict`) applies its policies in a fixed order. The
+  keep window (`--record-buffer`) goes first: whole sealed chunks older than
+  it go, oldest first across segments, and so does the blackboard before it.
+  Next the blackboard sub-cap trims the blackboard (see below), and only then
+  the total size cap drops more chunks while the total still exceeds it.
+  After eviction a segment's `t_start` is the last evicted record's time, and
+  `state_at` returns None before it. An ended segment wholly before the
+  window is dropped (its blackboard, cleared by the window, counts against
+  neither cap), and so is a gap that ends before the earliest retained time.
+  Because only whole sealed chunks go, a slow tree can keep up to 1023
+  records older than the window. `extent()` is what eviction can change (the
+  earliest time, and per segment its first seq, `t_start` and blackboard
+  start); the listener hears `evict` only when it changed.
 - **Blackboard track**, one per segment: per `(board, key)`, the times and
   JSON strings of each change (as the robot sent them, so an object's fields
   keep its order), or a removal marker. Unchanged values (compared with
@@ -306,17 +359,24 @@ seen, as a pure data model (no asyncio, no ZeroMQ). The gateway feeds it (see
   say that a size cap, not the keep window, decides how far back that
   history reaches: set when the cap evicts, cleared once the window's cutoff
   passes the cut. The drawer's recorder pill shows them.
-- **`RobotClock`** maps klein's monotonic clock to robot µs, taking the
-  `r start` reply's timestamp as the midpoint of its round trip. Blackboard
-  samples are timestamped with it.
 
 ## Browser side: one port
 
-One `websockets` server owns `--port`. It serves the static files over HTTP
-(`/`, `/styles.css`, `/app.js`, `/renderers.js`, `/recording.js`,
-`/cursor.js`, `/drawer.js`, `/timeline.js`, `/overview.js`,
-`/d3.v7.min.js`) and upgrades `/ws` to a WebSocket. Because both come from
-the same origin, the page just opens `ws://<same host:port>/ws`.
+One `websockets` server owns `--port`. Before any WebSocket handshake it
+hands each request to `Routes.handle(path)` (`klein/routes.py`), which
+answers it over plain HTTP (a response, or for a download a coroutine that
+exports it) or, for `/ws`, returns None so the request upgrades to a
+WebSocket. Because both come from the same origin, the page just opens
+`ws://<same host:port>/ws`.
+
+`Routes` serves every `.html`, `.css` and `.js` file in `static/` at
+`/<name>` (`/` is `/index.html`), read into memory once at startup, so a new
+file needs no list: `index.html` loads the vendored D3 and `app.js`, a
+native ES module that imports the rest of the dashboard. A missing
+`index.html` is served as a stub page, and a missing `index.html`, D3 or
+`app.js` is warned about at startup. Anything else is a 404. The gateway
+hands `Routes` the recording and the `/debug/state` dump as providers, so
+the tests serve a bare `Recording` with no gateway.
 
 While recording, the same port serves the recording as downloads, per tree
 run or all in one `.zip` ([protocol.md](protocol.md#saving-a-recording) has
@@ -324,7 +384,7 @@ the file formats). All GET; with `--record-buffer 0` they 404.
 
 | path | answer |
 | --- | --- |
-| `/log/runs` | JSON `[{run, tree_id, t_begin, t_end, filename, blackboard}]`, oldest run first: `t_begin` is the run's retained start (µs), `t_end` its end or `null` while it records, `tree_id` the main tree's ID, `filename` `<tree_id>_<YYYY-MM-DD>_<HH-MM-SS>.btlog` from `t_begin` in the gateway machine's local time (a name already used by an earlier run gets `_2`, `_3`… before `.btlog`), `blackboard` whether the run has any blackboard sample |
+| `/log/runs` | JSON `[{run, tree_id, t_begin, t_end, filename, blackboard}]` (`run_entries(runs)`), oldest run first: `t_begin` is the run's retained start (µs), `t_end` its end or `null` while it records, `tree_id` the main tree's ID, `filename` `<tree_id>_<YYYY-MM-DD>_<HH-MM-SS>.btlog` from `t_begin` in the gateway machine's local time (a name already used by an earlier run gets `_2`, `_3`… before `.btlog`), `blackboard` whether the run has any blackboard sample |
 | `/log.zip` | every run in `/log/runs` in one zip (`application/zip`, `Content-Disposition: attachment; filename="klein_<YYYY-MM-DD>_<HH-MM-SS>.zip"`, the local time of the request): per run its `filename` and, when `blackboard`, the `.bb.jsonl` beside it, each byte for byte the two routes below |
 | `/log.btlog?run=N` | run `N`'s `.btlog` (`application/octet-stream`, `Content-Disposition: attachment` with that filename) |
 | `/log.bb.jsonl?run=N` | run `N`'s blackboard sidecar, with the matching `.bb.jsonl` name; a 404 when the run has no blackboard (a file opened without its sidecar, or a run that ended before the first 2 Hz poll), since a header-only sidecar would reopen as empty boards instead of "No blackboard in this file." |
@@ -335,14 +395,14 @@ same run in `/log/runs` and a download only when both are asked for before
 the next eviction.
 
 Each download is a synchronous snapshot of the recording at request time:
-the gateway reads the runs and copies them (`snapshot_run`) without yielding
+`Routes` reads the runs and copies them (`snapshot_run`) without yielding
 to the event loop, so eviction can't change them halfway and a zip never
 mixes two states. All exporting and compressing then runs on the snapshot in
 a worker thread (`asyncio.to_thread`), so polling and streaming go on. The
 single-file routes export only their own file.
 
 Dashboards only receive. On connect, a dashboard gets the recording's
-backfill (while recording), the cached layout, the last blackboard frame and
+backfill (while recording), the layout, the last blackboard frame and
 the robot's reachability, then the live stream.
 
 | type | when | content |
@@ -354,8 +414,9 @@ the robot's reachability, then the live stream.
 | `notice` | on a tree swap | `{text}` |
 | `rec`, `segment`, `segment_end`, `gap`, `bb`, `head`, `evict`, `backfill_done`, binary records | backfill on connect, then as the recording changes | the recording; see [protocol.md](protocol.md#streaming-the-recording-klein--dashboard) |
 
-Every frame type except `notice` is cached for new clients (the recording's
-frames by being rebuilt from the recording as a backfill). A notice is about
+Every frame type except `notice` is cached for new clients (the layout by
+being rebuilt from the kept `TreeLayout`, the recording's frames from the
+recording as a backfill). A notice is about
 something that just happened, so a late client doesn't get it.
 
 ## Browser model
@@ -367,20 +428,24 @@ from the frames the gateway streams. Everything that shows a past moment
 locally from that mirror; **scrubbing never asks the backend anything.** The
 mirror holds everything the gateway keeps.
 
-The mirror is two classic scripts with no DOM and no d3, so the tests run
-them under `gjs` against vectors `tests/make_vectors.py` builds from the
-Python model. That pins the two implementations together.
+The mirror is two ES modules with no DOM and no d3, the Timeline's window a
+third and what a render shows a fourth, so the tests import them under
+`gjs` and run them against vectors `tests/make_vectors.py` builds from the
+Python model. That pins the two implementations together. Each is named
+here as app.js imports it (`import * as KleinRecording from
+"./recording.js"`).
 
 - [`klein/static/recording.js`](../klein/static/recording.js) →
-  `globalThis.KleinRecording`. `createStore()` returns a store whose
+  `KleinRecording`. `createStore()` returns a store whose
   `ingest(message)` takes a parsed text frame or a binary `ArrayBuffer`;
   `store.recording` is the one recording klein streams. The Python model's
   queries have mirrors here (`stateAtSeq`, `seqAtTime`, `stateAt`, `bbAt`,
-  `decodeState`), next to what the cursor, the Log (`logRows`, `logRowAt`)
-  the Timeline (`intervalsAll`, `timelineMarks`, `timelineSections`) and
-  the overview (`treeRuns`, `countIn`, `busiestColumn`) need.
+  `decodeState`), next to what the cursor, the Log (`logRows`: the rows
+  listed once, `{count, at(i), indexOf(segId, seq)}`), the Timeline
+  (`intervalsAll`, `timelineMarks`, `timelineSections`) and the overview
+  (`treeRuns`, `countIn`, `busiestColumn`) need.
 - [`klein/static/cursor.js`](../klein/static/cursor.js) →
-  `globalThis.KleinCursor`. A clock is data: `live()`, `pause(segId, seq,
+  `KleinCursor`. A clock is data: `live()`, `pause(segId, seq,
   t?)`, `play(fromSegId, fromSeq, nowMs, t?)` (1× only).
   `cursorPos(clock, nowMs, recording)` gives `{seg, seq, t, live, mode}`,
   `mode` being `"live"`, `"playing"` or `"paused"`: live is the last
@@ -393,6 +458,34 @@ Python model. That pins the two implementations together.
   to `[tMin, headTime]` and to its segment's `tStart`; the Timeline's axis,
   the overview and Home use it. `evicted` says whether eviction dropped the
   moment a clock shows.
+- [`klein/static/window.js`](../klein/static/window.js) →
+  `KleinWindow`: the Timeline's window (its rules: see
+  [The drawer](#the-drawer)). `sync(rec, pos)` applies them once per
+  render, and `get()` is `{t0, t1, span, follow}` (null without a
+  recording). The reader's moves (`set`, `zoomBy`, `step`, `fit`, `reveal`)
+  call the `onMove` listeners; `hold` keeps the window still while a scrub
+  lasts. `create()` makes another.
+- [`klein/static/view.js`](../klein/static/view.js) → `KleinView`: what
+  one render shows (see [Rendering](#rendering)). `frame({rec, clock,
+  nowMs, frames, support})` is the display at one render: the clock from
+  then on and whether it was moved off an evicted moment (`evicted`) or
+  plays on (`playing`), `pos`, `source` (`"recording"` or `"frames"`),
+  `seg`, `tree`, `status`, the time and `mode` the blackboard is shown at,
+  `viewingPast` and `noBoards`. `panel(view, frames, wasLive)` is the
+  blackboard panel's input at it, `{boards, opts}` for `KleinBlackboard.render`
+  (`opts.empty` the panel's words when it lists no board), or null to leave
+  the panel as it is. `rowMarks({change, t, mode, primed, reducedMotion,
+  shown, seen})` is one blackboard row's marks at a paint, `{streaming,
+  marked, fire, fade}`, `fade` being `"restart"`, `"clear"` or `"keep"`.
+  `timelineWindow(rec, seg, t0, t1, maxRecords)` is what the Timeline's
+  window shows for segment `seg`'s tree (see [The drawer](#the-drawer)):
+  `{count, tooMany, per, bands, edge}`, the transitions in it, whether
+  that is more than `maxRecords` (then no bars), the marks per uid
+  (`timelineMarks`), the bands of other trees and gaps with their labels
+  and tooltips, and `rec.tMin` when the recording starts inside it (else
+  null). `anchorAfter(rows, topRow)` is where the Log's top row `{seg,
+  seq}` is once the rows are listed again: its index, or null when it is no
+  longer listed.
 
 `app.js` routes binary frames and the recording's message types to the store.
 
@@ -400,8 +493,10 @@ Python model. That pins the two implementations together.
 
 There is one render path. A WebSocket message only stores what it carries
 (into the store, or as "the latest `layout`/`status`/`blackboard` frame") and
-asks for a frame; `render()` runs on the next `requestAnimationFrame` and
-decides what is displayed:
+asks for a frame; `render()` runs on the next `requestAnimationFrame`.
+`KleinView.frame` decides what is displayed, by the rules below, and
+`render()` applies it (the painters, the body classes, the banners); the
+board panel's input is `KleinView.panel`'s:
 
 - **The display source.** While the recording has a backfilled segment, the
   source is the **recording**: `pos = cursorPos(clock)`, live being the head
@@ -424,10 +519,11 @@ decides what is displayed:
   same-tree restart or re-arm (a new segment sharing the layout) doesn't
   redraw. A WebSocket reconnect forgets the drawn id, so the first tree
   klein names redraws the canvas and resets the camera.
-- **Painting.** The same `paintStatus` (strokes and pills, skipping cards
-  whose status is unchanged) and `renderBlackboards` draw either source.
-  `updateTreeLayout` repaints the displayed state too, so cards revealed by
-  unfolding show it at once. `renderBlackboards(boards, {track, t, mode})`
+- **Painting.** The same `KleinTree.paintStatus` (tree.js: strokes and
+  pills, skipping cards whose status is unchanged) and
+  `KleinBlackboard.render` (blackboard.js) draw either source. A relayout
+  (`updateTreeLayout`) repaints the displayed state too, so cards revealed by
+  unfolding show it at once. `KleinBlackboard.render(boards, {track, t, mode})`
   marks changes from a segment's blackboard `track` at time `t` in mode
   `live`, `playing` or `paused`. `KleinRecording.bbChange(track, board, key,
   t)` gives a key's last change at or before `t` (`tChange`; a value at or
@@ -438,13 +534,19 @@ decides what is displayed:
   (`bb-fresh`, `--fade` in `styles.css`, 1.8 s) live or playing, and is
   marked statically (`bb-mark`) when paused or with reduced motion.
   Switching mode only primes the rows, so a jump never animates; closed or
-  hidden rows never start a fade. Without a recording, the same rule runs
+  hidden rows never start a fade. `KleinView.rowMarks` decides each row's
+  marks from its `bbChange`, the paint's mode, whether the panel was last
+  painted in that mode from the same source (`primed`), and the change the
+  row was last painted for (`seen`); `KleinBlackboard.render` only
+  reconciles the boards and rows with the DOM (`syncKeyed` in ui.js, which
+  reorders rows only when the order is wrong, since re-appending one
+  restarts its fade) and applies the marks. Without a recording, the same rule runs
   on a local track of the `blackboard` frames (`addBoards`, at their newest
   `t`, kept to the last 3 s): timed by the gateway, so a busy browser
   doesn't change the answer. The board panel is re-rendered only when a
   blackboard input changed or the cursor moved, not on every `head`.
-- **Keys and nodes.** `showTree` indexes the layout's `bindings` once:
-  `(board, key)` to its writers (`out`, `inout`) and readers (`in`), a node
+- **Keys and nodes.** `KleinBlackboard.show` indexes a new tree's
+  `bindings` once: `(board, key)` to its writers (`out`, `inout`) and readers (`in`), a node
   that does both counting as a writer. Hovering a key row outlines the
   writers' cards solid and the readers' dashed (`rect.node-link`, outside
   the card, so the status stroke stays readable) and accents the key on
@@ -454,9 +556,12 @@ decides what is displayed:
   folded ancestor's card, and a fold or unfold while hovering moves the
   outline there. Hovering a card rings its keys' rows (`.linked`; a folded
   card's include the nodes it hides, and folding the hovered card by its
-  click re-rings them).
+  click re-rings them). The canvas knows nothing of the panel: the panel
+  paints its outlines and pulses on `KleinTree.cards()`, and the canvas
+  tells it of a relayout (`cardsMoved`) and of a card hovered
+  (`cardHovered`) through the hooks app.js connects.
   **The writer pulse** follows the row marks:
-  `renderBlackboards` hands `setPulses` the keys it marks statically and
+  `KleinBlackboard.render` hands `setPulses` the keys it marks statically and
   the ones whose fade it would start (whether or not their board is open),
   and a `--changed` dot at the writers' card corner holds (`mark`) or fades
   once (`fire`, 1.8 s). Streaming keys don't pulse. Only changed cards are
@@ -474,20 +579,31 @@ decides what is displayed:
   the sidebar, above the drawer: `#past-edge`). Which moment is shown is the
   drawer's clock, beside its **Go live** (see
   [The drawer](#the-drawer)).
-- **The drawer** (see [The drawer](#the-drawer)): `KleinDrawer.showRecording`
-  and `KleinDrawer.update(rec, pos)` run on every render (the drawer reads
-  `pos.mode` and keeps no clock of its own), then, once the cursor's tree is
-  on the canvas, `KleinTimeline.update(rec, pos, hierarchy)` and
-  `KleinOverview.update(rec, pos)`. They move the cursor through one
-  `seek(clock)` (`KleinDrawer.onSeek`, `KleinTimeline.connect`,
-  `KleinOverview.onSeek`), which sets the clock and asks for a render; the
+- **The drawer** (see [The drawer](#the-drawer)): `KleinDrawer.showRecording`,
+  `KleinTransport.update(rec, pos)` and `KleinLog.update(rec, pos)` run on
+  every render (they read `pos.mode` and keep no clock of their own), then,
+  once the cursor's tree is
+  on the canvas, `KleinWindow.sync(rec, pos)` (the Timeline's window),
+  `KleinTimeline.update(rec, pos, hierarchy)` and
+  `KleinOverview.update(rec, pos)`, which both paint that window. They move
+  the cursor through one `seek(clock)` (`KleinTransport.connect`,
+  `KleinTimeline.connect`, `KleinOverview.onSeek`; the Log's row clicks go
+  through the transport's, `KleinLog.onPick`),
+  which sets the clock and asks for a render, and the window through
+  `KleinWindow`'s moves, which repaint both at once (`onMove`); the
   Timeline's chevrons fold the canvas through `toggleFold` / `foldOthers`, the
-  same `toggleFold` a card's click uses.
+  same `toggleFold` a card's click uses. Only the tab on screen
+  (`KleinDrawer.shownTab()`: `"log"`, `"timeline"`, or null folded) is
+  painted, so a tab switch renders at once (the tab is painted when the
+  click returns) and a fold on the next frame. The Timeline's zoom and `\`
+  go by the tab selected, folded or not (`selectedTab()`).
 
 `window.kleinDebug()` is read-only, for the test harness: the mirror's
 `describe(rec)` facts (when there is a recording) plus `displaySource`
 (`"recording"` or `"frames"`) and `displayed`, the `{uid: {status, from}}`
-last painted.
+last painted. It is one of the page globals app.js sets for the tests and
+`scripts/`, in one block at its end; the modules themselves share nothing
+through `window` (see [testing.md](testing.md), "Probes").
 
 Because the mock answers `S` and then steps, the drain after a reply already
 holds the next tick, so live cards can be one poll ahead of the latest
@@ -527,19 +643,29 @@ full-height pane over the canvas's left edge, and behaves like the drawer
 - **Who follows.** The shown width (the strip's when collapsed) is the
   `--sidebar-width` custom property on `<html>`: the drawer's left edge and
   the banner stack's centre follow it in CSS alone, live while dragging.
-  `sidebarWidth()` returns the same width for `visibleViewport()`, so R and F
-  frame the space right of it. Folding nudges the camera by half the change
-  so the tree stays centred; dragging leaves it be. A change of width also
+  `sidebarWidth()` returns the same width, which app.js hands the camera
+  (`KleinTree.connect`) for `visibleViewport()`, so R and F frame the space
+  right of it. Folding nudges the camera by half the change
+  (`KleinTree.nudge`) so the tree stays centred; dragging leaves it be. A change of width also
   asks for a render, so the Timeline redraws its bars for the drawer's new
   width.
-- **Shared with the drawer:** `KleinDrawer.pane(...)`, the dragged-edge,
-  foldable, remembered panel both are, and the fold button's and the grip's
-  CSS. Each panel keeps its own state and storage.
+- **Shared with the drawer:** `pane(...)` in `ui.js` (the dashboard's
+  toolkit), the dragged-edge, foldable, remembered panel both are, and the
+  fold button's and the grip's CSS. Each panel keeps its own state and
+  storage.
 
 ## The drawer
 
 A bottom drawer ([`klein/static/drawer.js`](../klein/static/drawer.js)) holds
-the recording views in two 48 px rows over a scrollable body:
+the recording views in two 48 px rows over a scrollable body. drawer.js is
+the drawer itself: the pane, the tabs and which one is on screen
+(`shownTab`, `selectedTab`), the recorder pill and Save, and what is kept in
+words (`keptSpan`, `droppedNote`). Its parts ask it what is on screen, and
+it knows none of them: the transport row's buttons, clock and keys
+([`transport.js`](../klein/static/transport.js), which makes the shared
+cursor's moves), the overview (`overview.js`), the Log
+([`log.js`](../klein/static/log.js)) and the Timeline (`timeline.js`). A
+tab switch tells the Log (`KleinDrawer.onTab`) before it renders.
 
 - the **transport row**, shared by both tabs: the collapse button,
   **|◀ ▶ ▶|**, `● Live` (or, in the past, **Go live ⏭**),
@@ -582,7 +708,7 @@ sidebar's width (see [The sidebar](#the-sidebar)).
   Each has a key (its tooltip names it; see Keys below): ←/→ step, Space
   plays or pauses, End (and Esc) goes live; Home has no button and pauses at
   the oldest kept moment. The **clock** is the cursor's time to the µs
-  (`14:03:22.201 030`, `KleinDrawer.formatTime`); live, the head's or the
+  (`14:03:22.201 030`, `formatTime` in `ui.js`); live, the head's or the
   newest blackboard sample's, whichever is newer (`shownTime`). Without a
   recording the buttons are off, and Live and the clock are hidden.
 - **The overview** ([`klein/static/overview.js`](../klein/static/overview.js))
@@ -617,16 +743,18 @@ sidebar's width (see [The sidebar](#the-sidebar)).
     amber in the past. Above the pointer a readout gives the time there and
     how long before now, `13:05:12.4 · 42 s ago` (an opened file: the time
     only).
-  - **The box** (the Timeline tab, unfolded) is the Timeline's window, an
-    eighth of the strip whatever the zoom: faint at rest, brighter while the
-    pointer is over the overview. Dragging it pans the window with the box
-    under the pointer (`S / W` per px while the recording fits in the strip,
-    else `(R − w) / (W − box)`, so one drag from end to end crosses all of
-    it); a click on it without a drag (under 3 px) moves the cursor there.
+  - **The box** (the Timeline tab, unfolded) is the Timeline's window
+    (`KleinWindow`), an eighth of the strip whatever the zoom: faint at
+    rest, brighter while the pointer is over the overview. Dragging it pans
+    the window with the box under the pointer (`S / W` per px while the
+    recording fits in the strip, else `(R − w) / (W − box)`, so one drag
+    from end to end crosses all of it); a click on it without a drag (under
+    3 px) moves the cursor there.
   - **Pressing the strip** elsewhere pauses the cursor there
     (`KleinCursor.pauseAt`) and dragging scrubs. Meanwhile the strip and the
-    Timeline's window hold still (`KleinTimeline.hold`); after the release,
-    a cursor outside the window has the window centred on it.
+    Timeline's window hold still (`KleinWindow.hold`); after the release
+    the cursor counts as moved (`KleinWindow.reveal`), so one outside the
+    window has the window centred on it.
   - **The wheel** over the overview (the Timeline tab) pans the window as
     the Timeline's sideways wheel does; Ctrl+wheel zooms around the time
     under the pointer.
@@ -686,11 +814,13 @@ sidebar's width (see [The sidebar](#the-sidebar)).
   maps linearly onto the rows (`virtualTop()`); `#log-rows` clips the rows
   (`overflow: clip`), so overscan rows can't lengthen the scroll range.
   Below that the mapping is exact. The rows are listed again from the mirror
-  whenever records arrive, eviction drops some, or the filter changes, so an
-  evicted row is never shown. While live and scrolled to the newest row, the
-  log follows it; scrolling up stops that until you scroll back down or go
-  back to live. Scrolled up, the row at the top stays at the top when rows
-  are listed again; if eviction dropped that row too, the list shows its top.
+  (`KleinRecording.logRows`) whenever records arrive, eviction drops some,
+  or the filter changes, so an evicted row is never shown. While live and
+  scrolled to the newest row, the log follows it; scrolling up stops that
+  until you scroll back down or go back to live. Scrolled up, the row at the
+  top stays at the top when rows are listed again; if eviction dropped that
+  row too (and so every row above it), the list shows its top
+  (`KleinView.anchorAfter`).
 - **Dropped history.** Once eviction has dropped transitions
   (`historyDropped`), the Log's first line, hatched like the Timeline's
   not-recorded bands, reads "Transitions older than the kept 10 min were
@@ -765,9 +895,10 @@ sidebar's width (see [The sidebar](#the-sidebar)).
     subtree name), folded away or not; sections around them stay as dimmed
     context headers. The fold is still shown, and applies again when the
     filter is cleared.
-  - **Bars.** From `intervalsAll` and `timelineMarks` over the window, for
-    every segment of the drawn tree in it (a resume after an outage is the
-    same tree): an amber bar per RUNNING span, capped by a 3 px mark in the
+  - **Bars.** From `KleinView.timelineWindow`: `intervalsAll` and
+    `timelineMarks` over the window, for every segment of the drawn tree in
+    it (a resume after an outage is the same tree): an amber bar per
+    RUNNING span, capped by a 3 px mark in the
     outcome's colour (green SUCCESS, red FAILURE, blue SKIPPED; none when
     still running or halted), and a single 3 px mark for an outcome reached
     in the tick it started. Shapes on the same pixel are drawn once. Not
@@ -791,20 +922,21 @@ sidebar's width (see [The sidebar](#the-sidebar)).
     10 s (1-2-5), 20 s, 30 s, 1, 2, 5, 10, 20, 30 min and 1 h, keeping the
     head at the right edge while following live, else the playhead in place
     when it is in view, else the middle; **Ctrl+wheel** zooms around the
-    pointer, **dragging the lanes** (or Shift+wheel, or a sideways wheel)
-    pans; a plain wheel scrolls the rows. The window never runs past the
+    pointer (held inside the window), **dragging the lanes** (or Shift+wheel, or a sideways wheel)
+    pans; a plain wheel scrolls the rows. The window is
+    [`window.js`](../klein/static/window.js)'s (`KleinWindow`), whose rules
+    run on every render, whichever tab is shown. It never runs past the
     head, nor before the oldest record once the recording is longer than
-    it (`clampWindow`).
-    One longer than the recording ends at the head, live or paused, so now
-    is at the axis's right end from a session's first second; the time
+    it. One longer than the recording ends at the head, live or paused, so
+    now is at the axis's right end from a session's first second; the time
     before the oldest record is empty, its start edge marked (see Dropped
     history). While live it follows the head, until you pan or zoom it off
     the head (back onto the head, or back to live, follows again); paused,
     a window longer than the recording still moves on with the head, except
     while the playhead is dragged. **⤢** (or `\`) zooms to fit: the window
     becomes everything kept, `rec.tMin` to the head, its length kept within
-    the ladder's 200 µs and 1 h (`clampWindow`); while live it then follows
-    the head at that length, so the oldest moment drifts off its left edge.
+    the ladder's 200 µs and 1 h; while live it then follows the head at
+    that length, so the oldest moment drifts off its left edge.
   - **The playhead** is the shared cursor. Pressing the axis pauses there,
     and dragging scrubs: the cursor is paused at that time to the µs,
     `pause(seg, seqAtTime(seg, t), t)` in the segment holding it, so the
@@ -819,8 +951,8 @@ sidebar's width (see [The sidebar](#the-sidebar)).
     the running frontier into view, under the axis and its section's header.
 - **Keys.** The camera keys ignore presses inside the drawer, as inside the
   sidebar (F scrolls the Timeline only when pressed outside it). The
-  cursor's keys are one window `keydown` handler in drawer.js, each doing
-  what its button does, in either tab and folded:
+  cursor's keys are a table in transport.js (`KEYS`) behind one guard
+  (`ignored`), each doing what its button does, in either tab and folded:
 
   | Key | Does | Button |
   |---|---|---|
@@ -864,8 +996,9 @@ with no RUNNING node below it. Parents like `Sequence` are RUNNING whenever a
 child is, so only the frontier tells you what the robot is actually doing. A
 `Parallel` can have several, so `F` frames all of them.
 
-Both aim at `visibleViewport()`, the part of the canvas you can see: right of
-the sidebar (`sidebarWidth()`), below a 56 px strip kept clear for one banner
+The camera is tree.js's. Both keys aim at `visibleViewport()`, the part of
+the canvas you can see: right of the sidebar (`sidebarWidth()`, which app.js
+hands it), below a 56 px strip kept clear for one banner
 pill (always, so the tree never sits under a pill and a pill coming or going
 doesn't move the camera; a second pill at once may overlap the tree's top for
 a moment), and above the drawer (precisely, above the hint line that
@@ -892,6 +1025,10 @@ C++ involved. It has two different trees and can swap between them
 (`--switch-every`), drawing a fresh UUID each time, so you can test tree swaps.
 For tests it can also write every transition it makes to a file
 (`--truth-log`) and publish a recorded `.btlog` in real time (`--replay`).
+Its socket loop only receives and sends: `handle(publisher, frames)` answers
+one request with no socket, from a `ScriptedPublisher` (the built-in trees,
+one tick per STATUS poll, and the swaps) or a `ReplayPublisher` (`--replay`),
+so each request type is tested in-process.
 
 The tests, their tiers and the harness are described in
 [testing.md](testing.md).

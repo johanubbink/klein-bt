@@ -20,7 +20,7 @@ from klein import gateway, recording
 from klein.recording import BlackboardTrack, Recording
 from klein.streaming import Streamer, encode_records
 from tests import make_vectors
-from tests.helpers import FakeRobot, layout, new_gateway
+from tests.helpers import FakeRobot, FakeSocket, layout, new_gateway
 
 
 # --------------------------------------------------------------------------- #
@@ -290,38 +290,19 @@ class MirrorTest(MirrorChecks, unittest.TestCase):
                 self.assertMirrors(Mirror(frames[client]), rec)
 
 
-class FakeSocket:
-    """Just enough of a server connection for ``ws_handler``."""
-
-    def __init__(self):
-        self.frames = []
-        self.closed = asyncio.Event()
-
-    async def send(self, _message):        # layout/robot frames: not checked here
-        await asyncio.sleep(0)
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        await self.closed.wait()
-        raise StopAsyncIteration
-
-
 class BackfillOrderTest(MirrorChecks, unittest.IsolatedAsyncioTestCase):
     async def test_clients_joining_while_drains_arrive_mirror_the_recording(self):
         """Dashboards connect at random moments of a busy run; each one's frames
         must start with a whole backfill and then continue without a gap or a
         repeat, which the mirror checks record by record."""
-        gw = new_gateway(self, recording=Recording())
+        robot = FakeRobot(limit=400)
+        robot.drains = [[(10 * i + j, 1 + (i + j) % 13, (i + j) % 4) for j in range(3)]
+                        for i in range(300)]
+        gw = new_gateway(self, recording=Recording(), link=robot)
         patch = mock.patch.object(gateway, "POLL_INTERVAL", 0)
         patch.start()
         self.addCleanup(patch.stop)
         gw.streamer.send = lambda clients, frame: [c.frames.append(frame) for c in clients]
-        robot = FakeRobot(limit=400)
-        robot.drains = [[(10 * i + j, 1 + (i + j) % 13, (i + j) % 4) for j in range(3)]
-                        for i in range(300)]
-        gw._request = robot
         rng = random.Random(3)
         sockets = []
 

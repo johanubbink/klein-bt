@@ -78,11 +78,11 @@ _HOVER_SWEEP = """() => {
   return { rows, cards };
 }"""
 
-MAX_PORT_CHARS = 36            # app.js: (220 px card - 2 * 12 px) / (9 px * 0.6) monospace
+MAX_PORT_CHARS = 36            # tree.js: (220 px card - 2 * 12 px) / (9 px * 0.6) monospace
 
 
 def port_line(ports):
-    """A card's port line: every ``port=value``, truncated as app.js does."""
+    """A card's port line: every ``port=value``, truncated as tree.js does."""
     text = "  ".join(f"{p}={v}" for p, v in (ports or {}).items())
     return text if len(text) <= MAX_PORT_CHARS else text[:MAX_PORT_CHARS - 1] + "…"
 
@@ -215,6 +215,10 @@ class DashboardCase(unittest.TestCase):
             for (left, right), w in zip(runs_got, want):
                 self.assertAlmostEqual((left + right) / 2, w, delta=1, msg=msg)
         return v, lambda t: overview_x(v, t)
+
+    def set_span(self, span):
+        """The Timeline's window ``span`` µs long, keeping its right edge."""
+        self.page.evaluate("(s) => { const w = KleinWindow.get(); if (w) KleinWindow.set(w.t1, s); }", span)
 
     def overview(self, what=""):
         """The overview after the next frame (``OVERVIEW``), its box checked

@@ -4,15 +4,14 @@
 // the Timeline tab, the window's box), over a scrollbar for the whole
 // recording that shows while the pointer is over it. Press the strip to move
 // the cursor and drag to scrub; drag the box or the scrollbar's thumb, or
-// turn the wheel, to pan; Ctrl+wheel zooms. See docs/architecture.md, "The
-// drawer".
+// turn the wheel, to pan; Ctrl+wheel zooms. The window is KleinWindow's
+// (window.js). See docs/architecture.md, "The drawer".
 
-(function () {
-"use strict";
-
-const R = globalThis.KleinRecording;
-const T = globalThis.KleinTimeline;
-const C = globalThis.KleinCursor;
+import * as R from "./recording.js";
+import * as C from "./cursor.js";
+import * as W from "./window.js";
+import * as KleinDrawer from "./drawer.js";
+import { drag, setStyle, formatClock } from "./ui.js";
 
 const ZOOM = 8;                     // the strip is this many of the Timeline's windows
 const COLUMN = 2;                   // px: an activity column, about
@@ -58,10 +57,6 @@ function px(v) {
     return `${v.toFixed(2)}px`;
 }
 
-function setStyle(el, name, value) {
-    if (el.style[name] !== value) el.style[name] = value;
-}
-
 // False when part was last drawn for this key (nothing to redraw).
 function changed(part, key) {
     key = key.join(" ");
@@ -85,10 +80,11 @@ function seekTime(t) {
 // is shorter than the window, the window's length back from the head:
 // nothing to scroll, so no thumb).
 function layout() {
-    if (!rec || !pos || !rec.segments.length) return null;
-    const win = T.getWindow();
+    const current = W.get();        // given what update() was: null without a recording
+    if (!current) return null;
+    const win = KleinDrawer.shownTab() === "timeline" ? current : null;     // the box
     const tMin = rec.tMin, head = C.headTime(rec), length = head - tMin;
-    const S = ZOOM * T.getSpan();
+    const S = ZOOM * current.span;
     const at = C.shownTime(pos, rec);
     const t0 = win ? win.t0 : at, w = win ? win.span : 0;
     const m0 = held !== null ? held
@@ -191,9 +187,8 @@ function paint() {
     paintScrollbar(s);
 }
 
-// What the dashboard shows, from app.js's render(), after the Timeline's
-// update (so the box is its window as just painted): the recording the
-// Timeline was given (null without one) and the cursor's position.
+// What the dashboard shows, from app.js's render(), after KleinWindow.sync:
+// the recording (null without one) and the cursor's position.
 function update(recording, position) {
     rec = recording || null;
     pos = rec ? position : null;
@@ -214,7 +209,7 @@ function hover(event) {
     const t = shown ? shown.m0 + (event.clientX - r.left) / shown.k : null;
     tip.hidden = !shown || event.clientY > r.bottom + 1 || t < shown.tMin || t > shown.head;
     if (tip.hidden) return;
-    tip.textContent = KleinDrawer.formatClock(Math.round(t), 1)
+    tip.textContent = formatClock(Math.round(t), 1)
         + (rec.source === "file" ? "" : ` · ${ago((shown.head - t) / 1e6)}`);
     const half = tip.offsetWidth / 2;
     tip.style.left = px(r.left - drawer.getBoundingClientRect().left
@@ -246,10 +241,10 @@ ov.addEventListener("pointerdown", (event) => {
         } else {
             if (!s.scrolls) return;     // the recording fits the window: nothing to scroll
             if (!event.target.closest("#ov-thumb")) {
-                T.setWindow(wa + at(event) / k + s.win.span / 2, s.win.span);   // centred there
+                W.set(wa + at(event) / k + s.win.span / 2);     // centred there
             }
-            const t1 = T.getWindow().t1;
-            move = (e) => T.setWindow(t1 + dx(e) / k, s.win.span);
+            const t1 = W.get().t1;
+            move = (e) => W.set(t1 + dx(e) / k);
         }
     } else if (s.win && event.target.closest("#ov-box")) {
         // Δt per px that keeps the box under the pointer: the strip's scale
@@ -260,24 +255,24 @@ ov.addEventListener("pointerdown", (event) => {
         move = (e) => {
             if (!panned && Math.abs(dx(e)) < SLOP) return;
             panned = true;
-            T.setWindow(s.win.t1 + dx(e) * perPx, s.win.span);
+            W.set(s.win.t1 + dx(e) * perPx);
         };
         end = (e) => { if (!panned && e.type === "pointerup") seekTime(s.m0 + at(event) / s.k); };
     } else {
         panning = false;
         held = s.m0;
-        T.hold(true);
+        W.hold(true);
         move = (e) => seekTime(held + at(e) / s.k);
         move(event);
         end = () => {
             held = null;
-            T.hold(false);
-            paint();
+            W.hold(false);
+            W.reveal();                     // repaints (onMove)
         };
     }
     ov.classList.add("dragging");
     ov.classList.toggle("panning", panning);
-    KleinDrawer.drag(ov, event, move, (e) => {
+    drag(ov, event, move, (e) => {
         end(e);
         ov.classList.remove("dragging", "panning");
     });
@@ -294,16 +289,15 @@ ov.addEventListener("wheel", (event) => {
     event.preventDefault();
     if (event.ctrlKey) {
         const t = s.m0 + (event.clientX - strip.getBoundingClientRect().left) / s.k;
-        T.zoomBy(event.deltaY, clamp(t, s.win.t0, s.win.t1));
+        W.zoomBy(event.deltaY, t);
     } else {
         const d = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
-        T.setWindow(s.win.t1 + d * s.win.span / width, s.win.span);
+        W.set(s.win.t1 + d * s.win.span / width);
     }
 }, { passive: false });
 
-// The box shows on the Timeline tab only; a moved window moves it at once.
-for (const tab of drawer.querySelectorAll('[role="tab"]')) tab.addEventListener("click", paint);
-T.connect({ windowMoved: paint });
+// A moved window moves the box and the thumb at once.
+W.onMove(paint);
 
 // For the tests: the strip on screen and where it lies (m0, S; tMin and tMax
 // the recording's ends as painted), the box (px from the strip's left, null
@@ -318,5 +312,9 @@ function debug() {
     };
 }
 
-globalThis.KleinOverview = { update, debug, onSeek: (fn) => { seek = fn; } };
-})();
+// app.js gives its seek (above).
+function onSeek(fn) {
+    seek = fn;
+}
+
+export { update, debug, onSeek };

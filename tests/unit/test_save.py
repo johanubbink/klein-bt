@@ -1,5 +1,5 @@
 """Unit tests for saving a recording: ``klein.btlog.export_run`` and
-``export_blackboard``, and the gateway's ``/log`` routes.
+``export_blackboard``, and the ``/log`` routes ``klein.routes`` serves.
 
 Every exported file is read back and replayed from all-IDLE with the harness's
 independent reference (``tests/harness/btlog_ref.py``, which shares no code
@@ -11,16 +11,16 @@ import json
 import os
 import random
 import time
-import types
 import unittest
 import unittest.mock
 import zipfile
 
 from klein.btlog import export_blackboard, export_run, read_btlog
 from klein.recording import CHUNK_SIZE, Recording
+from klein.routes import STATIC_DIR, Routes, run_entries
 from tests.harness import btlog_ref
-from tests.helpers import (REPORTABLE, answer, equivalent, layout, new_gateway, random_records,
-                           read_sidecar, sidecar_at)
+from tests.helpers import (REPORTABLE, answer, equivalent, layout, random_records, read_sidecar,
+                           sidecar_at)
 
 FIXTURES = os.path.join(os.path.dirname(__file__), os.pardir, "fixtures")
 T0 = 1_760_000_000_000_000                  # µs since the epoch
@@ -277,10 +277,15 @@ class ExportBlackboardTest(unittest.TestCase):
                        "removed": True}, lines)
 
 
+def serving(rec):
+    """The routes of a gateway recording into ``rec`` (None: recording off)."""
+    return Routes(STATIC_DIR, recording=lambda: rec)
+
+
 class LogRoutesTest(unittest.TestCase):
     def setUp(self):
-        self.gw = new_gateway(self, recording=Recording())
-        rec = self.gw.recording
+        self.rec = rec = Recording()
+        self.routes = serving(rec)
         self.tree_a, self.tree_b = tree_layout("TreeA", 4), tree_layout("TreeB", 3)
         rec.begin_segment(self.tree_a, T0, bytes(5))
         rec.append([(T0 + 10, 1, 1), (T0 + 20, 2, 2)])
@@ -289,7 +294,7 @@ class LogRoutesTest(unittest.TestCase):
         rec.append([(T0 + 1_000_010, 1, 1)])
 
     def request(self, path):
-        return answer(self.gw, path)
+        return answer(self.routes, path)
 
     def test_runs_btlog_and_sidecar_downloads(self):
         runs = self.request("/log/runs")
@@ -312,8 +317,7 @@ class LogRoutesTest(unittest.TestCase):
             self.assertEqual(response.headers["Content-Disposition"],
                              f'attachment; filename="{filenames[1]}"')
             self.assertEqual(response.headers["Content-Length"], str(len(response.body)))
-            self.assertEqual(response.body,
-                             export_run(self.gw.recording.runs()[1], self.tree_b.xml))
+            self.assertEqual(response.body, export_run(self.rec.runs()[1], self.tree_b.xml))
             log = btlog_ref.parse(response.body)
             self.assertEqual((log.xml, log.records), (self.tree_b.xml, [(10, 1, 1)]))
         with self.subTest("/log.bb.jsonl"):
@@ -343,8 +347,8 @@ class LogRoutesTest(unittest.TestCase):
                     await asyncio.sleep(0.01)
                     ticks += 1
             ticker = asyncio.create_task(tick())
-            pending = self.gw._process_request(None, types.SimpleNamespace(path="/log.zip"))
-            self.gw.recording.append([(T0 + 1_000_020, 2, 1)])   # after the export: not in it
+            pending = self.routes.handle("/log.zip")
+            self.rec.append([(T0 + 1_000_020, 2, 1)])      # after the export: not in it
             response = await pending
             ticker.cancel()
             return response, ticks
@@ -379,36 +383,36 @@ class LogRoutesTest(unittest.TestCase):
 
     def test_runs_of_one_tree_in_the_same_second_get_unique_names(self):
         """A, B, A, A' within one second: the names (and the zip's entries) differ."""
-        gw = new_gateway(self, recording=Recording())
+        rec = Recording()
         second = T0 // 1_000_000 * 1_000_000
         tree_a2 = tree_layout("TreeA", 4)                    # a new layout object: a new run
         for i, (tree, size) in enumerate([(self.tree_a, 5), (self.tree_b, 4),
                                           (self.tree_a, 5), (tree_a2, 5)]):
-            gw.recording.begin_segment(tree, second + 1000 * i, bytes(size))
-            gw.recording.append([(second + 1000 * i + 10, 1, 1)])
+            rec.begin_segment(tree, second + 1000 * i, bytes(size))
+            rec.append([(second + 1000 * i + 10, 1, 1)])
         stamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime(second / 1e6))
-        names = [entry["filename"] for entry in
-                 json.loads(answer(gw, "/log/runs").body)]
+        names = [entry["filename"] for entry in run_entries(rec.runs())]
         self.assertEqual(names, [f"TreeA_{stamp}.btlog", f"TreeB_{stamp}.btlog",
                                  f"TreeA_{stamp}_2.btlog", f"TreeA_{stamp}_3.btlog"])
-        response = answer(gw, "/log.zip")
+        response = answer(serving(rec), "/log.zip")
         with zipfile.ZipFile(io.BytesIO(response.body)) as archive:
             self.assertEqual(sorted(n for n in archive.namelist() if n.endswith(".btlog")),
                              sorted(names))
 
     def test_what_is_not_there_is_404(self):
-        off = new_gateway(self)
+        off = serving(None)
         # A run with no blackboard has no sidecar, not a header-only one: reopened,
         # it would show empty boards instead of "No blackboard in this file.".
-        cases = [("no blackboard", self.gw, "/log.bb.jsonl?run=1", b"no blackboard in this run")]
-        cases += [(f"unknown run {path}", self.gw, path, None)
+        cases = [("no blackboard", self.routes, "/log.bb.jsonl?run=1",
+                  b"no blackboard in this run")]
+        cases += [(f"unknown run {path}", self.routes, path, None)
                   for path in ("/log.btlog?run=2", "/log.btlog?run=-1", "/log.btlog?run=x",
                                "/log.btlog", "/log.bb.jsonl?run=2")]
         cases += [(f"recording off {path}", off, path, None)
                   for path in ("/log/runs", "/log.zip", "/log.btlog?run=0", "/log.bb.jsonl?run=0")]
-        for label, gw, path, body in cases:
+        for label, routes, path, body in cases:
             with self.subTest(label):
-                response = answer(gw, path)
+                response = answer(routes, path)
                 self.assertEqual(response.status_code, 404)
                 if body is not None:
                     self.assertEqual(response.body, body)

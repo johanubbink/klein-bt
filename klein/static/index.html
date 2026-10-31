@@ -43,7 +43,7 @@
             </div>
             <!-- The three channels a card uses, named once. Closed by default:
                  the blackboard panel needs the height. The glyphs are filled in
-                 from app.js's tables so they cannot drift from the canvas. -->
+                 from tree.js's tables so they cannot drift from the canvas. -->
             <details id="legend">
                 <summary>
                     <span class="bb-chevron" aria-hidden="true"></span>
@@ -88,7 +88,8 @@
         </div>
     </aside>
 
-    <!-- Right of the sidebar (--sidebar-width). Sized and filled by drawer.js. -->
+    <!-- Right of the sidebar (--sidebar-width). Sized by drawer.js and filled
+         by its parts: transport.js, overview.js, log.js and timeline.js. -->
     <section id="drawer" aria-label="Log and timeline">
         <div id="drawer-handle" role="separator" aria-orientation="horizontal"
              aria-label="Resize the drawer" title="Drag to resize · double-click to collapse"></div>
@@ -168,7 +169,7 @@
             </div>
         </div>
         <div id="drawer-body">
-            <!-- Only the rows in view exist (drawer.js); #log-rows is as tall
+            <!-- Only the rows in view exist (log.js); #log-rows is as tall
                  as all of them, so the scrollbar is the whole log. -->
             <div id="drawer-log" role="tabpanel" aria-labelledby="drawer-tab-log" hidden>
                 <div class="log-head" aria-hidden="true">
@@ -214,12 +215,8 @@
          round the visible canvas. -->
     <div id="past-edge" aria-hidden="true"></div>
 
-    <script src="/renderers.js"></script>
-    <script src="/recording.js"></script>
-    <script src="/cursor.js"></script>
-    <script src="/drawer.js"></script>
-    <script src="/timeline.js"></script>
-    <script src="/overview.js"></script>
-    <script src="/app.js"></script>
+    <!-- The dashboard is ES modules, with no build step: app.js imports the
+         rest. They use the global d3 the classic script above defines. -->
+    <script type="module" src="/app.js"></script>
 </body>
 </html>

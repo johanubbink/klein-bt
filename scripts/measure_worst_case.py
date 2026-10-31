@@ -104,7 +104,7 @@ _SCRUB = """async ([steps]) => {
 # activity column by column, the marks. [ms, columns drawn, marks drawn].
 _OVERVIEW_REBUILD = """(span) => {
   const t = performance.now();
-  KleinTimeline.setWindow(KleinTimeline.debug().t1, span);
+  KleinWindow.set(KleinWindow.get().t1, span);
   void document.getElementById('ov-strip').offsetHeight;
   const ms = performance.now() - t;
   const d = document.querySelector('#ov-activity path').getAttribute('d');
@@ -138,7 +138,6 @@ def part_file(args, path, n):
           f"{path.stat().st_size / 1e6:.0f} MB .btlog")
     # In-process: what one connecting dashboard costs the gateway's event loop.
     gw = KleinGateway("127.0.0.1", 1, 0)
-    gw.ctx.term()                           # a file needs no robot socket
     t = time.perf_counter()
     gw.open_file(path)
     print(f"gateway: open_file {time.perf_counter() - t:.1f} s (once, at --open)")

@@ -1,27 +1,37 @@
 """Helpers shared by the test modules: reply headers built through the mock's
-encoder rather than restating the wire format, in-process gateways and a
-scripted robot for them, test layouts and random records, and the
-``.bb.jsonl`` blackboard sidecar (the one for the t11 fixture included).
+encoder rather than restating the wire format, in-process gateways with a
+scripted robot link and a fake dashboard socket for them, test layouts and
+random records, and the ``.bb.jsonl`` blackboard sidecar (the one for the
+t11 fixture included).
 """
 import asyncio
 import inspect
 import json
 import struct
-import types
 
 import msgpack
 
-from klein import gateway as gateway_module
 from klein import mock_robot
 from klein.gateway import KleinGateway
 from klein.groot2_protocol import (HEADER_FORMAT, PROTOCOL_ID, REQ_BLACKBOARD, REQ_FULLTREE,
                                    REQ_GET_TRANSITIONS, REQ_STATUS, REQ_TOGGLE_RECORDING,
                                    STATUS_RECORD_FORMAT, encode_transition)
-from klein.recording import Layout
+from klein.layout import TreeLayout
+from klein.robot_link import Reply, RobotRefused, RobotTimeout
 
 # The UUID the mock publishes by default, and one that is deliberately not it.
 UUID_A = mock_robot.DEFAULT_TREE_UUID
 UUID_B = b"\xaa" * len(UUID_A)
+
+# A tree from a robot too old to send <TreeNodesModel>: custom nodes, no model.
+MODEL_LESS_XML = """<root BTCPP_format="4" main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <Sequence _uid="1">
+      <Inverter _uid="2"><Dock _uid="3" pad="1"/></Inverter>
+      <Sequence _uid="4"><Wait _uid="5" msec="500"/></Sequence>
+    </Sequence>
+  </BehaviorTree>
+</root>"""
 
 STATE_VALUES = [0, 1, 2, 3, 4, 10, 11, 12, 13, 14]     # every STATUS-encoded value
 # What a robot can report: never "was IDLE" (10), which transitions can't make.
@@ -62,8 +72,11 @@ def collect_ids(node):
 
 
 def layout(tree=None, uids=(1,), generation=1, xml=""):
-    """A ``klein.recording.Layout``; each call is a new tree run's."""
-    return Layout(generation, xml, tree if tree is not None else {}, sorted(uids))
+    """A ``klein.layout.TreeLayout`` with no blackboards; each call is a new
+    tree run's."""
+    uids = sorted(uids)
+    return TreeLayout(generation, xml, tree if tree is not None else {}, uids,
+                      node_count=len(uids), categories={}, blackboard_names=[])
 
 
 def random_records(rng, n, uids, t0=1_000_000, idle_on_idle=False):
@@ -91,33 +104,39 @@ def equivalent(a, b):
 # Gateways in-process
 # --------------------------------------------------------------------------- #
 def new_gateway(test, **kwargs):
-    """A gateway on the default ports, destroyed when ``test`` finishes."""
+    """A gateway on the default ports, its link closed when ``test`` finishes.
+    Pass ``link=FakeRobot(…)`` for one that talks to a robot."""
     gw = KleinGateway("127.0.0.1", 1667, 8080, **kwargs)
-    test.addCleanup(gw.ctx.destroy, linger=0)
+    test.addCleanup(gw.link.close)
     return gw
 
 
 def opened(path):
-    """A gateway showing ``path`` (``--open``); a file needs no robot socket."""
+    """A gateway showing ``path`` (``--open``); its link is never used."""
     gw = KleinGateway("127.0.0.1", 1, 0)
-    gw.ctx.term()
     gw.open_file(path)
     return gw
 
 
-def answer(gw, path):
-    """The gateway's HTTP answer for ``path``, as websockets gets it (the
-    ``/log.zip`` coroutine, which compresses in a thread, run to its response)."""
-    response = gw._process_request(None, types.SimpleNamespace(path=path))
+def answer(routes, path):
+    """The HTTP answer of ``routes`` (a ``klein.routes.Routes``) for ``path``,
+    as websockets gets it, a download (exported in a thread) run to its
+    response."""
+    response = routes.handle(path)
     return asyncio.run(response) if inspect.isawaitable(response) else response
 
 
 class FakeRobot:
-    """A scripted publisher for ``_request``: answers T/S/B/r/t, logs every
-    request letter, and parks (setting ``done``) after ``limit`` requests.
+    """A scripted publisher behind a fake ``RobotLink``, for a gateway's
+    ``link=``: answers T/S/B/r/t, logs every request letter, and parks
+    (setting ``done``) after ``limit`` requests. Its answers are set by the
+    test (``status``, ``drains``, the ``r start`` times, a publisher too old
+    to record), so it doesn't run the mock's mission through ``handle``.
 
-    ``timeouts`` holds 1-based request indices that raise ``RobotTimeout``;
-    ``on_request`` maps an index to a callable run just before it is answered.
+    ``timeouts`` and ``refusals`` hold 1-based request indices that raise
+    ``RobotTimeout`` and ``RobotRefused`` (an error frame); ``on_request``
+    maps an index to a callable run just before it is answered, and
+    ``on_letter`` a request letter to one run once. Either may raise too.
     """
 
     START_US = 1_700_000_000_000_000
@@ -130,13 +149,14 @@ class FakeRobot:
         self.supports_recording = True
         self.drains = []                # one [(offset_us, uid, status)] per `t`
         self.timeouts = set()
+        self.refusals = set()
         self.on_request = {}
         self.on_letter = {}             # request letter -> callable, run once
         self.sent = []
         self.starts = []                # every `r start` reply value
         self.done = asyncio.Event()
 
-    async def __call__(self, request_type, payload=None):
+    async def request(self, request_type, payload=None):
         self.sent.append(chr(request_type))
         n = len(self.sent)
         if n > self.limit:
@@ -148,24 +168,53 @@ class FakeRobot:
         if chr(request_type) in self.on_letter:
             self.on_letter.pop(chr(request_type))(self)
         if n in self.timeouts:
-            raise gateway_module.RobotTimeout("stub timeout")
-        header = reply_header(self.uuid, request_type)
+            raise RobotTimeout("stub timeout")
+        if n in self.refusals:
+            raise RobotRefused("stub error frame")
+        return Reply(self.uuid, self._body(request_type, payload, n))
+
+    def _body(self, request_type, payload, n):
         if request_type == REQ_FULLTREE:
-            return [header, self.xml.encode()]
+            return self.xml.encode()
         if request_type == REQ_STATUS:
-            return [header, self.status]
+            return self.status
         if request_type == REQ_BLACKBOARD:
-            return [header, msgpack.packb({"MainTree": {"n": n}})]
+            return msgpack.packb({"MainTree": {"n": n}})
         if request_type == REQ_TOGGLE_RECORDING:
             assert payload == b"start", payload
             if not self.supports_recording:
-                return [b"error", b"unsupported request"]
+                raise RobotRefused("unsupported request")
             self.starts.append(self.START_US + 1_000_000 * (len(self.starts) + 1))
-            return [header, str(self.starts[-1]).encode()]
+            return str(self.starts[-1]).encode()
         if request_type == REQ_GET_TRANSITIONS:
             records = self.drains.pop(0) if self.drains else []
-            return [header, b"".join(encode_transition(*r) for r in records)]
+            return b"".join(encode_transition(*r) for r in records)
         raise AssertionError(f"unexpected request {chr(request_type)!r}")
+
+    def close(self):
+        pass
+
+
+class FakeSocket:
+    """Just enough of a server connection for ``ws_handler``: ``sent`` holds
+    what the handler sends it, ``frames`` is for a test's stubbed
+    ``streamer.send``, and it stays open until ``closed`` is set."""
+
+    def __init__(self):
+        self.sent = []
+        self.frames = []
+        self.closed = asyncio.Event()
+
+    async def send(self, message):
+        self.sent.append(message)
+        await asyncio.sleep(0)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        await self.closed.wait()
+        raise StopAsyncIteration
 
 
 # --------------------------------------------------------------------------- #

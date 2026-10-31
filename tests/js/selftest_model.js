@@ -1,5 +1,5 @@
-// The JS runner's self-test subject: a plain <script>-style file (no export),
-// shaped like the dashboard's own modules (recording.js, cursor.js). It
+// The JS runner's self-test subject: an ES module shaped like the dashboard's
+// own (recording.js, cursor.js), plain functions exported by name. It
 // applies transitions with the publisher's rule, as tests/harness/btlog_ref.py
 // does, and returns a Map and a Set for the runner's container comparisons.
 
@@ -37,6 +37,4 @@ function uidsTouched(records) {
     return new Set(records.map((r) => r[1]));
 }
 
-const KleinSelfTest = { applyTransition, replay, makeStore, countByUid, uidsTouched };
-if (typeof module !== "undefined") module.exports = KleinSelfTest;
-else window.KleinSelfTest = KleinSelfTest;
+export { applyTransition, replay, makeStore, countByUid, uidsTouched };

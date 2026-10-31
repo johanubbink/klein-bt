@@ -1,64 +1,42 @@
-"""Unit tests for klein.gateway: UID extraction, status parsing, subtree
-unrolling, ports, node categories, layout caching, blackboard decoding,
-static-asset serving and the CLI.
+"""Unit tests for klein.gateway: status and blackboard decoding, the robot
+frame, tree swaps, recording, and the CLI; and the static files klein.routes
+serves (the recording's downloads are in test_save.py). The tree it unrolls
+is klein.layout's, tested in test_layout.py; the recorder it drives is
+tested in test_recorder.py.
 
 ``TreeSwapTest`` and ``RecordingGatewayTest`` drive the real pollers, since the
-re-handshake and the recording live inside them; they stub ``_request`` rather
-than opening a socket.
+re-handshake and the recording live inside them, against a ``FakeRobot`` link
+rather than a socket.
 """
 import asyncio
 import contextlib
 import io
 import json
+import re
 import socket
 import sys
+import tempfile
 import time
 import unittest
-import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest import mock
 
 import msgpack
 
-from klein import btlog, cli, gateway, layout, mock_robot
+from klein import cli, gateway, routes
 from klein.cli import _port_available
-from klein.gateway import KleinGateway
-from klein.groot2_protocol import (REQ_FULLTREE, REQ_STATUS, TRANSITION_BUFFER_MAX,
-                                   parse_blackboard, parse_status)
+from klein.groot2_protocol import parse_blackboard, parse_status
+from klein.layout import parse_layout
 from klein.recording import Recording
-from tests.helpers import (UUID_A, UUID_B, FakeRobot, answer, collect_ids, collect_uids,
-                           new_gateway, reply_header, status_record)
-
-
-def _find(node, uid):
-    if node.get("uid") == uid:
-        return node
-    for child in node.get("children", []):
-        hit = _find(child, uid)
-        if hit is not None:
-            return hit
-    return None
+from klein.robot_link import RobotTimeout
+from klein.routes import Routes, http_response
+from tests.helpers import (MODEL_LESS_XML, UUID_A, UUID_B, FakeRobot, FakeSocket, answer,
+                           collect_ids, collect_uids, new_gateway, status_record)
 
 
 class GatewayTestCase(unittest.TestCase):
     def setUp(self):
         self.gw = new_gateway(self)
-
-
-class ExtractUidTest(unittest.TestCase):
-    def test_extract_uid(self):
-        cases = [
-            ("underscore uid", '<Action _uid="5"/>', 5),
-            ("plain uid fallback", '<Action uid="7"/>', 7),
-            # ID is a subtree *name*, not a numeric UID.
-            ("ID alone", '<SubTree ID="PickSub"/>', None),
-            ("ID beside _uid", '<SubTree ID="PickSub" _uid="4"/>', 4),
-            ("non-numeric", '<Action _uid="abc"/>', None),
-            ("missing", '<Action/>', None),
-        ]
-        for label, xml, expected in cases:
-            with self.subTest(label):
-                self.assertEqual(layout.extract_uid(ET.fromstring(xml)), expected)
 
 
 class ParseStatusTest(unittest.TestCase):
@@ -79,497 +57,50 @@ class ParseStatusTest(unittest.TestCase):
                 self.assertEqual(parse_status(buf), expected)
 
 
-class LayoutTest(GatewayTestCase):
-    def test_crossdoor_unrolls_with_unique_string_ids(self):
-        self.gw._parse_layout(mock_robot.CROSSDOOR.xml)
-        self.assertEqual(self.gw.tree_structure["root_tree_id"], "MainTree")
-        uids = collect_uids(self.gw.tree_structure)
-        self.assertEqual(sorted(uids), sorted(mock_robot.CROSSDOOR.uids))
-        self.assertEqual(len(uids), self.gw._node_seq)   # every node got a stable id + uid
-        ids = collect_ids(self.gw.tree_structure)
-        self.assertEqual(len(ids), len(set(ids)))
-        msg = json.loads(self.gw._layout_json)
-        self.assertEqual(msg["type"], "layout")
-        self.assertEqual(msg["data"]["root_tree_id"], "MainTree")
-        self.assertTrue(all(isinstance(i, str) for i in collect_ids(msg["data"])))
-
-    def test_a_rehandshake_gets_fresh_node_ids(self):
-        # Ids that restarted per tree would let the dashboard's keyed join match
-        # a new tree's nodes onto the old tree's cards, keeping the old labels.
-        self.gw._parse_layout(mock_robot.CROSSDOOR.xml)
-        first = set(collect_ids(self.gw.tree_structure))
-        self.gw._parse_layout(MODEL_LESS_XML)
-        second = set(collect_ids(self.gw.tree_structure))
-        self.assertTrue(first)
-        self.assertTrue(second)
-        self.assertEqual(first & second, set())
-
-    def test_root_tree_selection(self):
-        two_blocks = ('<BehaviorTree ID="First"><Action _uid="1"/></BehaviorTree>'
-                      '<BehaviorTree ID="Second"><Action _uid="2"/></BehaviorTree></root>')
-        cases = [
-            ("main_tree_to_execute honoured",
-             '<root BTCPP_format="4" main_tree_to_execute="Second">' + two_blocks, "Second"),
-            ("first block without entrypoint", '<root BTCPP_format="4">' + two_blocks, "First"),
-            ("missing entrypoint falls back to first",
-             '<root BTCPP_format="4" main_tree_to_execute="Nope">'
-             '<BehaviorTree ID="First"><Action _uid="1"/></BehaviorTree></root>', "First"),
-        ]
-        for label, xml, expected in cases:
-            with self.subTest(label):
-                self.gw._parse_layout(xml)
-                self.assertEqual(self.gw.tree_structure["root_tree_id"], expected)
-
-    def test_unusable_xml_raises(self):
-        cases = [
-            ("no BehaviorTree", '<root BTCPP_format="4"></root>'),
-            ("empty BehaviorTree",
-             '<root BTCPP_format="4"><BehaviorTree ID="X"></BehaviorTree></root>'),
-        ]
-        for label, xml in cases:
-            with self.subTest(label), self.assertRaises(ValueError):
-                self.gw._parse_layout(xml)
-
-    def test_subtree_stitched_in_place(self):
-        self.gw._parse_layout(mock_robot.CROSSDOOR.xml)
-        subtree_ref = _find(self.gw.tree_structure, 7)   # <SubTree ID="DoorClosed" _uid="7"/>
-        self.assertTrue(subtree_ref["is_subtree_root"])
-        self.assertEqual(subtree_ref["subtree_id"], "DoorClosed")
-        self.assertEqual(subtree_ref["category"], "SubTree")
-        # its single child is the DoorClosed definition root (Fallback "tryOpen" _uid="8")
-        self.assertEqual(subtree_ref["children"][0]["uid"], 8)
-
-    def test_cyclic_subtree_terminates(self):
-        xml = ('<root BTCPP_format="4" main_tree_to_execute="A">'
-               '<BehaviorTree ID="A"><SubTree ID="A" _uid="1"/></BehaviorTree></root>')
-        self.gw._parse_layout(xml)                       # must not recurse forever
-        top = self.gw.tree_structure
-        self.assertTrue(top["is_subtree_root"])
-        # expanded exactly once; the cycle guard stops the inner copy from expanding
-        self.assertEqual(top["children"][0]["children"], [])
-
-
-class PortsTest(GatewayTestCase):
-    """Ports ride along with the layout so the dashboard can draw them."""
-
-    def test_crossdoor_ports(self):
-        self.gw._parse_layout(mock_robot.CROSSDOOR.xml)
-        cases = [
-            (2, {"code": "door_open:=false"}),           # <Script code="door_open:=false"/>
-            (10, {"num_attempts": "5"}),                 # <RetryUntilSuccessful num_attempts="5"/>
-            (1, {}),                                     # name + _uid only
-            (9, {}),                                     # inside a subtree, still bare
-            # A <SubTree>'s remapping is the author's writing, so it shows; ID
-            # and _fullpath are how klein stitches and names the instance.
-            (7, {"door_open": "{door_open}"}),
-            # Both ends of the scripting-hook family, as the mock publishes them.
-            (6, {"_skipIf": "door_open"}),
-            (11, {"_onSuccess": "lock_status:='picked'"}),
-        ]
-        for uid, expected in cases:
-            with self.subTest(uid=uid):
-                self.assertEqual(_find(self.gw.tree_structure, uid)["ports"], expected)
-        subtree_ref = _find(self.gw.tree_structure, 7)
-        self.assertEqual(subtree_ref["subtree_id"], "DoorClosed")
-        self.assertEqual(subtree_ref["board"], "DoorClosed::7")
-
-    def test_inline_ports(self):
-        cases = [
-            ("document order",
-             '<Switch2 name="pick" _uid="1" variable="{mode}" case_1="GO" case_2="STOP"/>',
-             [("variable", "{mode}"), ("case_1", "GO"), ("case_2", "STOP")]),
-            # _skipIf and friends are written by the tree author, unlike _uid.
-            ("scripting hook",
-             '<Wait name="hold" _uid="1" _skipIf="done" msec="500"/>',
-             [("_skipIf", "done"), ("msec", "500")]),
-        ]
-        for label, node, expected in cases:
-            with self.subTest(label):
-                self.gw._parse_layout(
-                    '<root BTCPP_format="4" main_tree_to_execute="A"><BehaviorTree ID="A">'
-                    + node + '</BehaviorTree></root>')
-                self.assertEqual(list(self.gw.tree_structure["ports"].items()), expected)
-
-    def bindings(self, xml):
-        """``{uid: [(port, dir, board, key)]}`` for every node with a binding."""
-        self.gw._parse_layout(xml)
-        found = {}
-
-        def walk(node):
-            if node["bindings"]:
-                found[node["uid"]] = [(b["port"], b["dir"], b["board"], b["key"])
-                                      for b in node["bindings"]]
-            for child in node["children"]:
-                walk(child)
-        walk(self.gw.tree_structure)
-        return found
-
-    def test_bindings_resolve_to_the_board_holding_the_key(self):
-        # References below are BehaviorTree.CPP files. The directions come from
-        # each model's input_port/output_port/inout_port (xml_parsing.cpp :: addNodeModelToXML).
-        t11 = (Path(__file__).parents[1] / "fixtures" / "t11_filelogger2.btlog").read_bytes()
-        cases = {
-            "crossdoor (mock)": (mock_robot.CROSSDOOR.xml, {
-                # Script code: `x:=` writes x (script_node.h :: loadExecutor, operators.hpp :: ExprAssignment).
-                2: [("code", "out", "MainTree", "door_open")],
-                3: [("pos", "out", "MainTree", "robot_position")],
-                # A hook reads its bare names on the node's own board (bt_factory.cpp :: instantiateTreeNode).
-                6: [("_skipIf", "in", "MainTree", "door_open")],
-                # A {key} remap names the parent's key (xml_parsing.cpp :: recursivelyCreateSubtree);
-                # nothing inside writes or reads it, so the direction is unknown.
-                7: [("door_open", "inout", "MainTree", "door_open")],
-                # Not remapped: created on the subtree's own board (Blackboard::createEntryImpl).
-                11: [("_onSuccess", "out", "DoorClosed::7", "lock_status")],
-                # speed="0.35", timeout_ms="2500" are literals: no entry.
-                13: [("goal", "in", "MainTree", "goal")],
-            }),
-            "patrol (mock)": (mock_robot.PATROL.xml, {
-                # The remap's direction is what the subtree does with it: MoveTo reads.
-                3: [("waypoint", "in", "PatrolTree", "next_waypoint")],
-                # {waypoint} is remapped, so it lives on the parent (Blackboard::createEntryImpl).
-                5: [("goal", "in", "PatrolTree", "next_waypoint")],
-                # dwell_msec="1500" on the SubTree is a literal stored on the
-                # subtree's board (recursivelyCreateSubtree), and found there first
-                # (Blackboard::getEntry).
-                6: [("msec", "in", "VisitWaypoints::3", "dwell_msec")],
-            }),
-            "t11 (real FULLTREE)": (btlog.read_btlog(t11).xml, {
-                2: [("code", "out", "MainTree", "door_open")],
-                3: [("pos", "out", "MainTree", "pos_2D"),
-                    ("vec_double", "out", "MainTree", "doubles"),
-                    ("vec_string", "out", "MainTree", "strings"),
-                    ("waypoints", "out", "MainTree", "waypoints")],
-                # The inner _onSuccess writes door_open, so the remap is out.
-                7: [("door_open", "out", "MainTree", "door_open")],
-                8: [("_onSuccess", "out", "MainTree", "door_open")],
-            }),
-            "remap kinds": (REMAP_KINDS_XML, {
-                2: [("code", "out", "Main", k) for k in ("a", "b", "c", "root_k", "target", "speed")],
-                3: [("x", "inout", "Main", "a")],
-                # x := x + 1 reads and writes; x is remapped to {a}.
-                5: [("code", "inout", "Main", "a"),
-                    # _autoremap sends b to the parent (Blackboard::getEntry, createEntryImpl)...
-                    ("code", "inout", "Main", "b"),
-                    # ...but never a private key (blackboard.cpp :: IsPrivateKey).
-                    ("code", "out", "Inner::3", "_p"),
-                    ("code", "out", "Main", "lit2"),
-                    # A literal port stays local even with _autoremap (recursivelyCreateSubtree).
-                    ("code", "in", "Inner::3", "lit")],
-                # `=` assigns; `==` compares (script_tokenizer.cpp matchTwoCharOp).
-                6: [("code", "out", "Main", "c"), ("code", "in", "Inner::3", "num"),
-                    ("_skipIf", "in", "Main", "b")],
-                # {@k} goes to the root board (Blackboard::getEntry); {=} is {port}
-                # (recursivelyCreateSubtree); z="=" is a literal on a SubTree.
-                7: [("w", "out", "Main", "root_k"), ("y", "out", "Main", "y")],
-                9: [("code", "out", "Main", "y"), ("code", "out", "Main", "root_k"),
-                    ("code", "out", "Main", "g"), ("code", "out", "Inner2::7", "target"),
-                    ("code", "out", "Inner2::7", "speed")],
-                # {=} and = on an ordinary node are the port's own name
-                # (TreeNode::getRemappedKey); label="plain" is a literal.
-                10: [("target", "in", "Inner2::7", "target"),
-                     ("speed", "in", "Inner2::7", "speed"),
-                     ("note", "out", "Main", "g")],
-                # output_key holds a key name (set_blackboard_node.h tick).
-                11: [("output_key", "out", "Main", "sb"), ("value", "in", "Main", "a")],
-            }),
-            "hooks and key-name ports": (HOOKS_XML, {
-                2: [("code", "out", "Main", k) for k in ("k", "e", "u", "f1", "f2")],
-                # A SubTree's hooks run on the parent's board: they go into its
-                # config, whose blackboard is the parent's (XMLParser::PImpl::createNodeFromXML).
-                3: [("_skipIf", "in", "Main", "k"), ("_while", "in", "Main", "k"),
-                    ("_onSuccess", "out", "Main", "done")],
-                4: [("code", "out", "S::3", "inner")],
-                5: [("code", "in", "Main", "k")],
-                6: [("if", "in", "Main", "e")],           # else="FAILURE" is a literal
-                7: [("_failureIf", "in", "Main", "f1"), ("_successIf", "in", "Main", "f2"),
-                    ("_onHalted", "out", "Main", "hh"), ("_onFailure", "out", "Main", "ff"),
-                    ("_post", "out", "Main", "pp")],
-                # Plain key names (unset_blackboard_node.h, updated_action.cpp,
-                # updated_decorator.cpp).
-                8: [("key", "out", "Main", "u")],
-                10: [("entry", "in", "Main", "k")],
-                11: [("entry", "in", "Main", "e")],
-                15: [("entry", "in", "Main", "k")],
-            }),
-        }
-        for label, (xml, expected) in cases.items():
-            with self.subTest(label):
-                self.assertEqual(self.bindings(xml), expected)
-
-    def test_script_references(self):
-        cases = [
-            ("door_open:=false", [("door_open", "out")]),
-            ("a = b == c", [("a", "out"), ("b", "in"), ("c", "in")]),
-            ("n += 1; m != 2 && m >= 0", [("n", "inout"), ("m", "in"), ("m", "in")]),
-            # Strings, numbers, booleans and ALL_CAPS enums are not keys.
-            ("msg := 'x := y'; ok := true", [("msg", "out"), ("ok", "out")]),
-            ("state == RUNNING ? 0x1F : 2.5e3", [("state", "in")]),
-            ("@g := 3foo", [("@g", "out")]),
-        ]
-        for code, expected in cases:
-            with self.subTest(code):
-                self.assertEqual([r[:2] for r in layout.script_references(code)], expected)
-
-    def test_each_binding_says_where_its_port_names_the_key(self):
-        """``at``: the braces of a {key} or a remap's {outer}, a whole `=` or
-        {=}, a key-name port trimmed, and each name in a script, also inside a
-        subtree whose two names are remapped to other keys outside."""
-        self.gw._parse_layout(SPANS_XML)
-        found = {}
-
-        def walk(node):
-            for b in node["bindings"]:
-                found.setdefault(node["uid"], []).append((b["port"], b["key"], b["at"]))
-            for child in node["children"]:
-                walk(child)
-        walk(self.gw.tree_structure)
-        self.assertEqual(found, {
-            2: [("p", "a", [[1, 4]]), ("q", "b", [[0, 3]])],
-            3: [("code", "a", [[0, 1], [9, 10]]), ("code", "b", [[5, 6]])],
-            4: [("output_key", "sb", [[1, 3]]), ("value", "a", [[0, 3]])],
-            5: [("target", "target", [[0, 1]]), ("speed", "speed", [[0, 3]])],
-        })
-
-    def test_binding_spans_name_their_key_in_every_tree(self):
-        """In every mock tree and fixture: each span lies within its port's
-        value and reads as a name, {name}, @name, = or {=}; on the node's own
-        board that name (less an @) is the key (= and {=}: the port)."""
-        trees = {name: tree.xml for name, tree in mock_robot.TREES.items()}
-        for path in sorted((Path(__file__).parents[1] / "fixtures").glob("*.btlog")):
-            trees[path.name] = btlog.read_btlog(path.read_bytes()).xml
-        trees.update(remap_kinds=REMAP_KINDS_XML, hooks=HOOKS_XML, spans=SPANS_XML)
-        for label, xml in trees.items():
-            self.gw._parse_layout(xml)
-            spans = 0
-
-            def walk(node, board):
-                nonlocal spans
-                for b in node["bindings"]:
-                    value = node["ports"][b["port"]]
-                    for start, end in b["at"]:
-                        spans += 1
-                        with self.subTest(label, uid=node["uid"], binding=b):
-                            self.assertTrue(0 <= start < end <= len(value))
-                            name = value[start:end]
-                            if name[:1] == "{" and name[-1:] == "}":
-                                name = name[1:-1]
-                            self.assertRegex(name, r"^(=|@?[A-Za-z_]\w*)$")
-                            if b["board"] == board:
-                                self.assertEqual(b["key"], b["port"] if name == "=" else name.lstrip("@"))
-                inner = node.get("board", board) if node.get("is_subtree_root") else board
-                for child in node["children"]:
-                    walk(child, inner)
-            walk(self.gw.tree_structure, self.gw.tree_structure["board"])
-            self.assertGreater(spans, 0, label)
-
-
-# Real BehaviorTree.CPP 4 FULLTREE output (WriteTreeToXML, after createTree;
-# names dropped) for a tree using every remap kind. Running it, BT.CPP held
-# exactly these keys: "" (Main): a b c g lit2 root_k sb speed target y;
-# Inner::3: _p lit num; Inner2::7: speed target z (z is an unread literal).
-# Two edits: FULLTREE drops `_autoremap` (a reserved attribute,
-# basic_types.cpp :: IsReservedAttribute), so it is put back here, and the SetBlackboard model is
-# copied from the builtins t11 publishes. Root Script's target:= and speed:=
-# land on Main, Inner2's on Inner2::7: no autoremap there.
-REMAP_KINDS_XML = """<root BTCPP_format="4">
-  <BehaviorTree ID="Main" _fullpath="">
-    <Sequence _uid="1">
-      <Script _uid="2" code="a:=1; b:=2; c:=3; root_k:=7; target:='t'; speed:='s'"/>
-      <SubTree ID="Inner" _fullpath="Inner::3" _uid="3" _autoremap="true" num="5" lit="hello" x="{a}"/>
-      <SubTree ID="Inner2" _fullpath="Inner2::7" _uid="7" w="{@root_k}" z="=" y="{=}"/>
-      <SetBlackboard _uid="11" output_key="sb" value="{a}"/>
-    </Sequence>
-  </BehaviorTree>
-  <BehaviorTree ID="Inner" _fullpath="Inner::3">
-    <Sequence _uid="4">
-      <Script _uid="5" code="x := x + 1; b := b + 1; _p := 1; lit2 := lit"/>
-      <Script _uid="6" code="c = num" _skipIf="b == 99"/>
-    </Sequence>
-  </BehaviorTree>
-  <BehaviorTree ID="Inner2" _fullpath="Inner2::7">
-    <Sequence _uid="8">
-      <Script _uid="9" code="y := 1; w := 4; @g := 3; target := 'u'; speed := 'v'"/>
-      <Report _uid="10" target="{=}" speed="=" label="plain" note="{@g}"/>
-    </Sequence>
-  </BehaviorTree>
-  <TreeNodesModel>
-    <Action ID="Report">
-      <input_port name="label" type="std::string"/>
-      <input_port name="speed" type="std::string"/>
-      <output_port name="note" type="int"/>
-      <input_port name="target" type="std::string"/>
-    </Action>
-    <Action ID="SetBlackboard">
-      <inout_port name="output_key" type="BT::AnyTypeAllowed"/>
-      <input_port name="value" type="BT::AnyTypeAllowed"/>
-    </Action>
-  </TreeNodesModel>
-</root>"""
-
-
-# A subtree's script names two keys remapped to other names outside, beside a
-# {key} with an outer space, a key-name port with spaces, `=` and {=}.
-SPANS_XML = """<root BTCPP_format="4">
-  <BehaviorTree ID="Main" _fullpath="">
-    <Sequence _uid="1">
-      <SubTree ID="S" _fullpath="S::2" _uid="2" p=" {a}" q="{b}"/>
-      <SetBlackboard _uid="4" output_key=" sb " value="{a}"/>
-      <Report _uid="5" target="=" speed="{=}"/>
-    </Sequence>
-  </BehaviorTree>
-  <BehaviorTree ID="S" _fullpath="S::2">
-    <Script _uid="3" code="p := q + p"/>
-  </BehaviorTree>
-</root>"""
-
-
-# Real BehaviorTree.CPP 4 FULLTREE output for every hook and the builtins whose
-# port holds a script or a key name (names and <TreeNodesModel> dropped).
-# After a run BT.CPP held "" (Main): done e f1 f2 k pp; S::3: inner (u was
-# unset; _onHalted and _onFailure never ran).
-HOOKS_XML = """<root BTCPP_format="4">
-  <BehaviorTree ID="Main" _fullpath="">
-    <Sequence _uid="1">
-      <Script _uid="2" code="k:=1; e:=0; u:=1; f1:=false; f2:=false"/>
-      <SubTree ID="S" _fullpath="S::3" _uid="3" _skipIf="k == 9" _while="k &lt; 5" _onSuccess="done := true"/>
-      <ScriptCondition _uid="5" code="k != 0"/>
-      <Precondition _uid="6" if="e == 0" else="FAILURE">
-        <AlwaysSuccess _uid="7" _failureIf="f1" _successIf="f2" _onHalted="hh := 1" _onFailure="ff := 1" _post="pp := 1"/>
-      </Precondition>
-      <UnsetBlackboard _uid="8" key="u"/>
-      <ForceSuccess _uid="9"><WasEntryUpdated _uid="10" entry="k"/></ForceSuccess>
-      <SkipUnlessUpdated _uid="11" entry="e"><AlwaysSuccess _uid="12"/></SkipUnlessUpdated>
-      <ForceSuccess _uid="13">
-        <Timeout _uid="14" msec="5">
-          <WaitValueUpdate _uid="15" entry="k"><AlwaysSuccess _uid="16"/></WaitValueUpdate>
-        </Timeout>
-      </ForceSuccess>
-    </Sequence>
-  </BehaviorTree>
-  <BehaviorTree ID="S" _fullpath="S::3">
-    <Script _uid="4" code="inner := 1"/>
-  </BehaviorTree>
-</root>"""
-
-MODEL_LESS_XML = """<root BTCPP_format="4" main_tree_to_execute="MainTree">
-  <BehaviorTree ID="MainTree">
-    <Sequence _uid="1">
-      <Inverter _uid="2"><Dock _uid="3" pad="1"/></Inverter>
-      <Sequence _uid="4"><Wait _uid="5" msec="500"/></Sequence>
-    </Sequence>
-  </BehaviorTree>
-</root>"""
-
-
-class NodeCategoryTest(GatewayTestCase):
-    """Every node carries the category the robot declared for it, so the
-    dashboard can style Controls, Decorators, Conditions and Actions apart."""
-
-    def categories(self, node, acc=None):
-        acc = {} if acc is None else acc
-        acc[node["uid"]] = node["category"]
-        for child in node["children"]:
-            self.categories(child, acc)
-        return acc
-
-    def parse(self, xml):
-        self.gw._parse_layout(xml)
-        return self.categories(self.gw.tree_structure)
-
-    def test_model_section_decides_every_category(self):
-        found = self.parse(mock_robot.CROSSDOOR.xml)
-        cases = [
-            (1, "Control"),       # Sequence
-            (5, "Decorator"),     # Inverter
-            (6, "Condition"),     # IsDoorClosed
-            (7, "SubTree"),       # the <SubTree> reference
-            (10, "Decorator"),    # Retry, inside the subtree
-            # OpenDoor and SmashDoor are both childless; the robot registers one
-            # as an Action and the other as a Condition. Only the model knows.
-            (9, "Action"),
-            (12, "Condition"),
-        ]
-        for uid, expected in cases:
-            with self.subTest(uid=uid):
-                self.assertEqual(found[uid], expected)
-
-    def test_a_robot_with_no_model_section(self):
-        # The builtin table covers the standard nodes; a custom one is
-        # Undefined, never guessed.
-        found = self.parse(MODEL_LESS_XML)
-        cases = [
-            (1, "Control"),
-            (2, "Decorator"),
-            (4, "Control"),       # a one-child Sequence is still Control
-            (3, "Undefined"),     # custom Dock, 0 children
-            (5, "Undefined"),     # custom Wait, 0 children
-        ]
-        for uid, expected in cases:
-            with self.subTest(uid=uid):
-                self.assertEqual(found[uid], expected)
-
-    def test_explicit_category_tag_is_believed(self):
-        # The editor spelling: the tag IS the category and ID is the
-        # registration name. See docs/protocol.md.
-        self.parse(REAL_SHAPED_XML)
-        self.assertEqual(_find(self.gw.tree_structure, 47)["category"], "Action")
-
-    def test_model_map_is_rebuilt_per_handshake(self):
-        self.parse(mock_robot.CROSSDOOR.xml)
-        found = self.parse(MODEL_LESS_XML)      # a different robot, no model
-        self.assertEqual(self.gw._node_categories, {})
-        self.assertEqual(found[3], "Undefined")
-
-    def test_malformed_model_entries_are_skipped(self):
-        xml = """<root BTCPP_format="4">
-          <BehaviorTree ID="MainTree"><Dock _uid="1"/></BehaviorTree>
-          <TreeNodesModel>
-            <Action/>
-            <NotACategory ID="Dock"/>
-            <MetadataFields><Metadata author="x"/></MetadataFields>
-          </TreeNodesModel>
-        </root>"""
-        self.parse(xml)
-        self.assertEqual(self.gw._node_categories, {})
-        self.assertEqual(self.gw.tree_structure["category"], "Undefined")
-
-    def test_category_rides_in_the_cached_layout_frame(self):
-        self.parse(mock_robot.CROSSDOOR.xml)
-        data = json.loads(self.gw._layout_json)["data"]
-        self.assertEqual(data["category"], "Control")
-        self.assertEqual(data["type"], "Sequence")   # registration name untouched
-
-
-class StaticAssetsTest(GatewayTestCase):
+class StaticAssetsTest(unittest.TestCase):
     def setUp(self):
-        super().setUp()
-        self.gw._load_static()
+        self.routes = Routes(gateway.STATIC_DIR)
+        self.routes.load()
 
     def request(self, path):
-        return answer(self.gw, path)
+        return answer(self.routes, path)
 
-    def test_real_assets_loaded(self):
-        self.assertIn("/index.html", self.gw._static)
-        self.assertIn("/styles.css", self.gw._static)
-        self.assertIn("/app.js", self.gw._static)
-        self.assertIn("/d3.v7.min.js", self.gw._static)
-        html_body, html_ct = self.gw._static["/index.html"]
-        self.assertIn(html_ct, "text/html; charset=utf-8")
-        self.assertIn(b"klein", html_body)
-        _css_body, css_ct = self.gw._static["/styles.css"]
-        self.assertEqual(css_ct, "text/css; charset=utf-8")
-        _js_body, js_ct = self.gw._static["/app.js"]
-        self.assertEqual(js_ct, "text/javascript; charset=utf-8")
-        d3_body, d3_ct = self.gw._static["/d3.v7.min.js"]
-        self.assertEqual(d3_ct, "text/javascript; charset=utf-8")
-        self.assertGreater(len(d3_body), 200000)
+    def test_every_static_file_served(self):
+        # Every file in static/ is served at "/<name>" with its type, so a new
+        # script needs no list; the package ships the whole directory.
+        files = sorted(gateway.STATIC_DIR.iterdir())
+        self.assertGreaterEqual({f.name for f in files},
+                                {"index.html", "styles.css", "d3.v7.min.js", "app.js"})
+        for f in files:
+            with self.subTest(f.name):
+                r = self.request(f"/{f.name}")
+                self.assertEqual(r.status_code, 200)
+                self.assertEqual(r.body, f.read_bytes())
+                self.assertEqual(r.headers["Content-Type"], routes.CONTENT_TYPES[f.suffix])
+        pyproject = (Path(__file__).resolve().parents[2] / "pyproject.toml").read_text()
+        self.assertIn('klein = ["static/*"]', pyproject)
+
+    def test_every_script_reference_resolves(self):
+        # The page's <script src>s and every relative import between the
+        # dashboard's modules name a file in static/.
+        static = gateway.STATIC_DIR
+        refs = [("index.html", src) for src in
+                re.findall(r'<script[^>]*\ssrc="/([^"]+)"', (static / "index.html").read_text())]
+        for js in sorted(static.glob("*.js")):
+            refs += [(js.name, name) for name in
+                     re.findall(r'^\s*(?:import|export)\b[^;]*?\bfrom\s+"\./([^"]+)"',
+                                js.read_text(), re.M)]
+        self.assertIn(("index.html", "app.js"), refs)
+        for where, name in refs:
+            with self.subTest(f"{where} -> {name}"):
+                self.assertTrue((static / name).is_file())
 
     def test_routes(self):
         self.assertIsNone(self.request("/ws"))          # deferred to the upgrade
+        index = (gateway.STATIC_DIR / "index.html").read_bytes()
         cases = [
-            ("root serves index", "/", 200, self.gw._static["/index.html"][0]),
-            ("query string stripped", "/index.html?v=2", 200,
-             self.gw._static["/index.html"][0]),
+            ("root serves index", "/", 200, index),
+            ("query string stripped", "/index.html?v=2", 200, index),
             ("unknown path", "/nope", 404, b"not found"),
         ]
         for label, path, status, body in cases:
@@ -579,29 +110,18 @@ class StaticAssetsTest(GatewayTestCase):
                 self.assertEqual(r.body, body)
         self.assertEqual(self.request("/").headers["Content-Type"], "text/html; charset=utf-8")
 
-    def test_recording_model_scripts_served_and_packaged(self):
-        pyproject = (Path(__file__).resolve().parents[2] / "pyproject.toml").read_text()
-        html = self.gw._static["/index.html"][0].decode()
-        for name in ("recording.js", "cursor.js", "drawer.js", "timeline.js", "overview.js"):
-            with self.subTest(name):
-                r = self.request(f"/{name}")
-                self.assertEqual(r.status_code, 200)
-                self.assertEqual(r.headers["Content-Type"], "text/javascript; charset=utf-8")
-                self.assertIn(f'"static/{name}"', pyproject)
-                # Before app.js, which builds its store at load time.
-                self.assertLess(html.index(f'src="/{name}"'), html.index('src="/app.js"'))
-
     def test_missing_files_fall_back(self):
-        # Simulate a package where none of the static assets are bundled.
-        with mock.patch.object(gateway, "_load_asset", return_value=None):
-            fresh = new_gateway(self)
-            err = io.StringIO()
-            with contextlib.redirect_stderr(err):
-                fresh._load_static()
-        self.assertEqual(fresh._static["/index.html"][0], gateway._INDEX_FALLBACK)
-        self.assertNotIn("/styles.css", fresh._static)
-        self.assertNotIn("/app.js", fresh._static)
-        self.assertNotIn("/d3.v7.min.js", fresh._static)
+        # A package where none of the static assets are bundled.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        empty = Routes(tmp.name)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            empty.load()
+        self.assertEqual(answer(empty, "/").body, routes.INDEX_FALLBACK)
+        for path in ("/styles.css", "/app.js", "/d3.v7.min.js"):
+            with self.subTest(path):
+                self.assertEqual(answer(empty, path).status_code, 404)
         # Both render-critical assets are reported missing.
         self.assertIn("d3.v7.min.js not bundled", err.getvalue())
         self.assertIn("app.js not bundled", err.getvalue())
@@ -609,74 +129,15 @@ class StaticAssetsTest(GatewayTestCase):
 
 class RobotStateTest(GatewayTestCase):
     def test_initial_state_is_disconnected(self):
-        msg = json.loads(self.gw._robot_state_json)
-        self.assertEqual(msg["type"], "robot")
-        self.assertFalse(msg["connected"])
-        self.assertFalse(self.gw._robot_connected)
-        self.assertEqual(msg["recording"], "off")       # --record-buffer 0
+        self.assertEqual(self.gw.robot_state,
+                         {"connected": False, "recording": "off",      # --record-buffer 0
+                          "detail": "Connecting to robot at tcp://127.0.0.1:1667…"})
         recording = new_gateway(self, recording=Recording())
-        self.assertEqual(json.loads(recording._robot_state_json)["recording"], "on")
-
-    def test_a_change_rebuilds_the_cached_message_and_a_repeat_does_not(self):
-        self.gw._set_robot_state(True, "Connected to robot at tcp://x")
-        self.assertTrue(self.gw._robot_connected)
-        msg = json.loads(self.gw._robot_state_json)
-        self.assertTrue(msg["connected"])
-        self.assertEqual(msg["detail"], "Connected to robot at tcp://x")
-        cached = self.gw._robot_state_json
-        self.gw._set_robot_state(True, "Connected to robot at tcp://x")   # not rebroadcast
-        self.assertIs(self.gw._robot_state_json, cached)
+        self.assertEqual(recording.robot_state["recording"], "on")
 
 
-class BlackboardTest(GatewayTestCase):
-    """Blackboard name discovery and msgpack decoding."""
-
-    def test_blackboard_names(self):
-        cases = [
-            # The mock's XML carries "DoorClosed::7" on both the <BehaviorTree>
-            # block and the <SubTree> element referencing it.
-            ("prefers _fullpath, dedupes the reference", mock_robot.CROSSDOOR.xml,
-             ["MainTree", "DoorClosed::7"]),
-            ("tree ID without _fullpath", """<root BTCPP_format="4">
-              <BehaviorTree ID="MainTree"><Sequence _uid="1"/></BehaviorTree>
-              <BehaviorTree ID="Helper"><Sequence _uid="2"/></BehaviorTree>
-            </root>""", ["MainTree", "Helper"]),
-            # What a real robot sends: the root subtree's path is "", and its
-            # blackboard is registered under the tree ID instead.
-            ("root with empty _fullpath", """<root BTCPP_format="4">
-              <BehaviorTree ID="MainTree" _fullpath=""><Sequence _uid="1"/></BehaviorTree>
-            </root>""", ["MainTree"]),
-            # A FULLTREE reply also declares the available node types; the
-            # <SubTree> there is a model, not an instance with a blackboard.
-            ("TreeNodesModel is not an instance", """<root BTCPP_format="4">
-              <BehaviorTree ID="MainTree" _fullpath=""><Sequence _uid="1"/></BehaviorTree>
-              <TreeNodesModel>
-                <SubTree ID="SubTree"/>
-                <Action ID="OpenDoor"/>
-              </TreeNodesModel>
-            </root>""", ["MainTree"]),
-            # Two instances of the same subtree have distinct blackboards.
-            ("nested instance paths", """<root BTCPP_format="4">
-              <BehaviorTree ID="MainTree" _fullpath="MainTree">
-                <Sequence _uid="1">
-                  <SubTree ID="Nav" _uid="2" _fullpath="Nav::2"/>
-                  <SubTree ID="Nav" _uid="3" _fullpath="second_nav"/>
-                </Sequence>
-              </BehaviorTree>
-              <BehaviorTree ID="Nav" _fullpath="Nav::2"><Sequence _uid="4"/></BehaviorTree>
-            </root>""", ["MainTree", "Nav::2", "second_nav"]),
-        ]
-        for label, xml, expected in cases:
-            with self.subTest(label):
-                self.assertEqual(
-                    layout.extract_blackboard_names(ET.fromstring(xml)), expected)
-
-    def test_parse_layout_resets_the_request_and_the_cache(self):
-        self.gw._blackboard_json = '{"type": "blackboard", "data": {"stale": {}}}'
-        self.gw._parse_layout(mock_robot.CROSSDOOR.xml)
-        self.assertEqual(self.gw._blackboard_names, ["MainTree", "DoorClosed::7"])
-        self.assertEqual(self.gw._blackboard_request, b"MainTree;DoorClosed::7")
-        self.assertIsNone(self.gw._blackboard_json)
+class BlackboardTest(unittest.TestCase):
+    """Decoding the robot's msgpack blackboards."""
 
     def test_decoded_values(self):
         cases = [
@@ -748,96 +209,9 @@ class BlackboardTest(GatewayTestCase):
         self.assertIsInstance(decoded["blob"], str)
 
 
-# A trimmed copy of a real ROS 2 mission tree's FULLTREE reply. It carries the
-# three shapes that matter: one subtree ID defined more than once with a
-# different _fullpath per instance, a nested instance path, and an instance
-# named in the XML whose path therefore carries no ::uid at all.
-REAL_SHAPED_XML = """<root BTCPP_format="4" main_tree_to_execute="MissionBehaviorTree">
-  <BehaviorTree ID="Pick_SubTree" _fullpath="Pick_SubTree::12">
-    <Sequence _uid="13">
-      <SubTree ID="MoveLift" _uid="17"
-               _fullpath="Pick_SubTree::12/MoveLift::17"/>
-    </Sequence>
-  </BehaviorTree>
-  <BehaviorTree ID="MissionBehaviorTree" _fullpath="">
-    <Sequence _uid="1">
-      <SubTree ID="Pick_SubTree" _uid="12" _fullpath="Pick_SubTree::12"/>
-      <SubTree ID="MoveLift" _uid="46" _fullpath="park_sequence"/>
-    </Sequence>
-  </BehaviorTree>
-  <BehaviorTree ID="MoveLift" _fullpath="park_sequence">
-    <Action ID="SetLiftHeight" _uid="47"/>
-  </BehaviorTree>
-</root>"""
-
-
-class BoardOnLayoutTest(GatewayTestCase):
-    """Each layout node carries the blackboard its subtree instance owns.
-
-    The dashboard pairs a board with the node that owns it — to indent nested
-    boards under their parent, and to fly the camera to a board's card. The name
-    alone cannot do that (``park_sequence`` carries no uid), so the pairing has
-    to come from the layout.
-    """
-
-    @staticmethod
-    def boards(node, depth=0):
-        """Walk the layout the way the dashboard does: [(board, depth, uid)]."""
-        found = []
-        board = node.get("board")
-        if board:
-            found.append((board, depth, node.get("uid")))
-        for child in node.get("children", []):
-            found.extend(BoardOnLayoutTest.boards(child, depth + 1 if board else depth))
-        return found
-
-    def test_board_fallbacks(self):
-        cases = [
-            ("subtree without _fullpath uses its ID", """<root BTCPP_format="4">
-              <BehaviorTree ID="MainTree">
-                <Sequence _uid="1"><SubTree ID="Nav" _uid="2"/></Sequence>
-              </BehaviorTree>
-              <BehaviorTree ID="Nav"><Action ID="Go" _uid="3"/></BehaviorTree>
-            </root>""", lambda tree: tree["children"][0], "MainTree", "Nav"),
-            ("root board from its own block", mock_robot.CROSSDOOR.xml,
-             lambda tree: tree, "MainTree", "MainTree"),
-            # The root block's _fullpath is empty, and main_tree_to_execute names
-            # the *second* block: taking the first block's path would label the
-            # root "Pick_SubTree::12".
-            ("root board is the entrypoint's tree ID", REAL_SHAPED_XML,
-             lambda tree: tree, "MissionBehaviorTree", "MissionBehaviorTree"),
-        ]
-        for label, xml, node, root_tree_id, board in cases:
-            with self.subTest(label):
-                self.gw._parse_layout(xml)
-                self.assertEqual(self.gw.tree_structure["root_tree_id"], root_tree_id)
-                self.assertEqual(node(self.gw.tree_structure)["board"], board)
-
-    def test_repeated_subtree_id_keeps_per_instance_paths(self):
-        self.gw._parse_layout(REAL_SHAPED_XML)
-        found = self.boards(self.gw.tree_structure)
-        self.assertEqual(found, [
-            ("MissionBehaviorTree", 0, 1),
-            ("Pick_SubTree::12", 1, 12),
-            ("Pick_SubTree::12/MoveLift::17", 2, 17),
-            ("park_sequence", 1, 46),           # named instance: no ::uid in the path
-        ])
-
-    def test_every_requested_board_resolves_to_exactly_one_node(self):
-        # The invariant the whole panel rests on: what klein asks the robot for
-        # and what it can place in the tree are the same set, with no board
-        # claimed twice.
-        for xml in (mock_robot.CROSSDOOR.xml, REAL_SHAPED_XML):
-            with self.subTest(xml=xml[:40]):
-                self.gw._parse_layout(xml)
-                found = [board for board, _depth, _uid in self.boards(self.gw.tree_structure)]
-                self.assertEqual(sorted(found), sorted(self.gw._blackboard_names))
-                self.assertEqual(len(found), len(set(found)))
-
-
 class HttpResponseTest(unittest.TestCase):
     def test_headers_and_body(self):
-        r = KleinGateway._http_response(200, b"hello", "text/plain; charset=utf-8")
+        r = http_response(200, b"hello", "text/plain; charset=utf-8")
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.body, b"hello")
         self.assertEqual(r.headers["Content-Type"], "text/plain; charset=utf-8")
@@ -867,107 +241,55 @@ class ConstructionTest(unittest.TestCase):
         # so nothing in __init__ may touch the loop.
         asyncio.set_event_loop(None)
         try:
-            gw = new_gateway(self)
+            new_gateway(self)               # and its link, which makes its lock on first use
         finally:
             asyncio.set_event_loop(asyncio.new_event_loop())
-        self.assertIsNone(gw._req_lock)     # made on first use, inside the loop
 
 
-class TreeIdentityTest(GatewayTestCase):
-    """Deciding, from a reply header alone, whether the robot swapped trees."""
+class TreeIdentityTest(unittest.TestCase):
+    """Deciding, from a reply's tree UUID alone, whether the robot swapped trees."""
 
     def test_tree_changed(self):
-        # Before the first handshake there is nothing to differ from.
-        self.assertIsNone(self.gw._tree_uuid)
         cases = [
-            ("nothing recorded yet", None, reply_header(UUID_A), False),
-            # Absence of information must never be reported as a change, or an
-            # error reply would send the gateway into a handshake loop.
-            ("error frame", UUID_A, b"error", False),
-            ("empty frame", UUID_A, b"", False),
-            ("truncated header", UUID_A, reply_header(UUID_B)[:21], False),
-            # The mock stamps the header, the gateway reads it.
-            ("mock publisher, same tree", mock_robot.DEFAULT_TREE_UUID, reply_header(), False),
-            ("mock publisher, swapped", mock_robot.DEFAULT_TREE_UUID, reply_header(UUID_B), True),
+            # Before the first handshake there is nothing to differ from.
+            ("nothing loaded yet", None, UUID_A, False),
+            # Absence of information must never be reported as a change, or a
+            # header too short to carry a UUID would send the gateway into a
+            # handshake loop. (An error reply never gets here: RobotRefused.)
+            ("no uuid in the reply", UUID_A, None, False),
+            ("same tree", UUID_A, UUID_A, False),
+            ("swapped", UUID_A, UUID_B, True),
         ]
-        for label, recorded, frame, changed in cases:
+        for label, loaded, uuid, changed in cases:
             with self.subTest(label):
-                self.gw._tree_uuid = recorded
-                self.assertEqual(self.gw._tree_changed(frame), changed)
-
-    def test_the_detector_never_records(self):
-        # fetch_layout is the only writer, and it takes the UUID from the same
-        # reply that carried the XML. If detection adopted the new UUID here and
-        # the re-handshake then failed, the next status frame would compare
-        # equal and paint the new tree's UIDs onto the old tree's cards.
-        self.gw._tree_uuid = UUID_A
-        self.assertTrue(self.gw._tree_changed(reply_header(UUID_B)))
-        self.assertEqual(self.gw._tree_uuid, UUID_A)
-
-
-class NoticeTest(GatewayTestCase):
-    """The transient frame that tells a dashboard why its canvas just changed."""
-
-    def test_broadcast_once_to_every_client_and_never_cached(self):
-        # Unlike layout/blackboard/robot frames, which ws_handler replays to
-        # every client that connects. A notice reports something that already
-        # happened, so replaying it would describe an event the client missed.
-        client = object()
-        self.gw.clients = {client}
-        before = (self.gw._layout_json, self.gw._blackboard_json,
-                  self.gw._robot_state_json)
-        with mock.patch.object(gateway.websockets, "broadcast") as bcast:
-            self.gw._broadcast_notice("hello")
-        bcast.assert_called_once()
-        clients, payload = bcast.call_args[0]
-        self.assertEqual(clients, {client})
-        self.assertEqual(json.loads(payload), {"type": "notice", "text": "hello"})
-        self.assertEqual(
-            (self.gw._layout_json, self.gw._blackboard_json,
-             self.gw._robot_state_json), before)
+                self.assertEqual(gateway.tree_changed(loaded, uuid), changed)
 
 
 class TreeSwapTest(unittest.IsolatedAsyncioTestCase):
-    """A swapped tree, end to end through status_poller.
+    """A swapped tree, end to end through status_poller, against a
+    ``FakeRobot`` link that handed over CROSSDOOR under ``UUID_A``."""
 
-    ``_request`` is stubbed, so no socket is ever opened.
-    """
+    async def asyncSetUp(self):
+        await self.fresh_gateway()
 
-    def setUp(self):
-        self.fresh_gateway()
-
-    def fresh_gateway(self):
-        self.gw = new_gateway(self)
-        # Marked connected before any client exists, so the poller's own
+    async def fresh_gateway(self):
+        self.robot = FakeRobot(limit=1)
+        self.gw = new_gateway(self, link=self.robot)
+        # Handshaken before any client exists, so the poller's own
         # _mark_connected stays a no-op and the broadcast log holds only the
         # frames these tests are about.
-        self.gw._mark_connected()
+        with contextlib.redirect_stdout(io.StringIO()):
+            await self.gw.fetch_layout()
         self.gw.clients = {object()}        # else both pollers idle
-        self.gw._parse_layout(mock_robot.CROSSDOOR.xml)
-        self.gw._tree_uuid = UUID_A
-        self.sent = []                      # request types the poller issued
+        self.robot.sent = []                # requests the poller issued
         self.frames = []                    # frames broadcast to dashboards
 
-    async def _run_poller(self, queue, poller=None, before_reply=None):
-        """Run one poller against a queue of canned replies, then stop it.
-
-        The stub parks once the queue is drained; the poller is cancelled from
-        here rather than left to the loop. ``before_reply`` runs just before each
-        reply is handed back, for tests that need something to happen while a
-        request is in flight.
-        """
-        drained = asyncio.Event()
-
-        async def request(request_type, payload=None):
-            self.sent.append(request_type)
-            if not queue:
-                drained.set()
-                await asyncio.sleep(3600)   # cancelled below
-            if before_reply is not None:
-                before_reply()
-            return queue.pop(0)
-
-        self.gw._request = request
+    async def run_poller(self, limit, poller=None):
+        """Run one poller until the robot has answered ``limit`` requests and
+        parked on the next, then stop it. The logs then hold just its run."""
+        self.robot.sent, self.frames = [], []
+        self.robot.limit = limit
+        self.robot.done.clear()
         with contextlib.redirect_stdout(io.StringIO()), \
              contextlib.redirect_stderr(io.StringIO()), \
              mock.patch.object(gateway, "POLL_INTERVAL", 0), \
@@ -976,115 +298,129 @@ class TreeSwapTest(unittest.IsolatedAsyncioTestCase):
                                side_effect=lambda _c, m: self.frames.append(json.loads(m))):
             task = asyncio.create_task((poller or self.gw.status_poller)())
             try:
-                await asyncio.wait_for(drained.wait(), 2)
+                await asyncio.wait_for(self.robot.done.wait(), 2)
                 await asyncio.sleep(0)      # let the poller finish the iteration
             finally:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
 
+    def seq(self):
+        return "".join(self.robot.sent)
+
     def types(self):
         return [f["type"] for f in self.frames]
 
-    def lose_robot(self):
-        """Mark the robot unreachable, as a timed-out poll leaves it, before
-        the broadcast log starts."""
-        clients, self.gw.clients = self.gw.clients, set()
-        self.gw._set_robot_state(False, "Lost connection to robot")
-        self.gw.clients = clients
+    async def lose_robot(self):
+        """A status poll times out, as when the robot goes away."""
+        self.robot.timeouts = {1}
+        await self.run_poller(limit=1)
+        self.robot.timeouts = set()
+
+    async def connect(self):
+        """The frame types a dashboard that connects now is sent."""
+        socket = FakeSocket()
+        socket.closed.set()                 # it leaves as soon as it is told the state
+        with contextlib.redirect_stdout(io.StringIO()):
+            await self.gw.ws_handler(socket)
+        return [json.loads(frame)["type"] for frame in socket.sent]
 
     async def test_matching_uuid_just_streams_status(self):
-        await self._run_poller([[reply_header(UUID_A), status_record(1, 1)]])
-        self.assertEqual(self.sent, [REQ_STATUS, REQ_STATUS])   # 2nd drains
+        await self.run_poller(limit=1)
+        self.assertEqual(self.seq(), "S")               # and then the next S
         self.assertEqual(self.types(), ["status"])
 
     async def test_a_new_uuid_re_handshakes_and_sends_only_a_layout_then_a_notice(self):
-        await self._run_poller([
-            [reply_header(UUID_B), status_record(1, 1)],
-            [reply_header(UUID_B, REQ_FULLTREE), MODEL_LESS_XML.encode()],
-        ])
-        self.assertIn(REQ_FULLTREE, self.sent)
-        self.assertEqual(self.gw._tree_uuid, UUID_B)
-        self.assertEqual(self.gw.tree_structure["root_tree_id"], "MainTree")
-        self.assertEqual(sorted(collect_uids(self.gw.tree_structure)), [1, 2, 3, 4, 5])
-        # No "status": the buffer that carried the new UUID indexes a tree the
-        # dashboard has not been sent, so broadcasting it would land those UIDs
-        # on the old tree's cards. And the note comes after the layout, so the
-        # canvas has already redrawn by the time it explains why.
-        self.assertEqual(self.types(), ["layout", "notice"])
+        old_ids = set(collect_ids(self.gw.tree.tree))
+        await self.run_poller(limit=1, poller=self.gw.blackboard_poller)
+        self.assertEqual(await self.connect(), ["layout", "blackboard", "robot"])
+        self.robot.uuid, self.robot.xml = UUID_B, MODEL_LESS_XML
+        await self.run_poller(limit=3)
+        self.assertEqual(self.seq(), "STS")
+        layout = self.frames[0]["data"]
+        self.assertEqual(layout["root_tree_id"], "MainTree")
+        self.assertEqual(sorted(collect_uids(layout)), [1, 2, 3, 4, 5])
+        # The next generation's ids: none can match the old tree's cards.
+        self.assertEqual(set(collect_ids(layout)) & old_ids, set())
+        # No "status" for the buffer that carried the new UUID: it indexes a
+        # tree the dashboard has not been sent, so broadcasting it would land
+        # those UIDs on the old tree's cards. The note comes after the layout,
+        # so the canvas has already redrawn by the time it explains why. Only
+        # the next poll's status, under the UUID the handshake adopted, streams.
+        self.assertEqual(self.types(), ["layout", "notice", "status"])
         self.assertIn("new behaviour tree", self.frames[1]["text"])
+        # A dashboard that connects now gets the new layout, but not the old
+        # tree's values (stale), nor the notice: unlike every other frame it
+        # is never cached, since it reports something the client didn't see.
+        self.assertEqual(await self.connect(), ["layout", "robot"])
 
     async def test_the_same_tree_again_is_absorbed_quietly(self):
         # A robot restart yields a fresh publisher UUID even when the tree is
         # unchanged, and a resume after an outage re-handshakes too. Re-rendering
-        # the identical canvas would be a flash that reports nothing.
-        cases = [("restart under a new uuid", True, UUID_B),
-                 ("reconnect after an outage", False, UUID_A)]
-        for label, connected, uuid in cases:
+        # the identical canvas would be a flash that reports nothing. The robot
+        # frame is sent only on a change: here, only once reachable again.
+        cases = [("restart under a new uuid", True, UUID_B, []),
+                 ("reconnect after an outage", False, UUID_A, ["robot"])]
+        for label, connected, uuid, robot_frames in cases:
             with self.subTest(label):
-                self.fresh_gateway()
+                await self.fresh_gateway()
                 if not connected:
-                    self.lose_robot()
-                layout_before = self.gw._layout_json
-                await self._run_poller([
-                    [reply_header(uuid), status_record(1, 1)],
-                    [reply_header(uuid, REQ_FULLTREE), mock_robot.CROSSDOOR.xml.encode()],
-                ])
-                self.assertEqual(self.gw._tree_uuid, uuid)
-                self.assertEqual(self.gw._layout_generation, 1)     # not re-parsed
-                self.assertIs(self.gw._layout_json, layout_before)
-                self.assertNotIn("layout", self.types())
-                self.assertNotIn("notice", self.types())
+                    await self.lose_robot()
+                tree = self.gw.tree
+                self.robot.uuid = uuid
+                await self.run_poller(limit=3)
+                self.assertEqual(self.seq(), "STS")
+                self.assertIs(self.gw.tree, tree)                   # not re-parsed
+                self.assertEqual(self.types(), robot_frames + ["status"])  # the UUID adopted
 
     async def test_telemetry_resuming_after_an_outage_re_handshakes(self):
         # Killing a robot and starting another on the same port looks like this
         # from here. Detection must not rest on the new process having drawn a
         # fresh UUID — here it deliberately reuses its predecessor's, and the
         # swap still has to be caught.
-        self.lose_robot()
-        await self._run_poller([
-            [reply_header(UUID_A), status_record(1, 1)],
-            [reply_header(UUID_A, REQ_FULLTREE), MODEL_LESS_XML.encode()],
-        ])
-        self.assertIn(REQ_FULLTREE, self.sent)
-        self.assertEqual(self.gw.tree_structure["root_tree_id"], "MainTree")
-        self.assertEqual(sorted(collect_uids(self.gw.tree_structure)), [1, 2, 3, 4, 5])
+        await self.lose_robot()
+        self.robot.xml = MODEL_LESS_XML
+        await self.run_poller(limit=2)
+        self.assertEqual(self.seq(), "ST")
         self.assertEqual(self.types(), ["robot", "layout", "notice"])
+        layout = self.frames[1]["data"]
+        self.assertEqual(layout["root_tree_id"], "MainTree")
+        self.assertEqual(sorted(collect_uids(layout)), [1, 2, 3, 4, 5])
 
     async def test_an_error_reply_does_not_re_handshake(self):
-        await self._run_poller([[b"error", b"boom"]])
-        self.assertNotIn(REQ_FULLTREE, self.sent)
-        self.assertEqual(self.gw._tree_uuid, UUID_A)
+        self.robot.refusals = {1}
+        await self.run_poller(limit=1)
+        self.assertEqual(self.seq(), "S")               # and then the next S, not a T
         self.assertEqual(self.frames, [])
 
     async def test_blackboard_values_from_a_retired_tree_are_dropped(self):
         # The blackboard poller does not detect swaps, so one can land while its
         # request is in flight. See the guard in blackboard_poller for why the
         # reply must then be dropped rather than cached.
-        await self._run_poller(
-            [[reply_header(UUID_B), msgpack.packb({"MainTree": {"x": 1}})]],
-            poller=self.gw.blackboard_poller,
-            before_reply=lambda: self.gw._parse_layout(MODEL_LESS_XML),
-        )
-        self.assertIsNone(self.gw._blackboard_json)
+        swap = parse_layout(MODEL_LESS_XML, 2)
+        self.robot.on_request[1] = lambda _r: setattr(self.gw, "tree", swap)
+        await self.run_poller(limit=1, poller=self.gw.blackboard_poller)
         self.assertEqual(self.types(), [])
+        self.assertEqual(await self.connect(), ["layout", "robot"])
 
 
 class RecordingGatewayTest(unittest.IsolatedAsyncioTestCase):
-    """Arming, `t` drains, swaps, outages and overflow, through the real
-    pollers with ``_request`` stubbed by ``FakeRobot``. No dashboard is
-    connected in any of these: a recording gateway polls regardless."""
+    """The pollers driving the recorder end to end, against a ``FakeRobot``
+    link: a swap, outages, blackboard samples, a publisher that can't record,
+    and idling. The recorder's own cases are in test_recorder.py. No dashboard
+    is connected unless a test says so: a recording gateway polls regardless."""
 
-    def make_gateway(self, record=True, **caps):
+    def make_gateway(self, robot=None, record=True, debug=False):
         patch = mock.patch.object(gateway, "POLL_INTERVAL", 0)
         patch.start()
         self.addCleanup(patch.stop)
-        return new_gateway(self, recording=Recording(**caps) if record else None)
+        return new_gateway(self, link=robot, recording=Recording() if record else None,
+                           debug=debug)
 
-    async def run_gateway(self, gw, robot, blackboard=False):
+    async def run_gateway(self, gw, blackboard=False):
         """Handshake, then the status poller (and optionally the blackboard
         poller), until the robot has answered ``robot.limit`` requests."""
-        gw._request = robot
+        robot = gw.link
         frames = []
 
         async def main():
@@ -1110,32 +446,11 @@ class RecordingGatewayTest(unittest.IsolatedAsyncioTestCase):
     def seq(self, robot):
         return "".join(robot.sent)
 
-    async def test_startup_arms_then_pairs_every_status_poll_with_a_drain(self):
-        gw = self.make_gateway()
-        robot = FakeRobot(limit=9)
-        robot.drains = [[(10, 1, 1), (15, 2, 1)], [(40, 2, 2), (41, 2, 0)]]
-        await self.run_gateway(gw, robot)
-        self.assertEqual(gw.clients, set())             # no dashboard, still polling
-        self.assertEqual(self.seq(robot), "TrSStStSt")
-        rec = gw.recording
-        self.assertEqual(len(rec.segments), 1)
-        segment = rec.segments[0]
-        self.assertEqual(segment.t_begin, robot.starts[0])
-        self.assertIs(segment.layout, gw._recorded_tree)
-        self.assertEqual(len(segment.baseline), 14)     # max uid 13, plus index 0
-        start = robot.starts[0]
-        self.assertEqual(list(s[1:] for s in segment.iter_records(0, segment.head_seq)),
-                         [(start + 10, 1, 1), (start + 15, 2, 1),
-                          (start + 40, 2, 2), (start + 41, 2, 0)])
-        self.assertEqual(segment.state[2], 12)          # IDLE after SUCCESS
-        self.assertIsNotNone(rec.head)
-        self.assertEqual(rec.gaps, [])
-
     async def test_blackboard_polls_interleave_and_are_recorded(self):
-        gw = self.make_gateway()
         robot = FakeRobot(limit=30)
+        gw = self.make_gateway(robot)
         gw.clients = {object()}
-        frames = await self.run_gateway(gw, robot, blackboard=True)
+        frames = await self.run_gateway(gw, blackboard=True)
         seq = self.seq(robot)
         self.assertIn("B", seq)
         self.assertRegex(seq.replace("B", ""), r"^TrS(St)+S?$")
@@ -1149,23 +464,9 @@ class RecordingGatewayTest(unittest.IsolatedAsyncioTestCase):
         self.assertLess(ts[0], ts[-1])
         self.assertLessEqual(ts[-1], time.monotonic() * 1e6)
 
-    async def test_a_blackboard_sample_is_evicted_at_once(self):
-        """Over the blackboard cap, a sample is evicted when it is stored, not
-        at the next drain: whatever runs between (a dashboard connecting and
-        getting its backfill's sizes) never sees more than the cap."""
-        cap = 6                             # bytes: the base "n" and a change or two
-        gw = self.make_gateway(bb_max_bytes=cap)
-        robot = FakeRobot(limit=40)
-        seen = []
-        robot.on_request = {n: lambda _r: seen.append(gw.recording.bytes_used()[1])
-                            for n in range(1, 41)}
-        await self.run_gateway(gw, robot, blackboard=True)
-        self.assertTrue(gw.recording.blackboard_capped)
-        self.assertLessEqual(max(seen), cap, seen)
-
     async def test_a_tree_swap_starts_a_segment_with_a_new_layout(self):
-        gw = self.make_gateway()
         robot = FakeRobot(limit=11)
+        gw = self.make_gateway(robot)
 
         def swap(r):
             r.uuid, r.xml = UUID_B, MODEL_LESS_XML
@@ -1173,27 +474,24 @@ class RecordingGatewayTest(unittest.IsolatedAsyncioTestCase):
         robot.on_request[6] = swap
         robot.drains = [[(5, 1, 1)], [(7, 3, 1)]]
         gw.clients = {object()}
-        frames = await self.run_gateway(gw, robot)
+        frames = await self.run_gateway(gw)
         self.assertEqual(self.seq(robot), "TrSSt" "S" "TrSSt")
         rec = gw.recording
         first, second = rec.segments
-        self.assertIsNot(first.layout, second.layout)
-        self.assertEqual(first.t_end, second.t_begin)
-        self.assertEqual(second.t_begin, robot.starts[1])
-        self.assertEqual(len(second.baseline), 6)
+        self.assertIs(second.layout, gw.tree)
         self.assertEqual([[s.id for s in run] for run in rec.runs()], [[0], [1]])
         self.assertEqual(rec.gaps, [])
-        self.assertEqual(second.head_seq, 1)
+        self.assertEqual(second.head_seq, 1)            # drained after the swap
         # Recording adds no frame types for the browser.
         self.assertEqual({f["type"] for f in frames}, {"robot", "status", "layout", "notice"})
 
     async def test_an_outage_ends_the_segment_and_the_resume_reuses_the_layout(self):
-        gw = self.make_gateway()
         robot = FakeRobot(limit=12)
+        gw = self.make_gateway(robot)
         robot.timeouts = {6}                            # the 2nd poll's S
         heads = []                                      # the head when the robot went
         robot.on_request[6] = lambda r: heads.append(gw.recording.head)
-        await self.run_gateway(gw, robot)
+        await self.run_gateway(gw)
         self.assertEqual(self.seq(robot), "TrSSt" "S" "S" "TrSSt")
         rec = gw.recording
         first, second = rec.segments
@@ -1204,109 +502,56 @@ class RecordingGatewayTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(first.t_end)
         self.assertLess(first.t_end, second.t_begin)
         self.assertEqual(rec.gaps, [(first.t_end, second.t_begin, "outage")])
-        self.assertEqual(gw._layout_generation, 1)      # not re-parsed
-
-    async def test_a_quick_restart_on_the_same_tree_stays_in_one_run(self):
-        # Back before any poll timed out: only the UUID says it restarted.
-        gw = self.make_gateway()
-        robot = FakeRobot(limit=11)
-        robot.on_request[6] = lambda r: setattr(r, "uuid", UUID_B)
-        await self.run_gateway(gw, robot)
-        self.assertEqual(self.seq(robot), "TrSSt" "S" "TrSSt")
-        first, second = gw.recording.segments
-        self.assertIs(first.layout, second.layout)
-        self.assertEqual(first.t_end, second.t_begin)
-        self.assertEqual([[s.id for s in run] for run in gw.recording.runs()], [[0, 1]])
-        self.assertEqual(gw.recording.gaps, [])
+        self.assertEqual(gw.tree.generation, 1)         # not re-parsed
 
     async def test_an_outage_seen_only_by_a_blackboard_timeout_still_gets_a_gap(self):
         # The robot dies while a B is in flight and is back, as a new publisher,
         # before any S times out: B's timeout marks where the segment ends.
-        gw = self.make_gateway()
         robot = FakeRobot(limit=40)
+        gw = self.make_gateway(robot)
         heads = []                          # the head when the re-handshake began
 
         def die(r):
             r.uuid = UUID_B                 # restarted by the time S gets through
             r.on_letter["T"] = lambda _r: heads.append(gw.recording.head)
-            raise gateway.RobotTimeout("stub timeout")
+            raise RobotTimeout("stub timeout")
         robot.on_letter["B"] = die
-        await self.run_gateway(gw, robot, blackboard=True)
+        await self.run_gateway(gw, blackboard=True)
         first, second = gw.recording.segments[:2]
         self.assertEqual(first.t_end, heads[0])
         self.assertIs(first.layout, second.layout)
         self.assertLess(first.t_end, second.t_begin)
         self.assertEqual(gw.recording.gaps[0], (first.t_end, second.t_begin, "outage"))
 
-    async def test_a_blackboard_timeout_alone_changes_nothing(self):
-        gw = self.make_gateway()
-        robot = FakeRobot(limit=40)
-
-        def blip(r):
-            raise gateway.RobotTimeout("stub timeout")
-        robot.on_letter["B"] = blip
-        await self.run_gateway(gw, robot, blackboard=True)
-        self.assertEqual(len(gw.recording.segments), 1)
-        self.assertEqual(gw.recording.gaps, [])
-        self.assertFalse(gw._timed_out)
-
-    async def test_a_full_drain_records_an_overflow_gap_and_re_arms(self):
-        gw = self.make_gateway()
-        robot = FakeRobot(limit=9)
-        burst = [(1000 + i, 1 + i % 13, 1 + i % 3) for i in range(TRANSITION_BUFFER_MAX)]
-        robot.drains = [[(5, 1, 1)], burst, [(3, 4, 1)]]
-        await self.run_gateway(gw, robot)
-        self.assertEqual(self.seq(robot), "TrSSt" "St" "rS")
-        rec = gw.recording
-        first, second = rec.segments
-        start = robot.starts[0]
-        self.assertEqual(first.head_seq, 1 + TRANSITION_BUFFER_MAX)
-        self.assertEqual(rec.gaps, [(start + 5, start + 1000, "overflow")])
-        self.assertIs(first.layout, second.layout)
-        self.assertEqual(first.t_end, second.t_begin)
-        self.assertEqual(second.t_begin, robot.starts[1])
-        self.assertEqual(second.head_seq, 0)            # the re-arm's own baseline
-
-    async def test_overflow_re_arm_then_keeps_draining(self):
-        gw = self.make_gateway()
-        robot = FakeRobot(limit=12)
-        burst = [(1000 + i, 1, 1 + i % 2) for i in range(TRANSITION_BUFFER_MAX)]
-        robot.drains = [burst, [(3, 4, 1)]]
-        await self.run_gateway(gw, robot)
-        self.assertEqual(self.seq(robot), "TrSSt" "rS" "St" "St" "S")
-        second = gw.recording.segments[1]
-        self.assertEqual(list(s[1:] for s in second.iter_records(0, 1)),
-                         [(robot.starts[1] + 3, 4, 1)])
-
     async def test_a_robot_without_recording_gets_no_t_and_the_same_status(self):
         robot = FakeRobot(limit=7)
         robot.supports_recording = False
-        gw = self.make_gateway()
+        gw = self.make_gateway(robot)
         gw.clients = {object()}
-        frames = await self.run_gateway(gw, robot)
+        frames = await self.run_gateway(gw)
         self.assertEqual(self.seq(robot), "Tr" "SSSSS")
         self.assertEqual(gw.recording.segments, [])
-        self.assertFalse(gw._armed)
+        self.assertFalse(gw.recorder.armed)
         # Status broadcasts are exactly those of a non-recording gateway.
         plain = FakeRobot(limit=6)
-        other = self.make_gateway(record=False)
+        other = self.make_gateway(plain, record=False)
         other.clients = {object()}
-        plain_frames = await self.run_gateway(other, plain)
+        plain_frames = await self.run_gateway(other)
         self.assertEqual(self.seq(plain), "TSSSSS")
         self.assertEqual([f for f in frames if f["type"] == "status"],
                          [f for f in plain_frames if f["type"] == "status"])
         # The drawer is told why there is no recording.
         self.assertEqual([f["recording"] for f in frames if f["type"] == "robot"],
                          ["on", "unsupported"])
-        self.assertEqual(json.loads(gw._robot_state_json)["recording"], "unsupported")
         self.assertEqual({f["recording"] for f in plain_frames if f["type"] == "robot"}, {"off"})
         # The robot frame says recording is on again after a capable handshake.
-        frames = await self.run_gateway(gw, FakeRobot(limit=4))
+        robot.supports_recording, robot.sent, robot.limit = True, [], 4
+        robot.done.clear()
+        frames = await self.run_gateway(gw)
         self.assertEqual([f["recording"] for f in frames if f["type"] == "robot"], ["on"])
 
-    async def poll_without_clients(self, gw, robot):
+    async def poll_without_clients(self, gw):
         """Handshake, then give both pollers 50 loop turns with no dashboard."""
-        gw._request = robot
         with contextlib.redirect_stdout(io.StringIO()), \
              contextlib.redirect_stderr(io.StringIO()):
             await gw.fetch_layout()
@@ -1326,25 +571,24 @@ class RecordingGatewayTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(label):
                 robot = FakeRobot(limit=20)
                 robot.supports_recording = supports
-                gw = self.make_gateway(record=record)
-                await self.poll_without_clients(gw, robot)
+                gw = self.make_gateway(robot, record=record)
+                await self.poll_without_clients(gw)
                 self.assertEqual(self.seq(robot), expected)     # then nothing polled
                 if supports:
                     continue
-                self.assertTrue(gw._cannot_record)
+                self.assertEqual(gw.recorder.state, "unsupported")
                 # The next handshake tries again, and a robot that can record is polled.
                 robot.supports_recording, robot.sent = True, []
-                await self.poll_without_clients(gw, robot)
-                self.assertFalse(gw._cannot_record)
+                await self.poll_without_clients(gw)
+                self.assertEqual(gw.recorder.state, "on")
                 self.assertTrue(self.seq(robot).startswith("TrSSt"), self.seq(robot))
 
     async def test_debug_state_reports_the_recording(self):
-        gw = self.make_gateway()
-        gw.debug = True
         robot = FakeRobot(limit=7)
         robot.drains = [[(10, 1, 1)], [(20, 1, 2)]]
-        await self.run_gateway(gw, robot)
-        response = answer(gw, "/debug/state")
+        gw = self.make_gateway(robot, debug=True)
+        await self.run_gateway(gw)
+        response = answer(gw.routes, "/debug/state")
         self.assertEqual(response.status_code, 200)
         state = json.loads(response.body)
         start = robot.starts[0]
@@ -1363,12 +607,12 @@ class RecordingGatewayTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["blackboard"], [{"seg": 0, "t_start": None, "boards": {},
                                                "changes": []}])
         gw.recording.add_blackboard(start + 30, {"MainTree": {"x": 1}})
-        response = answer(gw, "/debug/state")
+        response = answer(gw.routes, "/debug/state")
         self.assertEqual(json.loads(response.body)["blackboard"],
                          [{"seg": 0, "t_start": start + 30, "boards": {"MainTree": start + 30},
                            "changes": [[start + 30, "MainTree", "x", "1"]]}])
         quiet = self.make_gateway()                     # without --debug
-        response = answer(quiet, "/debug/state")
+        response = answer(quiet.routes, "/debug/state")
         self.assertEqual(response.status_code, 404)
 
 

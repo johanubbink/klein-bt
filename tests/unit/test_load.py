@@ -16,7 +16,6 @@ from pathlib import Path
 from unittest import mock
 
 from klein import cli
-from klein import gateway as gateway_module
 from klein.btlog import export_blackboard, export_run
 from klein.gateway import KleinGateway
 from klein.recording import decode_state
@@ -93,7 +92,7 @@ class SidecarTest(ScratchDirTest):
 
     def test_the_sidecar_gives_every_layout_board_and_its_values_at_every_time(self):
         gw = self.open_t11()
-        self.assertEqual(gw._blackboard_names, T11_BOARDS)
+        self.assertEqual(gw.tree.blackboard_names, T11_BOARDS)
         segment = gw.recording.segments[0]
         track = segment.blackboard
         first = segment.t_begin
@@ -146,8 +145,8 @@ class SidecarTest(ScratchDirTest):
 
     def test_the_stream_says_file_and_no_robot(self):
         gw = self.open_t11()
-        self.assertEqual(json.loads(gw._robot_state_json),
-                         {"type": "robot", "connected": False, "recording": "file",
+        self.assertEqual(gw.robot_state,
+                         {"connected": False, "recording": "file",
                           "detail": "No robot — viewing t11_filelogger2.btlog"})
         # The streamer's own backfill, as a dashboard gets it.
         sent = []
@@ -167,7 +166,6 @@ class DamagedFileTest(ScratchDirTest):
         before serving: ``asyncio.run`` is stubbed out."""
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.object(sys, "argv", ["klein-bt", *argv]), \
-                mock.patch.object(gateway_module.zmq.asyncio, "Context"), \
                 mock.patch.object(cli.asyncio, "run",
                                   side_effect=lambda coro: coro.close()), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -218,7 +216,6 @@ class DamagedFileTest(ScratchDirTest):
         path = self.copy(T11, "cut.btlog", T11.read_bytes()[:-4])
         with self.subTest("open_file"):
             gw = KleinGateway("127.0.0.1", 1, 0)
-            gw.ctx.term()
             self.assertEqual(gw.open_file(path), 5)
             n = len(btlog_ref.read(T11).records)
             self.assertEqual(gw.recording.segments[0].head_seq, n - 1)

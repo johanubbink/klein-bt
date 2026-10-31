@@ -1,8 +1,8 @@
 """klein.recording — the in-memory recording of a robot's transitions.
 
-Pure data model: no asyncio, no ZeroMQ. The gateway feeds it (arming, ``t``
-drains, blackboard polls); everything that shows a past moment reads it back.
-See docs/architecture.md, "Recording model".
+Pure data model: no asyncio, no ZeroMQ. The recorder (klein/recorder.py)
+feeds it from a robot, and ``load_btlog`` from a file; everything that shows
+a past moment reads it back. See docs/architecture.md, "Recording model".
 
 State is a ``bytearray`` indexed by uid, in the STATUS byte encoding: 0–4 is a
 live status, ``10 + X`` is "IDLE after X". Replaying transitions through
@@ -16,7 +16,6 @@ segment, so the state at seq ``n`` is the state after the segment's first
 
 import array
 import bisect
-import dataclasses
 import json
 
 from .groot2_protocol import IDLE_TRANSITION, NodeStatus, decode_status
@@ -88,26 +87,8 @@ def diff_to_transitions(current, target):
 
 
 # --------------------------------------------------------------------------- #
-# Layouts, segments and chunks
+# Segments and chunks
 # --------------------------------------------------------------------------- #
-@dataclasses.dataclass(frozen=True, eq=False)
-class Layout:
-    """One parsed tree XML: its handshake ``generation``, the ``xml``, the
-    unrolled ``tree`` sent to dashboards and its sorted ``uids``. Segments
-    recorded while the XML is unchanged share one, which is what groups them
-    into one run (compared by identity)."""
-    generation: int
-    xml: str
-    tree: dict
-    uids: list
-
-    @property
-    def size(self):
-        """The state's length: max uid + 1."""
-        return self.uids[-1] + 1 if self.uids else 1
-
-
-
 class Chunk:
     """Up to ``CHUNK_SIZE`` records, plus the state before its first one."""
 
@@ -143,7 +124,8 @@ class Segment:
     """One continuous arm: everything recorded between one ``r start`` and the
     next arm, swap or outage.
 
-    ``layout`` is whatever the caller passes; segments of the same tree may
+    ``layout`` is the tree it was recorded under, a ``klein.layout.TreeLayout``
+    (``generation``, ``xml``, ``tree``, ``uids``); segments of the same XML
     share one object. ``t_start`` is the earliest time ``state_at`` can answer:
     ``t_begin``, or once chunks are evicted, the last evicted record's time.
     """
@@ -385,6 +367,11 @@ class Recording:
         """The earliest retained time, or None when nothing is recorded."""
         return self.segments[0].t_start if self.segments else None
 
+    @property
+    def ended_at(self):
+        """When the newest segment ended: None while it is open, or with none."""
+        return self.segments[-1].t_end if self.segments else None
+
     def extent(self):
         """What eviction can change: the earliest time, and per retained segment
         ``[seg, start_seq, t_start, blackboard t_start]``."""
@@ -405,12 +392,25 @@ class Recording:
         segment.t_end = t_end
         self._notify("segment_end", segment)
 
+    def end_at_head(self):
+        """End the open segment, if any, at the head (or at its begin, before
+        the head reaches it)."""
+        segment = self.open_segment
+        if segment is not None:
+            self.end_segment(max(self.head or segment.t_begin, segment.t_begin))
+
     def append(self, records):
         segment = self.open_segment
         first_seq = segment.head_seq
         segment.append(records)
         if segment.head_seq > first_seq:
             self._notify("append", segment, first_seq)
+
+    def append_after_overflow(self, records):
+        """Append records the robot dropped others before (its buffer
+        overflowed): an ``overflow`` gap from the newest record to their first."""
+        self.add_gap(self.open_segment.last_ts, records[0][0], "overflow")
+        self.append(records)
 
     def advance_head(self, t):
         self.head = t
@@ -435,6 +435,31 @@ class Recording:
         return (sum(s.transition_bytes for s in self.segments),
                 sum(s.blackboard.nbytes for s in self.segments))
 
+    def debug_dump(self):
+        """Everything retained, as JSON-able data, for ``GET /debug/state``:
+        the segments, runs, gaps, every record, the head state, the
+        blackboard history and the bytes used."""
+        segment = self.open_segment
+        return {
+            "head": self.head,
+            "t_min": self.t_min,
+            "segments": [{"id": s.id, "t_begin": s.t_begin, "t_end": s.t_end,
+                          "start_seq": s.start_seq, "head_seq": s.head_seq,
+                          "start_state": list(s.state_at_seq(s.start_seq)),
+                          "layout_id": s.layout.generation} for s in self.segments],
+            "runs": [[s.id for s in run] for run in self.runs()],
+            "gaps": [list(gap) for gap in self.gaps],
+            "records": [[ts, uid, status] for s in self.segments
+                        for _seq, ts, uid, status in s.iter_records(s.start_seq, s.head_seq)],
+            "state": (decode_state(segment.state, segment.layout.uids)
+                      if segment is not None else None),
+            "blackboard": [{"seg": s.id, "t_start": s.blackboard.t_start,
+                            "boards": dict(s.blackboard.boards),
+                            "changes": [list(c) for c in s.blackboard.changes()]}
+                           for s in self.segments],
+            "bytes": list(self.bytes_used()),
+        }
+
     def runs(self):
         """The retained segments grouped into tree runs: maximal consecutive
         segments sharing one layout object (a same-XML restart stays in its
@@ -448,42 +473,63 @@ class Recording:
         return runs
 
     def evict(self, now):
-        """Apply the time window, the total cap and the blackboard sub-cap."""
-        before = self.extent()
-        cutoff = now - self.keep_us
+        """Apply the keep window, the blackboard sub-cap and the total cap, in
+        that order, then drop what is left empty and say which limit binds."""
+        before, cutoff = self.extent(), now - self.keep_us
+        self._evict_window(cutoff)
+        bb_cut = self._cap_blackboard()
+        transitions_cut = self._cap_total()
+        self._drop_dead(cutoff)
+        self._update_capped(cutoff, bb_cut, transitions_cut)
+        if self.extent() != before:
+            self._notify("evict")
+
+    def _evict_window(self, cutoff):
+        """The keep window: sealed chunks wholly before ``cutoff``, and the
+        blackboard before it (all of an ended segment's that ended before it)."""
         while (segment := self._oldest_sealed()) and segment.chunks[0].ts[-1] < cutoff:
             segment._drop_first_chunk()
         for segment in self.segments:
-            if segment.t_end is not None and segment.t_end < cutoff:
+            if _ended_before(segment, cutoff):
                 segment.blackboard.clear()
             else:
                 segment.blackboard.evict_before(cutoff)
-        bb_cut = False
-        while self.bytes_used()[1] > self.bb_max_bytes and self._evict_oldest_blackboard():
-            bb_cut = True
 
-        # Last, so the blackboard is already within its sub-cap and can't push
-        # out transitions that fit beside it.
-        transitions_cut = False
+    def _cap_blackboard(self):
+        """The blackboard sub-cap: the oldest changes go while over it. True
+        if it cut any."""
+        cut = False
+        while self.bytes_used()[1] > self.bb_max_bytes and self._evict_oldest_blackboard():
+            cut = True
+        return cut
+
+    def _cap_total(self):
+        """The total cap: the oldest sealed chunks go while over it. True if it
+        cut any. Applied after the sub-cap, so the blackboard can't push out
+        transitions that fit beside it."""
+        cut = False
         total = sum(self.bytes_used())
         while total > self.max_bytes and (segment := self._oldest_sealed()):
             total -= segment.chunks[0].nbytes
             segment._drop_first_chunk()
-            transitions_cut = True
+            cut = True
+        return cut
 
-        # An ended segment wholly before the window has nothing left to show.
-        self.segments = [s for s in self.segments if s.t_end is None or s.t_end >= cutoff]
+    def _drop_dead(self, cutoff):
+        """An ended segment wholly before the window has nothing left to show,
+        nor a gap that ends before the earliest retained time."""
+        self.segments = [s for s in self.segments if not _ended_before(s, cutoff)]
         self.gaps = [gap for gap in self.gaps if self.t_min is not None and gap[1] >= self.t_min]
 
-        # A cap's cut stays the binding limit until the window's cutoff passes it.
+    def _update_capped(self, cutoff, bb_cut, transitions_cut):
+        """Set the capped flags: a cap's cut stays the binding limit until the
+        window's cutoff passes it."""
         bb_start = min((s.blackboard.t_start for s in self.segments
                         if s.blackboard.t_start is not None), default=None)
-        self.transitions_capped = transitions_cut or (
-            self.transitions_capped and self.t_min is not None and self.t_min > cutoff)
-        self.blackboard_capped = bb_cut or (
-            self.blackboard_capped and bb_start is not None and bb_start > cutoff)
-        if self.extent() != before:
-            self._notify("evict")
+        self.transitions_capped = _still_capped(
+            transitions_cut, self.transitions_capped, self.t_min, cutoff)
+        self.blackboard_capped = _still_capped(
+            bb_cut, self.blackboard_capped, bb_start, cutoff)
 
     def _oldest_sealed(self):
         """The segment holding the oldest chunk that can no longer grow, if any."""
@@ -506,26 +552,19 @@ class Recording:
         return False
 
 
+def _ended_before(segment, t):
+    """Whether ``segment`` ended before ``t`` (an open one hasn't)."""
+    return segment.t_end is not None and segment.t_end < t
+
+
+def _still_capped(cut, capped, start, cutoff):
+    """Whether a size cap binds a history that starts at ``start``: it cut
+    now, or it had and the window's ``cutoff`` hasn't passed the cut yet."""
+    return cut or (capped and start is not None and start > cutoff)
+
+
 def snapshot_run(run):
     """A tree run (``Recording.runs()``) as segment snapshots, to export
     outside the event loop while the recording goes on."""
     return [segment.snapshot() for segment in run]
 
-
-# --------------------------------------------------------------------------- #
-# Clock
-# --------------------------------------------------------------------------- #
-class RobotClock:
-    """Maps klein's monotonic clock to robot µs, anchored by the ``r start``
-    reply: its timestamp is taken to be the midpoint of the round trip."""
-
-    def __init__(self):
-        self.start_us = None
-        self._mid = None
-
-    def arm(self, start_reply_us, sent_mono, recv_mono):
-        self.start_us = start_reply_us
-        self._mid = (sent_mono + recv_mono) / 2
-
-    def robot_us(self, mono):
-        return self.start_us + round((mono - self._mid) * 1e6)

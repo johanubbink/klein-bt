@@ -59,15 +59,4 @@ version = { attr = "klein.__version__" }
 
 [tool.setuptools.package-data]
 # Bundle the dashboard web assets (and the vendored D3) so they ship on pip install.
-klein = [
-    "static/index.html",
-    "static/styles.css",
-    "static/app.js",
-    "static/renderers.js",
-    "static/recording.js",
-    "static/cursor.js",
-    "static/drawer.js",
-    "static/timeline.js",
-    "static/overview.js",
-    "static/d3.v7.min.js",
-]
+klein = ["static/*"]

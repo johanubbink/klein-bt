@@ -478,13 +478,13 @@ class ChipTest(_PanelsCase):
         b = self.browser
         b.page.set_viewport_size({"width": 1000, "height": HEIGHT})
         try:
-            # Every render shows this mirror instead of the live one.
+            # Every render shows this mirror in the pill instead of the live one.
             b.page.evaluate("""() => {
-              const show = KleinDrawer.showRecording;
+              const show = KleinDrawer.showRecording, draw = render;
               const seg = {startSeq: 0, headSeq: 3500000, bb: {tStart: 421e6}};
               const fake = {segments: [seg], head: 601e6, tMin: 1e6, bytes: [180e6, 64e6],
                             capped: ["transitions", "blackboard"]};
-              KleinDrawer.showRecording = () => show(fake, "on");
+              render = () => { draw(); show(fake, "on"); };
               show(fake, "on");
             }""")
             b.page.evaluate(_PRESS_R)       # the camera doesn't follow a resize by itself

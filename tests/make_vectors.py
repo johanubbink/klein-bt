@@ -33,7 +33,7 @@ from unittest import mock
 from klein import recording
 from klein.recording import BlackboardTrack, Recording, apply_transition, decode_state
 from klein.streaming import Streamer
-from tests.harness.model import BB_RECENT, Model
+from tests.harness.model import BB_RECENT, BB_STREAMING, Model
 from tests.helpers import layout
 
 STATIC = Path(__file__).resolve().parents[1] / "klein" / "static"
@@ -498,7 +498,102 @@ def _bb_change_cases(name, evict_before=None):
             cases.append({"name": f"{name}: bbChange {board}/{key} at {(t - T0) / SEC:+}",
                           "call": "KleinRecording.bbChange",
                           "args": [{"$ref": f"{name}_track"}, board, key, t], "expect": expect})
+    return cases + _row_mark_sweep(name, model, seg, times)
+
+
+FADE = 1_800_000                    # µs: the fade's length (styles.css, --fade)
+
+
+def _row_mark_sweep(name, model, seg, times):
+    """``rowMarks`` for every key shown at each of ``times``, given its
+    ``bbChange`` from the Model: paused, the static marks are exactly the
+    keys the Model calls fresh; painted live at each time in turn, a key's
+    writers fire exactly when it is fresh and changed since the last paint
+    (not at its first)."""
+    cases, seen = [], {}
+    for t in times:
+        fresh = model.bb_fresh(seg, t)
+        for board, keys in sorted((model.bb_at(seg, t) or {}).items()):
+            for key in sorted(keys):
+                t_change, recent = model.bb_change(seg, board, key, t)
+                change, streaming = {"tChange": t_change, "recent": recent}, recent >= BB_STREAMING
+                at = f"{board}/{key} at {(t - T0) / SEC:+}"
+                paused = {"change": change, "t": t, "mode": "paused", "primed": True,
+                          "reducedMotion": False, "shown": True, "seen": t_change}
+                cases.append({"name": f"{name}: rowMarks paused {at}", "call": "KleinView.rowMarks",
+                              "args": [paused], "expect": {
+                                  "streaming": streaming, "marked": (board, key) in fresh,
+                                  "fire": False, "fade": "clear"}})
+                live = {**paused, "mode": "live"}
+                if (board, key) in seen:
+                    live["seen"] = seen[(board, key)]
+                else:
+                    del live["seen"]                    # the row's first paint
+                fire = (board, key) in fresh and "seen" in live and t_change != live["seen"]
+                over = t_change is None or t - t_change >= FADE
+                fade = "restart" if fire else "clear" if streaming or over else "keep"
+                cases.append({"name": f"{name}: rowMarks live {at}", "call": "KleinView.rowMarks",
+                              "args": [live], "expect": {
+                                  "streaming": streaming, "marked": False, "fire": fire,
+                                  "fade": fade}})
+                seen[(board, key)] = t_change
     return cases
+
+
+def _row_mark_cases():
+    """``rowMarks``, behaviour by behaviour (docs/architecture.md,
+    "Rendering"), each written out as ``(streaming, marked, fire, fade)``."""
+    t = 10 * SEC
+    news = {"tChange": t - 100_000, "recent": 1}            # a change 0.1 s ago
+    painted = t - 600_000                                   # the change painted before it
+    live = {"t": t, "mode": "live", "primed": True, "reducedMotion": False, "shown": True,
+            "change": news, "seen": painted}
+    paused = {**live, "mode": "paused"}
+    ago = lambda us, recent=1: {"tChange": t - us, "recent": recent}
+    table = [
+        ("live, a change as it passes fades, and its writers fire", live,
+         (False, False, True, "restart")),
+        ("playing, alike", {**live, "mode": "playing"}, (False, False, True, "restart")),
+        ("just under a sample old is still news", {**live, "change": ago(499_999)},
+         (False, False, True, "restart")),
+        ("a change painted already: its fade runs on", {**live, "seen": news["tChange"]},
+         (False, False, False, "keep")),
+        ("a row's first paint is not a change", {k: v for k, v in live.items() if k != "seen"},
+         (False, False, False, "keep")),
+        ("a row painted before any change", {**live, "seen": None},
+         (False, False, True, "restart")),
+        ("after a mode or source switch the rows are only primed", {**live, "primed": False},
+         (False, False, False, "keep")),
+        ("a hidden row (a closed board) never starts a fade, its writers still fire",
+         {**live, "shown": False}, (False, False, True, "clear")),
+        ("BB_STREAMING changes in 3 s stream: no fade, no pulse",
+         {**live, "change": ago(100_000, BB_STREAMING)}, (True, False, False, "clear")),
+        ("one fewer is not streaming", {**live, "change": ago(100_000, BB_STREAMING - 1)},
+         (False, False, True, "restart")),
+        ("a change first painted a sample late is not news", {**live, "change": ago(500_000)},
+         (False, False, False, "keep")),
+        ("a fade still running is kept", {**live, "change": ago(FADE - 1), "seen": t - FADE + 1},
+         (False, False, False, "keep")),
+        ("a fade run out is cleared", {**live, "change": ago(FADE), "seen": t - FADE},
+         (False, False, False, "clear")),
+        ("a key that never changed", {**live, "change": {"tChange": None, "recent": 0},
+                                      "seen": None}, (False, False, False, "clear")),
+        ("paused, news is marked and nothing fades", paused, (False, True, False, "clear")),
+        ("paused, a hidden row's key is marked too", {**paused, "shown": False},
+         (False, True, False, "clear")),
+        ("paused, streaming is not marked", {**paused, "change": ago(100_000, BB_STREAMING)},
+         (True, False, False, "clear")),
+        ("paused, an old change is not marked", {**paused, "change": ago(500_000)},
+         (False, False, False, "clear")),
+        ("reduced motion, news is marked instead of fading", {**live, "reducedMotion": True},
+         (False, True, False, "clear")),
+        ("reduced motion, streaming is not marked",
+         {**live, "reducedMotion": True, "change": ago(100_000, BB_STREAMING)},
+         (True, False, False, "clear")),
+    ]
+    return [{"name": f"rowMarks: {what}", "call": "KleinView.rowMarks", "args": [args],
+             "expect": dict(zip(("streaming", "marked", "fire", "fade"), want))}
+            for what, args, want in table]
 
 
 # The status frames' samples without a recording: BB_SAMPLES (a change, a
@@ -550,10 +645,13 @@ def bb_frame_vectors():
 
 def bb_change_vectors():
     """Whole and after an eviction that cuts between Main/k's removal and
-    its return and keeps Sub/goal's set value as the base (not a change)."""
+    its return and keeps Sub/goal's set value as the base (not a change);
+    each row's marks (``KleinView.rowMarks``) at every time, against the
+    Model, and behaviour by behaviour."""
     cases = (_bb_change_cases("bb") + _bb_change_cases("bb_evicted", evict_before=5.2)
-             + bb_frame_vectors())
-    return {"modules": {"KleinRecording": str(STATIC / "recording.js")}, "cases": cases}
+             + bb_frame_vectors() + _row_mark_cases())
+    return {"modules": {"KleinRecording": str(STATIC / "recording.js"),
+                        "KleinView": str(STATIC / "view.js")}, "cases": cases}
 
 
 # --------------------------------------------------------------------------- #

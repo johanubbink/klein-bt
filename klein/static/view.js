@@ -1,8 +1,9 @@
 // view.js — what the dashboard shows, decided without the DOM: at each render
 // the source (the recording at the cursor, or the latest frames), the clock
 // after the render's rewrites, the tree, the status and the blackboard
-// panel's input (frame, panel). app.js computes them and then applies them:
-// the painters, the body classes, the banners. Pure: no DOM, no d3.
+// panel's input (frame, panel); and each blackboard row's change marks
+// (rowMarks). app.js computes them and then applies them: the painters, the
+// body classes, the banners, the rows' classes. Pure: no DOM, no d3.
 // See docs/architecture.md, "Rendering".
 
 import * as R from "./recording.js";
@@ -115,4 +116,55 @@ function panel(view, frames, wasLive) {
              opts: { track, t: view.t, mode: view.mode, empty: NO_BOARDS[reason] } };
 }
 
-export { frame, panel };
+// ------------------------------------------------------------------ //
+// Row marks: a blackboard key's change, as its row shows it
+// ------------------------------------------------------------------ //
+// A change's marks, in µs like the recording's times.
+const BB_SAMPLE = 500e3;        // fresh: changed within one 2 Hz sample
+const BB_STREAMING = 4;         // streaming: this many changes in KleinRecording.BB_RECENT
+const BB_FADE = 1.8e6;          // the fade's length (styles.css, --fade)
+
+// What a key's change (KleinRecording.bbChange) is at time t. Streaming
+// (BB_STREAMING changes in BB_RECENT) wins over news (fresh: changed under
+// one sample ago); `over`: a fade it started would have run out.
+function changeKind(change, t) {
+    const streaming = change.recent >= BB_STREAMING;
+    const age = change.tChange === null ? Infinity : t - change.tChange;
+    const news = age < BB_SAMPLE && !streaming;
+    return { streaming, news, over: age >= BB_FADE };
+}
+
+// What a paint in `mode` may do, whatever the row. Moving (live or playing),
+// news fades once (`animate`), unless the panel was last painted in another
+// mode or from another source (`primed` false: a switch only primes the
+// rows, so a jump never animates) or motion is reduced. Paused, or with
+// reduced motion (`still`), news is marked statically and nothing fades.
+function paintRule(mode, primed, reducedMotion) {
+    const moving = mode === "live" || mode === "playing";
+    return { animate: moving && primed && !reducedMotion, still: !moving || reducedMotion };
+}
+
+// One row's marks at a paint: from its key's `change` (bbChange at the time
+// shown, `t`), the paint's `mode`, `primed` and `reducedMotion` (paintRule),
+// whether the row is `shown` (its board open, the sidebar expanded), and
+// `seen`, the change the row was last painted for (undefined until its first
+// paint, which is not a change: the key is just being seen). Returns
+//   streaming   the steady streaming mark (bb-stream, a `~`)
+//   marked      the static mark (bb-mark); its writers hold the pulse
+//   fire        a change seen as it passes: its writers' pulse fades once,
+//               shown or not
+//   fade        the row's one-shot fade (bb-fresh): "restart" it, "clear" it
+//               (also one a hidden row never played: an animation doesn't
+//               run under display: none, and would play on showing, long
+//               after the change), or "keep" whatever runs
+function rowMarks({ change, t, mode, primed, reducedMotion, shown, seen }) {
+    const rule = paintRule(mode, primed, reducedMotion);
+    const { streaming, news, over } = changeKind(change, t);
+    const fire = rule.animate && news && seen !== undefined && change.tChange !== seen;
+    let fade = "keep";
+    if (fire && shown) fade = "restart";
+    else if (rule.still || !shown || streaming || over) fade = "clear";
+    return { streaming, marked: rule.still && news, fire, fade };
+}
+
+export { frame, panel, rowMarks };

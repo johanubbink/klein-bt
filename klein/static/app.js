@@ -536,12 +536,8 @@ function paintStatus(telemetryMap) {
 //
 // Open/closed state lives outside the DOM so it survives every update frame.
 const bbGroupOpen = {};     // board name -> is its body expanded?
-const bbGroupEls = {};      // board name -> { group, header, toggle, body, count, rows }
+const bbGroupEls = {};      // board name -> { group, header, toggle, body, count, rows, nodes }
 
-// A change's marks (see renderBlackboards), in µs like the recording's times.
-const BB_SAMPLE = 500e3;        // fresh: changed within one 2 Hz sample
-const BB_STREAMING = 4;         // streaming: this many changes in BB_RECENT
-const BB_FADE = 1.8e6;          // the fade's length (styles.css, --fade)
 let bbLastMode = null;          // the mode the panel was last painted in ("frames": no recording)
 
 // Boards in tree order, from the layout — see collectBoards().
@@ -661,8 +657,7 @@ function createBBGroup(info) {
     toggle.classList.toggle("open", Boolean(bbGroupOpen[info.board]));
 
     group.append(header, body);
-    bbGroups.appendChild(group);
-    return { board: info.board, group, header, toggle, body, count, rows: {} };
+    return { board: info.board, group, header, toggle, body, count, rows: {}, nodes: [group] };
 }
 
 // Rows are buttons because they are disclosures: clicking one unwraps a value
@@ -690,7 +685,7 @@ function createBBRow(group, key) {
 
     // tChange: the change last painted (undefined until the first paint).
     const entry = { row, value: valueEl, detail, text: null, hasDetail: false,
-                    tChange: undefined };
+                    tChange: undefined, nodes: [row, detail] };
     row.addEventListener("click", () => {
         const open = !row.classList.contains("expanded");
         row.classList.toggle("expanded", open);
@@ -702,8 +697,6 @@ function createBBRow(group, key) {
     row.addEventListener("animationend", (event) => {
         if (event.animationName === "fade-out") row.classList.remove("bb-fresh");
     });
-
-    group.body.append(row, detail);
     return entry;
 }
 
@@ -730,124 +723,123 @@ function restartClass(el, cls) {
     el.classList.add(cls);
 }
 
-// Reorder children only when the order is actually wrong: re-appending a row
-// restarts its fade.
-function syncBBOrder(container, ordered) {
+// Reconcile `container`'s children with `keys`, in that order, through
+// `cache`: key -> its entry, whose `nodes` are its elements. A new key's
+// entry is create(key), its nodes appended; every key's entry is then
+// update(entry, key); a key gone has its nodes removed. Children are
+// reordered only when the order is actually wrong: re-appending a node
+// restarts its animation (a row's fade). Used for the boards and their rows.
+function syncKeyed(container, keys, cache, create, update) {
+    const wanted = new Set(keys);
+    for (const key of keys) {
+        let entry = cache[key];
+        if (!Object.hasOwn(cache, key)) {
+            entry = cache[key] = create(key);
+            container.append(...entry.nodes);
+        }
+        update(entry, key);
+    }
+    for (const key of Object.keys(cache)) {
+        if (wanted.has(key)) continue;
+        for (const node of cache[key].nodes) node.remove();
+        delete cache[key];
+    }
+    const ordered = keys.flatMap(key => cache[key].nodes);
     const correct = ordered.length === container.children.length
         && ordered.every((el, i) => container.children[i] === el);
-    if (!correct) ordered.forEach(el => container.appendChild(el));
+    if (!correct) container.append(...ordered);
+}
+
+// The boards to list, board name -> its info (collectBoards'), in layout
+// order first, so the panel reads like the canvas. A board the robot reports
+// that the layout never mentioned is still shown, flat at the bottom — cover
+// for a robot whose XML omits the instance paths.
+function listBoards(boards) {
+    const listed = new Map();
+    for (const info of bbBoardList) {
+        if (info.board in boards && !listed.has(info.board)) listed.set(info.board, info);
+    }
+    for (const name of Object.keys(boards)) {
+        if (listed.has(name)) continue;
+        listed.set(name, { board: name, depth: 0, label: name, uid: null, nodeName: name,
+                           isRoot: false, node: null });
+    }
+    return listed;
+}
+
+// A subtree whose ports are all remapped to its parent owns nothing. It keeps
+// its row so the list still mirrors the tree, but there is nothing to open.
+function paintGroupHeader(group, count) {
+    const isEmpty = count === 0;
+    group.count.textContent = isEmpty ? "—" : String(count);
+    group.group.classList.toggle("is-empty", isEmpty);
+    group.toggle.disabled = isEmpty;
+    group.toggle.title = isEmpty
+        ? `${group.board}\nNo values of its own — its ports are remapped to the parent board.`
+        : group.board;
+}
+
+function paintValue(row, value) {
+    const render = KleinRenderers.renderValue(value);
+    if (row.text === render.summary) return;
+    row.value.textContent = render.summary;
+    row.value.title = KleinRenderers.exactText(value);   // exact, on hover
+    row.value.classList.toggle("bb-unset", Boolean(render.missing));
+    row.text = render.summary;
+    fillBBDetail(row.detail, render.detail);
+    row.hasDetail = render.detail.length > 0;
+    row.detail.hidden = !(row.hasDetail && row.row.classList.contains("expanded"));
+}
+
+// A row's change marks at one `paint` (renderBlackboards): KleinView.rowMarks
+// decides, this applies them and collects the keys for the writer pulse.
+function markRow(row, ref, shown, paint) {
+    const change = KleinRecording.bbChange(paint.track, ref.board, ref.key, paint.rule.t);
+    const marks = KleinView.rowMarks({ ...paint.rule, change, shown, seen: row.tChange });
+    row.tChange = change.tChange;
+    const classes = row.row.classList;
+    classes.toggle("bb-stream", marks.streaming);
+    classes.toggle("bb-mark", marks.marked);
+    if (marks.marked) paint.marked.push(linkRef(ref.board, ref.key));
+    if (marks.fire) paint.fired.push(linkRef(ref.board, ref.key));
+    if (marks.fade === "restart") restartClass(row.row, "bb-fresh");
+    else if (marks.fade === "clear") classes.remove("bb-fresh");
+}
+
+// One board's header and rows. A closed board, or the collapsed sidebar,
+// shows no row: nothing fades.
+function paintGroup(group, entries, paint) {
+    // The robot's map order is arbitrary (it walks an unordered_map), so
+    // sort to keep rows from reshuffling under the reader between frames.
+    const keys = Object.keys(entries).sort();
+    paintGroupHeader(group, keys.length);
+    const shown = !group.body.hidden && !sidebar.classList.contains("collapsed");
+    syncKeyed(group.body, keys, group.rows, (key) => createBBRow(group, key), (row, key) => {
+        paintValue(row, entries[key]);
+        markRow(row, { board: group.board, key }, shown, paint);
+    });
 }
 
 // `boards` as of time `t` in the blackboard `track` (a segment's, or by
 // default frameTrack, the status frames' at their newest), shown in `mode`
-// ("live", "playing", "paused"). A key changed under one sample ago is fresh,
-// unless streaming; fresh fades while moving, is marked while paused. A mode
-// or source switch only primes the rows; the writers pulse alike. See
+// ("live", "playing", "paused"); `empty`: what the panel says listing no
+// board. Each row's marks are KleinView.rowMarks': a mode or source switch
+// only primes the rows, and the writers pulse alike. See
 // docs/architecture.md, "Rendering".
 function renderBlackboards(boards, { track = frameTrack, t = track.tLast, mode = "live",
                                      empty = "This robot reports no blackboards." } = {}) {
-    const moving = mode === "live" || mode === "playing";
     const painting = track === frameTrack ? "frames" : mode;
-    const animate = moving && painting === bbLastMode && !reducedMotion.matches;
-    const marked = mode === "paused" || reducedMotion.matches;
+    const rule = { t, mode, primed: painting === bbLastMode, reducedMotion: reducedMotion.matches };
     bbLastMode = painting;
-    const markedRefs = [], firedRefs = [];  // for the writer pulse
-    // Layout order first, so the panel reads like the canvas. A board the robot
-    // reports that the layout never mentioned is still shown, flat at the
-    // bottom — cover for a robot whose XML omits the instance paths.
-    const known = new Set(bbBoardList.map(info => info.board));
-    const listed = [
-        ...bbBoardList.filter(info => info.board in boards),
-        ...Object.keys(boards).filter(name => !known.has(name)).map(name => ({
-            board: name, depth: 0, label: name, uid: null, nodeName: name,
-            isRoot: false, node: null,
-        })),
-    ];
+    const paint = { track, rule, marked: [], fired: [] };      // marked, fired: for the writer pulse
+    const listed = listBoards(boards);
+    syncKeyed(bbGroups, [...listed.keys()], bbGroupEls, (name) => createBBGroup(listed.get(name)),
+              (group, name) => paintGroup(group, boards[name], paint));
+    setPulses(paint.marked, paint.fired, mode === "live" || mode === "playing");
 
-    for (const info of listed) {
-        const name = info.board;
-        const group = bbGroupEls[name] || (bbGroupEls[name] = createBBGroup(info));
-        const entries = boards[name];
-        // The robot's map order is arbitrary (it walks an unordered_map), so
-        // sort to keep rows from reshuffling under the reader between frames.
-        const keys = Object.keys(entries).sort();
-
-        // A subtree whose ports are all remapped to its parent owns nothing. It
-        // keeps its row so the list still mirrors the tree, but there is
-        // nothing to open.
-        const isEmpty = keys.length === 0;
-        group.count.textContent = isEmpty ? "—" : String(keys.length);
-        group.group.classList.toggle("is-empty", isEmpty);
-        group.toggle.disabled = isEmpty;
-        group.toggle.title = isEmpty
-            ? `${name}\nNo values of its own — its ports are remapped to the parent board.`
-            : name;
-
-        // A closed board, or the collapsed sidebar, shows no row: nothing fades.
-        const shown = !group.body.hidden && !sidebar.classList.contains("collapsed");
-        for (const key of keys) {
-            const row = group.rows[key] || (group.rows[key] = createBBRow(group, key));
-            const value = entries[key];
-            const render = KleinRenderers.renderValue(value);
-            if (row.text !== render.summary) {
-                row.value.textContent = render.summary;
-                row.value.title = KleinRenderers.exactText(value);   // exact, on hover
-                row.value.classList.toggle("bb-unset", Boolean(render.missing));
-                row.text = render.summary;
-                fillBBDetail(row.detail, render.detail);
-                row.hasDetail = render.detail.length > 0;
-                row.detail.hidden = !(row.hasDetail && row.row.classList.contains("expanded"));
-            }
-
-            const change = KleinRecording.bbChange(track, name, key, t);
-            const streaming = change.recent >= BB_STREAMING;
-            const age = change.tChange === null ? Infinity : t - change.tChange;
-            const fresh = age < BB_SAMPLE;
-            const news = fresh && !streaming;
-            // A row's first paint is not a change: the key is just being seen.
-            const isNew = row.tChange !== undefined && change.tChange !== row.tChange;
-            row.tChange = change.tChange;
-            const classes = row.row.classList;
-            classes.toggle("bb-stream", streaming);
-            classes.toggle("bb-mark", marked && news);
-            if (marked && news) markedRefs.push(linkRef(name, key));
-            if (animate && isNew && news) firedRefs.push(linkRef(name, key));
-            if (animate && shown && isNew && news) {
-                restartClass(row.row, "bb-fresh");
-            } else if (!moving || !shown || streaming || reducedMotion.matches
-                       || age >= BB_FADE) {
-                // A fade still running, or one a hidden row never played: an
-                // animation doesn't run under display: none, and would play
-                // on showing, long after the change.
-                classes.remove("bb-fresh");
-            }
-        }
-
-        for (const key of Object.keys(group.rows)) {     // keys the robot dropped
-            if (!(key in entries)) {
-                group.rows[key].row.remove();
-                group.rows[key].detail.remove();
-                delete group.rows[key];
-            }
-        }
-        syncBBOrder(group.body,
-            keys.flatMap(key => [group.rows[key].row, group.rows[key].detail]));
-    }
-
-    const names = listed.map(info => info.board);
-    for (const name of Object.keys(bbGroupEls)) {        // boards the robot dropped
-        if (!names.includes(name)) {
-            bbGroupEls[name].group.remove();
-            delete bbGroupEls[name];
-        }
-    }
-    syncBBOrder(bbGroups, names.map(name => bbGroupEls[name].group));
-
-    setPulses(markedRefs, firedRefs, moving);
-
-    bbCount.textContent = names.length ? String(names.length) : "";
+    bbCount.textContent = listed.size ? String(listed.size) : "";
     // Per-board dashes cover empty boards; this line is for having none at all.
-    bbEmpty.hidden = names.length > 0;
+    bbEmpty.hidden = listed.size > 0;
     bbEmpty.textContent = empty;
 }
 
@@ -1193,8 +1185,8 @@ function linkCardRows(card, on) {
 }
 
 // The writer pulse: the cards writing a key that just changed, under the
-// panel's own rule (renderBlackboards). `pulseMarked` holds the writers of the
-// keys marked statically (paused, or reduced motion); fire() starts the
+// panel's own rule (KleinView.rowMarks). `pulseMarked` holds the writers of
+// the keys marked statically (paused, or reduced motion); fire() starts the
 // one-shot fade on the writers of a change seen live or playing.
 let pulseMarked = new Set();
 let pulseFiring = false;        // some card may still be fading

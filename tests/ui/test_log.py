@@ -534,15 +534,6 @@ class LogTest(LogView, DashboardCase):
                 fading, fired = self.page.evaluate(_JUMP, [row[0][0], t0, t, before, board, key])
                 self.assertEqual(fading, fades)
                 self.assertEqual(set(fired) & wrote, wrote if fades else set(), fired)
-        # Live, a change first painted once it is no longer fresh (a sample
-        # late) is not news: it does not fade.
-        e = next(e for e in bb if e["seg"] == row[0][0])
-        late = min([c[0] - 1 for c in e["changes"] if (c[1], c[2]) == (board, key) and c[0] > t]
-                   + [t + 600_000])
-        if late - t >= 500_000:
-            with self.subTest(before="live", late=True):
-                self.assertFalse(self.page.evaluate(
-                    _JUMP, [row[0][0], t0, late, "live", board, key])[0])
 
     def test_keys_across_a_boundary_and_guards(self):
         rows = self.model.rows()

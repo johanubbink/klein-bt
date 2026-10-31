@@ -418,7 +418,9 @@ here as app.js imports it (`import * as KleinRecording from
   `viewingPast` and `noBoards`. `panel(view, frames, wasLive)` is the
   blackboard panel's input at it, `{boards, opts}` for `renderBlackboards`
   (`opts.empty` the panel's words when it lists no board), or null to leave
-  the panel as it is.
+  the panel as it is. `rowMarks({change, t, mode, primed, reducedMotion,
+  shown, seen})` is one blackboard row's marks at a paint, `{streaming,
+  marked, fire, fade}`, `fade` being `"restart"`, `"clear"` or `"keep"`.
 
 `app.js` routes binary frames and the recording's message types to the store.
 
@@ -466,7 +468,13 @@ board panel's input is `KleinView.panel`'s:
   (`bb-fresh`, `--fade` in `styles.css`, 1.8 s) live or playing, and is
   marked statically (`bb-mark`) when paused or with reduced motion.
   Switching mode only primes the rows, so a jump never animates; closed or
-  hidden rows never start a fade. Without a recording, the same rule runs
+  hidden rows never start a fade. `KleinView.rowMarks` decides each row's
+  marks from its `bbChange`, the paint's mode, whether the panel was last
+  painted in that mode from the same source (`primed`), and the change the
+  row was last painted for (`seen`); `renderBlackboards` only reconciles the
+  boards and rows with the DOM (`syncKeyed`, which reorders rows only when
+  the order is wrong, since re-appending one restarts its fade) and applies
+  the marks. Without a recording, the same rule runs
   on a local track of the `blackboard` frames (`addBoards`, at their newest
   `t`, kept to the last 3 s): timed by the gateway, so a busy browser
   doesn't change the answer. The board panel is re-rendered only when a

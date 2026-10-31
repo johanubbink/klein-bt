@@ -215,7 +215,12 @@ paused, playing on and reaching the head, a pause whose moment was evicted,
 the robot gone and back unable to record, a tree swap, no recording, an
 opened file without a sidecar): which source shows and the flags and the
 panel's words written out by hand, the position, state and boards from the
-Python model;
+Python model. Its `rowMarks` gets a table of behaviours written out by hand
+(the fade matrix: moving or paused, primed, shown, first paint, streaming,
+reduced motion, the 0.5 s and 1.8 s edges), and, beside the `bbChange`
+vectors, every key at every time against the harness `Model`: paused, the
+static marks are its fresh keys; painted live in turn, the writers fire on
+each fresh change;
 `test_log_rows.py` and `test_timeline_model.py` do the same for the Log's rows
 and the Timeline's helpers, on `make_vectors.build_named` (trees with named
 nodes and subtrees) fed in by `make_vectors.store_cases`. `python -m

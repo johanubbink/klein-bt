@@ -34,9 +34,13 @@ class ReplayVectorsTest(unittest.TestCase):
         self.assertGreater(len(data["cases"]), 1000)
         assert_vectors_pass(self, data)
 
-    def test_bb_change_answers_as_the_harness_model(self):
+    def test_bb_change_and_row_marks_answer_as_the_harness_model(self):
         data = make_vectors.bb_change_vectors()
         got = {c["name"]: c["expect"] for c in data["cases"] if "bbChange" in c["name"]}
+        marks = [c["expect"] for c in data["cases"] if ": rowMarks " in c["name"]]
+        # The sweeps hold marks, streaming keys and fired writers.
+        for field in ("marked", "streaming", "fire"):
+            self.assertTrue(any(m[field] for m in marks), field)
         # The first sample (not a change), the 3 s edge exactly and just
         # inside, and live t.
         self.assertEqual(got["bb: bbChange Main/phase at +0.0"]["tChange"], None)

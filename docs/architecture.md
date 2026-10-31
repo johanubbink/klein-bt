@@ -960,6 +960,10 @@ C++ involved. It has two different trees and can swap between them
 (`--switch-every`), drawing a fresh UUID each time, so you can test tree swaps.
 For tests it can also write every transition it makes to a file
 (`--truth-log`) and publish a recorded `.btlog` in real time (`--replay`).
+Its socket loop only receives and sends: `handle(publisher, frames)` answers
+one request with no socket, from a `ScriptedPublisher` (the built-in trees,
+one tick per STATUS poll, and the swaps) or a `ReplayPublisher` (`--replay`),
+so each request type is tested in-process.
 
 The tests, their tiers and the harness are described in
 [testing.md](testing.md).

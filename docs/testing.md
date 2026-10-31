@@ -4,7 +4,7 @@ klein's tests are stdlib `unittest`, in one directory per tier:
 
 | Tier | What | Needs | Runs in |
 | --- | --- | --- | --- |
-| `tests/unit/` | in-process: the protocol, gateway logic (a stubbed robot), the recording model, `.btlog` files, streaming, the mock, the harness's own oracles, and the dashboard's JS models under gjs | pyzmq; gjs for the JS models | CI, ~3 s |
+| `tests/unit/` | in-process: the protocol, gateway logic (a stubbed robot), the recording model, `.btlog` files, streaming, the mock (each request through `handle`), the harness's own oracles, and the dashboard's JS models under gjs | pyzmq; gjs for the JS models | CI, ~3 s |
 | `tests/smoke/` | one end-to-end run: the mock and `klein-bt` as processes, from the page and live frames to a downloaded `.btlog` | — | CI, ~2 s |
 | `tests/integration/` | real processes against ground truth: what the gateway records from the mock and from BT.CPP's real `t11`, the wire tap, the mock target | g++ and a BehaviorTree.CPP build for t11 | locally |
 | `tests/ui/` | the dashboard in a real browser: cards, drawer and sidebar, camera, Log, Timeline, eviction, Save and `--open` | Playwright + Chrome (or Playwright's Chromium) | locally |

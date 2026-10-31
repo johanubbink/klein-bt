@@ -129,7 +129,9 @@ def answer(routes, path):
 class FakeRobot:
     """A scripted publisher behind a fake ``RobotLink``, for a gateway's
     ``link=``: answers T/S/B/r/t, logs every request letter, and parks
-    (setting ``done``) after ``limit`` requests.
+    (setting ``done``) after ``limit`` requests. Its answers are set by the
+    test (``status``, ``drains``, the ``r start`` times, a publisher too old
+    to record), so it doesn't run the mock's mission through ``handle``.
 
     ``timeouts`` and ``refusals`` hold 1-based request indices that raise
     ``RobotTimeout`` and ``RobotRefused`` (an error frame); ``on_request``

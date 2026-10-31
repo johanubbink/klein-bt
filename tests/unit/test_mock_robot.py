@@ -1,6 +1,7 @@
 """Unit tests for klein.mock_robot — the fake publisher used to drive
-klein in tests. Verifies the status animation, blackboard content and reply
-framing, and round-trips its output through the real gateway parser.
+klein in tests. Verifies the status animation, blackboard content, reply
+framing and the answer to each request (``handle``), and round-trips its
+output through the real gateway parser.
 
 Most classes here are about CrossDoor, the mission the mock publishes by
 default. ``EveryTreeTest`` holds the invariants that must be true of *any* tree
@@ -17,7 +18,7 @@ import xml.etree.ElementTree as ET
 
 from klein import layout, mock_robot
 from tests.harness import btlog_ref
-from tests.helpers import collect_uids
+from tests.helpers import collect_uids, status_record
 from klein.groot2_protocol import (
     HEADER_FORMAT,
     NODE_CATEGORIES,
@@ -27,6 +28,7 @@ from klein.groot2_protocol import (
     TRANSITION_BUFFER_MAX,
     NodeStatus,
     decode_transitions,
+    encode_transition,
     parse_blackboard,
     parse_status,
 )
@@ -151,8 +153,8 @@ class BlackboardTest(unittest.TestCase):
 
 class ReplyHeaderTest(unittest.TestCase):
     def test_echoes_request_and_appends_uuid(self):
-        # main() draws a fresh random UUID on every tree swap, the way a
-        # restarted Groot2Publisher does — that is the signal klein watches.
+        # ScriptedPublisher draws a fresh random UUID on every tree swap, the
+        # way a restarted Groot2Publisher does — that is the signal klein watches.
         swapped = b"\xaa" * 16
         self.assertNotEqual(swapped, mock_robot.DEFAULT_TREE_UUID)
         cases = [
@@ -246,28 +248,6 @@ class TransitionRecorderTest(unittest.TestCase):
         self.assertGreater(records[0][0], 50 * 1000)                    # first 50 were dropped
 
 
-class ToggleRecordingTest(unittest.TestCase):
-    def test_toggle_recording(self):
-        cases = [
-            # label, started, request, reply, recording afterwards
-            ("start replies with the time as a decimal string",
-             False, [b"hdr", b"start"], [b"12000000"], True),
-            ("stop replies with the header alone", True, [b"hdr", b"stop"], [], False),
-            ("a missing argument is an error", False, [b"hdr"], None, None),
-        ]
-        for label, started, request, reply, recording in cases:
-            with self.subTest(label):
-                # A frozen monotonic clock too: the reply is the wall-clock anchor
-                # advanced by it, and a real one would tick between the two reads.
-                recorder = mock_robot.TransitionRecorder(clock=FakeClock(),
-                                                         wall_clock=lambda: 12.0)
-                if started:
-                    recorder.start()
-                self.assertEqual(mock_robot.toggle_recording(request, recorder), reply)
-                if recording is not None:
-                    self.assertEqual(recorder.recording, recording)
-
-
 class TruthLogTest(unittest.TestCase):
     """``--truth-log`` sees every transition, on the recording's own clock."""
 
@@ -311,53 +291,140 @@ class ReplayTest(unittest.TestCase):
     def setUp(self):
         self.clock = FakeClock()
         self.truth = []
-        self.recorder = mock_robot.TransitionRecorder(clock=self.clock,
-                                                      wall_clock=lambda: 1000.0,
-                                                      truth=self.truth.extend)
-        self.replay = mock_robot.Replay(REPLAY_FILE, self.recorder)
+        self.replay = mock_robot.ReplayPublisher(REPLAY_FILE, truth=self.truth.extend,
+                                                 clock=self.clock, wall_clock=lambda: 1000.0)
+        self.recorder = self.replay.recorder
         self.t0 = self.recorder.now_us()
 
     def status(self):
-        return parse_status(self.replay.status_buffer())
+        return parse_status(self.replay.status())
 
     def test_reads_the_file_and_ignores_a_partial_trailing_record(self):
         self.assertEqual(self.replay.xml, REPLAY_XML)
         self.assertEqual(self.replay.uids, [1, 2])
-        replay = mock_robot.Replay(REPLAY_FILE + b"\x01\x02", self.recorder)
+        replay = mock_robot.ReplayPublisher(REPLAY_FILE + b"\x01\x02")
         self.assertEqual(replay._records, REPLAY_RECORDS)
 
     def test_rejects_what_is_not_a_btlog(self):
         with self.assertRaises(ValueError):
-            mock_robot.Replay(b"BTCPP4-FileLogger1\x01", self.recorder)
+            mock_robot.ReplayPublisher(b"BTCPP4-FileLogger1\x01")
         with self.assertRaises(ValueError):
-            mock_robot.Replay(btlog_ref.build(REPLAY_XML, 7, []), self.recorder)
+            mock_robot.ReplayPublisher(btlog_ref.build(REPLAY_XML, 7, []))
 
     def test_status_follows_the_publisher_rule(self):
         self.clock.now += 0.0011                     # past the first three records
-        self.replay.advance()
+        self.replay.catch_up()
         self.assertEqual(self.status(), {1: {"status": "RUNNING", "from": None},
                                          2: {"status": "IDLE", "from": "SUCCESS"}})
         self.clock.now += 0.5
-        self.replay.advance()
+        self.replay.catch_up()
         self.assertEqual(self.status()[1], {"status": "IDLE", "from": "SUCCESS"})
 
     def test_emits_the_file_in_real_time_and_loops(self):
-        period = REPLAY_RECORDS[-1][0] + mock_robot.Replay.LOOP_GAP_USEC
+        period = REPLAY_RECORDS[-1][0] + mock_robot.ReplayPublisher.LOOP_GAP_USEC
         self.clock.now += (period + 1500) / 1e6      # one lap, then the next lap's first two
-        self.replay.advance()
+        self.replay.catch_up()
         expected = ([(self.t0 + ts, uid, st) for ts, uid, st in REPLAY_RECORDS]
                     + [(self.t0 + period + ts, uid, st) for ts, uid, st in REPLAY_RECORDS[:3]])
         self.assertEqual(self.truth, expected)
 
     def test_a_client_recording_drains_what_the_truth_saw(self):
         self.clock.now += 0.0005
-        self.replay.advance()
+        self.replay.catch_up()
         start = self.recorder.start()
         self.clock.now += 0.6
-        self.replay.advance()
+        self.replay.catch_up()
         drained = [(start + ts, uid, st)
                    for ts, uid, st in decode_transitions(self.recorder.drain())]
         self.assertEqual(drained, self.truth)        # nothing was due before the start
+
+
+def request(kind, *args):
+    """A request's frames: a header for ``kind`` (a letter, or a type byte),
+    then ``args``."""
+    kind = ord(kind) if isinstance(kind, str) else kind
+    return [struct.pack(HEADER_FORMAT, PROTOCOL_ID, kind, 7), *args]
+
+
+class HandleTest(unittest.TestCase):
+    """``handle``: one request's frames in, the publisher's reply out."""
+
+    def setUp(self):
+        self.clock, self.said = FakeClock(), []
+
+    def publisher(self, kind, **options):
+        # Frozen clocks: an `r start` reply is the wall-clock anchor advanced
+        # by the monotonic clock, and a real one would tick between the reads.
+        clocks = dict(clock=self.clock, wall_clock=lambda: 12.0, say=self.said.append)
+        if kind == "replay":
+            return mock_robot.ReplayPublisher(REPLAY_FILE, **clocks)
+        return mock_robot.ScriptedPublisher(mock_robot.CROSSDOOR, **options, **clocks)
+
+    def test_each_request_gets_its_reply(self):
+        crossdoor, unsupported = mock_robot.CROSSDOOR, [b"error", b"unsupported request"]
+        boards = [b"", b"DoorClosed::7;Nope"]
+        cases = [
+            # label, publisher, requests (a float lets that many seconds pass),
+            # the last reply after its header, or a whole error reply
+            ("T: the tree", "scripted", [request("T")], [crossdoor.xml.encode()]),
+            ("S: this tick's statuses, then a tick on", "scripted", [request("S")] * 3,
+             [mock_robot.build_status_buffer(2, crossdoor)]),
+            ("B: the boards asked for", "scripted", [request("B", boards[1])],
+             [mock_robot.build_blackboard_reply(boards, 0, crossdoor)]),
+            ("r start: the time as a decimal string", "scripted", [request("r", b"start")],
+             [b"12000000"]),
+            ("r stop: the header alone", "scripted",
+             [request("r", b"start"), request("r", b"stop")], []),
+            ("r with any other word: the header alone", "scripted",
+             [request("r", b"pause")], []),
+            ("t: the transitions since the start", "scripted",
+             [request("r", b"start")] + [request("S")] * 3 + [request("t")],
+             [encode_transition(0, 2, NodeStatus.SUCCESS)
+              + encode_transition(5, 3, NodeStatus.RUNNING)]),
+            ("replay T: the file's tree", "replay", [request("T")], [REPLAY_XML.encode()]),
+            ("replay S: caught up first", "replay", [0.0011, request("S")],
+             [status_record(1, 1) + status_record(2, 12)]),
+            ("replay B: no boards (msgpack nil)", "replay", [request("B", b"M")], [b"\xc0"]),
+            ("replay t: caught up first", "replay", [request("r", b"start"), 0.0011, request("t")],
+             [b"".join(encode_transition(*r) for r in REPLAY_RECORDS[:3])]),
+            ("r without its argument", "scripted", [request("r")],
+             [b"error", b"must be 2 parts message"]),
+            ("an unknown request", "scripted", [request(0x99)], unsupported),
+            ("a header with no type", "scripted", [[b"\x02"]], unsupported),
+        ]
+        for label, kind, requests, expected in cases:
+            with self.subTest(label):
+                publisher = self.publisher(kind)
+                for step in requests:
+                    if isinstance(step, float):
+                        self.clock.now += step
+                        continue
+                    uuid = publisher.tree_uuid
+                    reply = mock_robot.handle(publisher, step)
+                if expected and expected[0] == b"error":
+                    self.assertEqual(reply, expected)
+                else:
+                    self.assertEqual(reply[0], mock_robot.reply_header(step[0], uuid))
+                    self.assertEqual(reply[1:], expected)
+        with self.subTest("a header cut short: answered, echoed as zeros"):
+            reply = mock_robot.handle(self.publisher("scripted"), [b"\x02S"])
+            self.assertEqual(reply[0][:6], struct.pack(HEADER_FORMAT, PROTOCOL_ID, 0, 0))
+            self.assertEqual(reply[1:], [mock_robot.build_status_buffer(0, crossdoor)])
+
+    def test_switch_every_swaps_to_a_new_publisher(self):
+        publisher = self.publisher("scripted", switch_every=2)
+        first = publisher.tree_uuid
+        replies = [mock_robot.handle(publisher, frames)
+                   for frames in [request("r", b"start"), request("S"), request("S"),
+                                  request("t"), request("T")]]
+        # The STATUS reply that swaps still carries the old UUID; every later one the new.
+        self.assertEqual([reply[0][6:] == first for reply in replies],
+                         [True, True, True, False, False])
+        self.assertEqual(replies[3][1], b"")                    # a new publisher isn't recording
+        self.assertEqual(replies[4][1], mock_robot.PATROL.xml.encode())
+        self.assertEqual(self.said, ["[mock_robot] transition recording on",
+                                     "[mock_robot] swapped to the patrol tree "
+                                     "(6 nodes, new publisher UUID)"])
 
 
 class EveryTreeTest(unittest.TestCase):

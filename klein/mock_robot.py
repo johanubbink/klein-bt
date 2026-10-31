@@ -644,32 +644,113 @@ def _apply_transition(state, uid, status):
         state[uid] = status
 
 
-class Replay:
+# --------------------------------------------------------------------------- #
+# Publishers: what answers the requests
+# --------------------------------------------------------------------------- #
+# Both kinds give ``handle`` the same face: ``xml``, ``tree_uuid``,
+# ``recorder``, ``say``, ``catch_up()`` (run before any request is answered),
+# ``status()`` and ``blackboard(frames)`` (reply payloads), plus ``start()``,
+# which ``main`` calls once the port is bound.
+class ScriptedPublisher:
+    """A built-in tree's mission, one tick per STATUS poll.
+
+    ``switch_every`` > 0 swaps to the next tree every that many polls, as a
+    robot loading a new mission does: a new publisher, with a fresh UUID and a
+    recorder that isn't recording. ``say`` prints what a person watching the
+    console wants to know (a swap, recording on or off).
+    """
+
+    def __init__(self, tree, switch_every=0, truth=None, say=print,
+                 clock=time.monotonic, wall_clock=time.time):
+        self._switch_every = switch_every
+        self._truth = truth
+        self._new_recorder = lambda: TransitionRecorder(
+            clock=clock, wall_clock=wall_clock, truth=truth)
+        self.say = say
+        self._become(tree)
+
+    def _become(self, tree):
+        self.tree, self.tick = tree, 0
+        # Drawn per publisher, like the CreateRandomUUID() at the top of
+        # Groot2Publisher::serverLoop. A constant here would make two runs of
+        # the mock indistinguishable on the wire, so restarting it onto a
+        # different tree would look to a client exactly like the tree never
+        # changing — which is the one thing this mock exists to let you test.
+        self.tree_uuid = os.urandom(TREE_UUID_SIZE)
+        self.recorder = self._new_recorder()
+
+    def start(self):
+        """Come up: the truth log's publisher line, then the tree, all IDLE,
+        enters its first frame at once; those transitions are as real as any
+        later one (the truth log wants them)."""
+        if self._truth:
+            self._truth.publisher(self.tree.name, self.tree_uuid, self.recorder.now_us())
+        self.recorder.record({}, _frame_at(0, self.tree)[0], self.tree.uids)
+
+    @property
+    def xml(self):
+        return self.tree.xml
+
+    def catch_up(self):
+        """Nothing to do: the mission only moves on STATUS polls."""
+
+    def status(self):
+        """This tick's STATUS buffer; then the mission steps a tick, and every
+        ``switch_every`` ticks the tree swaps."""
+        buffer = build_status_buffer(self.tick, self.tree)
+        before = _frame_at(self.tick, self.tree)[0]
+        self.tick += 1
+        self.recorder.record(before, _frame_at(self.tick, self.tree)[0], self.tree.uids)
+        if self._switch_every and self.tick % self._switch_every == 0:
+            # Swapped *after* this reply's header is built, so the next reply
+            # of any type is the first to carry the new UUID — exactly what a
+            # restarted publisher looks like from the client's side.
+            self._become(_next_tree(self.tree))
+            self.start()
+            self.say(f"[mock_robot] swapped to the {self.tree.name} tree "
+                     f"({len(self.tree.uids)} nodes, new publisher UUID)")
+        return buffer
+
+    def blackboard(self, request_frames):
+        return build_blackboard_reply(request_frames, self.tick, self.tree)
+
+
+class ReplayPublisher:
     """``--replay``: publish a recorded ``.btlog`` as if its tree were running now.
 
     The file's transitions are re-emitted in order at their recorded times,
-    looping, each stamped on the recorder's clock. STATUS answers with the state they leave behind, so
-    ``S`` and ``t`` always agree. Time only advances when a request arrives —
-    ``advance()`` catches up — which is invisible from the client's side.
+    looping, each stamped on the recorder's clock. STATUS answers with the
+    state they leave behind, so ``S`` and ``t`` always agree. Time only
+    advances when a request arrives — ``catch_up()`` — which is invisible
+    from the client's side. Raises ValueError for a file it can't replay.
     """
     LOOP_GAP_USEC = 2_000_000   # t11_groot_howto sleeps 2 s between missions
 
-    def __init__(self, data, recorder):
+    def __init__(self, data, truth=None, say=print,
+                 clock=time.monotonic, wall_clock=time.time):
+        self._truth = truth
+        self.say = say
+        self.recorder = TransitionRecorder(clock=clock, wall_clock=wall_clock, truth=truth)
         log = read_btlog(data)
         self.xml, self._records = log.xml, log.records
         if not self._records:
             raise ValueError("it holds no transitions")
         self.uids = sorted({int(el.get("_uid")) for el in ET.fromstring(self.xml).iter()
                             if el.get("_uid")})
-        self._recorder = recorder
-        self.t0 = recorder.now_us()     # where the file's offset 0 lands on the first lap
+        self.tree_uuid = os.urandom(TREE_UUID_SIZE)     # see ScriptedPublisher
+        self.t0 = self.recorder.now_us()    # where the file's offset 0 lands on the first lap
         self.period = self._records[-1][0] + self.LOOP_GAP_USEC
         self._next = 0          # index into the endless looped record stream
         self.state = {uid: IDLE for uid in self.uids}
 
-    def advance(self):
+    def start(self):
+        """Come up: the truth log's publisher line."""
+        if self._truth:
+            self._truth.publisher("replay", self.tree_uuid, self.t0)
+
+    def catch_up(self):
         """Apply (and hand to the recorder) every transition that is now due."""
-        now = self._recorder.now_us()
+        now = self.recorder.now_us()
         emitted = []
         while True:
             lap, i = divmod(self._next, len(self._records))
@@ -680,11 +761,16 @@ class Replay:
             _apply_transition(self.state, uid, status)
             emitted.append((t_us, uid, status))
             self._next += 1
-        self._recorder.add(emitted)
+        self.recorder.add(emitted)
 
-    def status_buffer(self):
+    def status(self):
         return b"".join(struct.pack(STATUS_RECORD_FORMAT, uid, self.state[uid])
                         for uid in self.uids)
+
+    def blackboard(self, request_frames):
+        """A file carries no blackboard: the answer of a publisher asked for
+        boards it does not have (msgpack nil)."""
+        return msgpack.packb(None)
 
 
 class TruthLog:
@@ -724,17 +810,18 @@ class RequestLog:
 
 
 # A fixed UUID for the unit tests, which want reply framing to be reproducible.
-# A *running* mock never uses it — see main(), which draws a random one per
-# process exactly as Groot2Publisher::serverLoop does.
+# A *running* mock never uses it — see ScriptedPublisher, which draws a random
+# one per publisher exactly as Groot2Publisher::serverLoop does.
 DEFAULT_TREE_UUID = bytes(range(TREE_UUID_SIZE))
 
 
 def reply_header(request_first_frame, tree_uuid=DEFAULT_TREE_UUID):
     """Build the reply header: the request's header echoed back, then the tree UUID.
 
-    ``main()`` draws a *fresh random* UUID on every switch rather than keeping
-    one per tree — swapping back to the first tree is a new publisher too, and
-    klein must still detect it. See docs/protocol.md for why that is the signal.
+    ``ScriptedPublisher`` draws a *fresh random* UUID on every switch rather
+    than keeping one per tree — swapping back to the first tree is a new
+    publisher too, and klein must still detect it. See docs/protocol.md for why
+    that is the signal.
     """
     # request frame is protocol(u8) type(u8) unique_id(u32); echo it back.
     if len(request_first_frame) >= REQUEST_HEADER_SIZE:
@@ -745,7 +832,44 @@ def reply_header(request_first_frame, tree_uuid=DEFAULT_TREE_UUID):
     return struct.pack(HEADER_FORMAT, PROTOCOL_ID, req_type, unique_id) + tree_uuid
 
 
-def main():
+def _request_type(frames):
+    """The request type byte of a request's header frame, 0 if it has none."""
+    header = frames[0] if frames else b""
+    return header[1] if len(header) >= 2 else 0
+
+
+def handle(publisher, frames):
+    """Answer one request: its frames in, the reply frames out, no socket.
+
+    ``publisher`` is a ``ScriptedPublisher`` or a ``ReplayPublisher``. Like
+    the real publisher, a request it doesn't serve, or TOGGLE_RECORDING
+    without its argument, gets an error reply (``b"error"`` and a reason).
+    """
+    req_type = _request_type(frames)
+    publisher.catch_up()        # before answering, whatever the request
+    # Built first: a STATUS poll can swap the tree, and its own reply still
+    # carries the old UUID.
+    header = reply_header(frames[0] if frames else b"", publisher.tree_uuid)
+    if req_type == REQ_FULLTREE:
+        return [header, publisher.xml.encode("utf-8")]
+    if req_type == REQ_STATUS:
+        return [header, publisher.status()]
+    if req_type == REQ_BLACKBOARD:
+        return [header, publisher.blackboard(frames)]
+    if req_type == REQ_TOGGLE_RECORDING:
+        payload = toggle_recording(frames, publisher.recorder)
+        if payload is None:
+            return [b"error", b"must be 2 parts message"]
+        publisher.say(f"[mock_robot] transition recording "
+                      f"{'on' if publisher.recorder.recording else 'off'}")
+        return [header, *payload]
+    if req_type == REQ_GET_TRANSITIONS:
+        return [header, publisher.recorder.drain()]
+    return [b"error", b"unsupported request"]
+
+
+def _parse_args():
+    """``(parser, args)``: the parser too, for later usage errors."""
     ap = argparse.ArgumentParser(description="Fake BehaviorTree.CPP publisher for testing klein.")
     ap.add_argument("--host", default="*", help="bind address (default: * = all interfaces)")
     ap.add_argument("--port", type=int, default=1667, help="ZeroMQ REP port (default: 1667)")
@@ -776,100 +900,54 @@ def main():
     args = ap.parse_args()
     if args.replay and args.switch_every:
         ap.error("--replay and --switch-every cannot be combined")
+    return ap, args
 
-    truth = TruthLog(args.truth_log) if args.truth_log else None
-    recorder = TransitionRecorder(truth=truth)
-    replay = None
+
+def _publisher(ap, args, truth):
+    """The publisher the flags ask for. A ``--replay`` file that can't be
+    replayed is a usage error."""
+    if not args.replay:
+        return ScriptedPublisher(TREES[args.tree], args.switch_every, truth=truth)
+    try:
+        with open(args.replay, "rb") as f:
+            return ReplayPublisher(f.read(), truth=truth)
+    except (OSError, ValueError) as exc:
+        ap.error(f"cannot replay {args.replay}: {exc}")
+
+
+def _announce(args, endpoint, publisher):
+    print(f"[mock_robot] publisher listening on {endpoint}")
     if args.replay:
-        try:
-            with open(args.replay, "rb") as f:
-                replay = Replay(f.read(), recorder)
-        except (OSError, ValueError) as exc:
-            ap.error(f"cannot replay {args.replay}: {exc}")
+        print(f"[mock_robot] replaying {args.replay} ({len(publisher.uids)} nodes, "
+              f"looping)")
+    else:
+        print(f"[mock_robot] tree: {publisher.tree.name} "
+              f"({len(publisher.tree.uids)} nodes, 1 subtree)")
+    if args.switch_every > 0:
+        print(f"[mock_robot] swapping trees every {args.switch_every} status polls")
+    print(f"[mock_robot] run:  klein-bt --robot-port {args.port}")
 
+
+def main():
+    ap, args = _parse_args()
+    truth = TruthLog(args.truth_log) if args.truth_log else None
+    publisher = _publisher(ap, args, truth)     # a bad --replay file stops us before the bind
     ctx = zmq.Context()
     sock = ctx.socket(zmq.REP)
     endpoint = f"tcp://{args.host}:{args.port}"
     sock.bind(endpoint)
-    tree = TREES[args.tree]
-    # Drawn per process, like the CreateRandomUUID() at the top of
-    # Groot2Publisher::serverLoop. A constant here would make two runs of the
-    # mock indistinguishable on the wire, so restarting it onto a different
-    # tree would look to a client exactly like the tree never changing — which
-    # is the one thing this mock exists to let you test.
-    tree_uuid = os.urandom(TREE_UUID_SIZE)
-    print(f"[mock_robot] publisher listening on {endpoint}")
-    if replay:
-        print(f"[mock_robot] replaying {args.replay} ({len(replay.uids)} nodes, "
-              f"looping)")
-    else:
-        print(f"[mock_robot] tree: {tree.name} ({len(tree.uids)} nodes, 1 subtree)")
-    if args.switch_every > 0:
-        print(f"[mock_robot] swapping trees every {args.switch_every} status polls")
-    print(f"[mock_robot] run:  klein-bt --robot-port {args.port}")
-    if truth:
-        truth.publisher("replay" if replay else tree.name, tree_uuid,
-                        replay.t0 if replay else recorder.now_us())
-    if not replay:
-        # The tree comes up all IDLE and enters its first frame at once; those
-        # transitions are as real as any later one (the truth log wants them).
-        recorder.record({}, _frame_at(0, tree)[0], tree.uids)
+    # Only now is the port ours: a launch that lost it to another process
+    # leaves nothing in the truth log.
+    publisher.start()
+    _announce(args, endpoint, publisher)
 
-    tick = 0
     request_log = RequestLog() if args.log_requests else None
     try:
         while True:
             frames = sock.recv_multipart()
-            header = frames[0] if frames else b""
-            req_type = header[1] if len(header) >= 2 else 0
             if request_log:
-                request_log.add(req_type)
-            if replay:
-                replay.advance()        # catch up before answering, whatever the request
-
-            if req_type == REQ_FULLTREE:
-                xml = replay.xml if replay else tree.xml
-                sock.send_multipart([reply_header(header, tree_uuid), xml.encode("utf-8")])
-            elif req_type == REQ_STATUS and replay:
-                sock.send_multipart([reply_header(header, tree_uuid), replay.status_buffer()])
-            elif req_type == REQ_STATUS:
-                sock.send_multipart([reply_header(header, tree_uuid),
-                                     build_status_buffer(tick, tree)])
-                before, _bb = _frame_at(tick, tree)
-                tick += 1
-                recorder.record(before, _frame_at(tick, tree)[0], tree.uids)
-                if args.switch_every and tick % args.switch_every == 0:
-                    # Swapped *after* the reply, so the next reply of any type is
-                    # the first to carry the new UUID — exactly what a restarted
-                    # publisher looks like from the client's side.
-                    tree = _next_tree(tree)
-                    tree_uuid = os.urandom(TREE_UUID_SIZE)
-                    tick = 0            # the new mission starts at its beginning
-                    # A new publisher is not recording.
-                    recorder = TransitionRecorder(truth=truth)
-                    if truth:
-                        truth.publisher(tree.name, tree_uuid, recorder.now_us())
-                    recorder.record({}, _frame_at(0, tree)[0], tree.uids)
-                    print(f"[mock_robot] swapped to the {tree.name} tree "
-                          f"({len(tree.uids)} nodes, new publisher UUID)")
-            elif req_type == REQ_BLACKBOARD:
-                # A replayed file carries no blackboard: answer like a publisher
-                # asked for boards it does not have (msgpack nil).
-                payload = (msgpack.packb(None) if replay
-                           else build_blackboard_reply(frames, tick, tree))
-                sock.send_multipart([reply_header(header, tree_uuid), payload])
-            elif req_type == REQ_TOGGLE_RECORDING:
-                payload = toggle_recording(frames, recorder)
-                if payload is None:
-                    sock.send_multipart([b"error", b"must be 2 parts message"])
-                else:
-                    sock.send_multipart([reply_header(header, tree_uuid), *payload])
-                    print(f"[mock_robot] transition recording "
-                          f"{'on' if recorder.recording else 'off'}")
-            elif req_type == REQ_GET_TRANSITIONS:
-                sock.send_multipart([reply_header(header, tree_uuid), recorder.drain()])
-            else:
-                sock.send_multipart([b"error", b"unsupported request"])
+                request_log.add(_request_type(frames))
+            sock.send_multipart(handle(publisher, frames))
     except KeyboardInterrupt:
         print("\n[mock_robot] shutting down.")
     finally:

@@ -39,14 +39,24 @@ The code:
   ([Recording model](#recording-model)). [`klein/streaming.py`](../klein/streaming.py)
   streams it to dashboards, and [`klein/btlog.py`](../klein/btlog.py) saves and
   loads it as `.btlog` files.
-- [`klein/static/`](../klein/static/): the dashboard. `app.js` handles state,
-  the WebSocket, the tree and the sidebar; `renderers.js` formats blackboard
-  values; `recording.js` and `cursor.js` mirror the recording (see
+- [`klein/static/`](../klein/static/): the dashboard. `app.js` is its
+  composition root: the WebSocket, the one render path, the connection line,
+  the banners and the sidebar's pane. `tree.js` is the tree canvas (cards,
+  folding, the camera); `blackboard.js` the sidebar's blackboard panel and
+  its links to the cards; `ui.js` the toolkit the views share (drags,
+  panels, writes, words); `renderers.js` formats blackboard values;
+  `recording.js` and `cursor.js` mirror the recording (see
   [Browser model](#browser-model)); `window.js` is the Timeline's window,
-  which the Timeline and the overview both show and move; `drawer.js`,
-  `timeline.js` and `overview.js` are the drawer, its Timeline tab and its
-  overview. D3 is vendored so it works without internet. Dependabot can't
-  see a vendored file, so check
+  which the Timeline and the overview both show and move; `view.js` decides
+  what each render shows (see [Rendering](#rendering)). `drawer.js` is the
+  drawer itself (its pane, tabs, recorder pill and Save), and its parts are
+  `transport.js` (the transport row's buttons, clock and keys), `log.js`
+  (the Log tab), `timeline.js` (the Timeline tab) and `overview.js` (the
+  overview). They are native ES modules with no build step: `index.html`
+  loads D3 as a classic script (the modules use its global `d3`) and
+  `app.js` as a module, which imports the rest; each module imports what it
+  uses and exports its interface. D3 is vendored so it works without
+  internet. Dependabot can't see a vendored file, so check
   [D3's releases](https://github.com/d3/d3/releases) when cutting a klein
   release.
 
@@ -418,21 +428,24 @@ from the frames the gateway streams. Everything that shows a past moment
 locally from that mirror; **scrubbing never asks the backend anything.** The
 mirror holds everything the gateway keeps.
 
-The mirror is two classic scripts with no DOM and no d3, and the Timeline's
-window a third, so the tests run them under `gjs` against vectors
-`tests/make_vectors.py` builds from the Python model. That pins the two
-implementations together.
+The mirror is two ES modules with no DOM and no d3, the Timeline's window a
+third and what a render shows a fourth, so the tests import them under
+`gjs` and run them against vectors `tests/make_vectors.py` builds from the
+Python model. That pins the two implementations together. Each is named
+here as app.js imports it (`import * as KleinRecording from
+"./recording.js"`).
 
 - [`klein/static/recording.js`](../klein/static/recording.js) →
-  `globalThis.KleinRecording`. `createStore()` returns a store whose
+  `KleinRecording`. `createStore()` returns a store whose
   `ingest(message)` takes a parsed text frame or a binary `ArrayBuffer`;
   `store.recording` is the one recording klein streams. The Python model's
   queries have mirrors here (`stateAtSeq`, `seqAtTime`, `stateAt`, `bbAt`,
-  `decodeState`), next to what the cursor, the Log (`logRows`, `logRowAt`)
-  the Timeline (`intervalsAll`, `timelineMarks`, `timelineSections`) and
-  the overview (`treeRuns`, `countIn`, `busiestColumn`) need.
+  `decodeState`), next to what the cursor, the Log (`logRows`: the rows
+  listed once, `{count, at(i), indexOf(segId, seq)}`), the Timeline
+  (`intervalsAll`, `timelineMarks`, `timelineSections`) and the overview
+  (`treeRuns`, `countIn`, `busiestColumn`) need.
 - [`klein/static/cursor.js`](../klein/static/cursor.js) →
-  `globalThis.KleinCursor`. A clock is data: `live()`, `pause(segId, seq,
+  `KleinCursor`. A clock is data: `live()`, `pause(segId, seq,
   t?)`, `play(fromSegId, fromSeq, nowMs, t?)` (1× only).
   `cursorPos(clock, nowMs, recording)` gives `{seg, seq, t, live, mode}`,
   `mode` being `"live"`, `"playing"` or `"paused"`: live is the last
@@ -446,12 +459,33 @@ implementations together.
   the overview and Home use it. `evicted` says whether eviction dropped the
   moment a clock shows.
 - [`klein/static/window.js`](../klein/static/window.js) →
-  `globalThis.KleinWindow`: the Timeline's window (its rules: see
+  `KleinWindow`: the Timeline's window (its rules: see
   [The drawer](#the-drawer)). `sync(rec, pos)` applies them once per
   render, and `get()` is `{t0, t1, span, follow}` (null without a
   recording). The reader's moves (`set`, `zoomBy`, `step`, `fit`, `reveal`)
   call the `onMove` listeners; `hold` keeps the window still while a scrub
   lasts. `create()` makes another.
+- [`klein/static/view.js`](../klein/static/view.js) → `KleinView`: what
+  one render shows (see [Rendering](#rendering)). `frame({rec, clock,
+  nowMs, frames, support})` is the display at one render: the clock from
+  then on and whether it was moved off an evicted moment (`evicted`) or
+  plays on (`playing`), `pos`, `source` (`"recording"` or `"frames"`),
+  `seg`, `tree`, `status`, the time and `mode` the blackboard is shown at,
+  `viewingPast` and `noBoards`. `panel(view, frames, wasLive)` is the
+  blackboard panel's input at it, `{boards, opts}` for `KleinBlackboard.render`
+  (`opts.empty` the panel's words when it lists no board), or null to leave
+  the panel as it is. `rowMarks({change, t, mode, primed, reducedMotion,
+  shown, seen})` is one blackboard row's marks at a paint, `{streaming,
+  marked, fire, fade}`, `fade` being `"restart"`, `"clear"` or `"keep"`.
+  `timelineWindow(rec, seg, t0, t1, maxRecords)` is what the Timeline's
+  window shows for segment `seg`'s tree (see [The drawer](#the-drawer)):
+  `{count, tooMany, per, bands, edge}`, the transitions in it, whether
+  that is more than `maxRecords` (then no bars), the marks per uid
+  (`timelineMarks`), the bands of other trees and gaps with their labels
+  and tooltips, and `rec.tMin` when the recording starts inside it (else
+  null). `anchorAfter(rows, topRow)` is where the Log's top row `{seg,
+  seq}` is once the rows are listed again: its index, or null when it is no
+  longer listed.
 
 `app.js` routes binary frames and the recording's message types to the store.
 
@@ -459,8 +493,10 @@ implementations together.
 
 There is one render path. A WebSocket message only stores what it carries
 (into the store, or as "the latest `layout`/`status`/`blackboard` frame") and
-asks for a frame; `render()` runs on the next `requestAnimationFrame` and
-decides what is displayed:
+asks for a frame; `render()` runs on the next `requestAnimationFrame`.
+`KleinView.frame` decides what is displayed, by the rules below, and
+`render()` applies it (the painters, the body classes, the banners); the
+board panel's input is `KleinView.panel`'s:
 
 - **The display source.** While the recording has a backfilled segment, the
   source is the **recording**: `pos = cursorPos(clock)`, live being the head
@@ -483,10 +519,11 @@ decides what is displayed:
   same-tree restart or re-arm (a new segment sharing the layout) doesn't
   redraw. A WebSocket reconnect forgets the drawn id, so the first tree
   klein names redraws the canvas and resets the camera.
-- **Painting.** The same `paintStatus` (strokes and pills, skipping cards
-  whose status is unchanged) and `renderBlackboards` draw either source.
-  `updateTreeLayout` repaints the displayed state too, so cards revealed by
-  unfolding show it at once. `renderBlackboards(boards, {track, t, mode})`
+- **Painting.** The same `KleinTree.paintStatus` (tree.js: strokes and
+  pills, skipping cards whose status is unchanged) and
+  `KleinBlackboard.render` (blackboard.js) draw either source. A relayout
+  (`updateTreeLayout`) repaints the displayed state too, so cards revealed by
+  unfolding show it at once. `KleinBlackboard.render(boards, {track, t, mode})`
   marks changes from a segment's blackboard `track` at time `t` in mode
   `live`, `playing` or `paused`. `KleinRecording.bbChange(track, board, key,
   t)` gives a key's last change at or before `t` (`tChange`; a value at or
@@ -497,13 +534,19 @@ decides what is displayed:
   (`bb-fresh`, `--fade` in `styles.css`, 1.8 s) live or playing, and is
   marked statically (`bb-mark`) when paused or with reduced motion.
   Switching mode only primes the rows, so a jump never animates; closed or
-  hidden rows never start a fade. Without a recording, the same rule runs
+  hidden rows never start a fade. `KleinView.rowMarks` decides each row's
+  marks from its `bbChange`, the paint's mode, whether the panel was last
+  painted in that mode from the same source (`primed`), and the change the
+  row was last painted for (`seen`); `KleinBlackboard.render` only
+  reconciles the boards and rows with the DOM (`syncKeyed` in ui.js, which
+  reorders rows only when the order is wrong, since re-appending one
+  restarts its fade) and applies the marks. Without a recording, the same rule runs
   on a local track of the `blackboard` frames (`addBoards`, at their newest
   `t`, kept to the last 3 s): timed by the gateway, so a busy browser
   doesn't change the answer. The board panel is re-rendered only when a
   blackboard input changed or the cursor moved, not on every `head`.
-- **Keys and nodes.** `showTree` indexes the layout's `bindings` once:
-  `(board, key)` to its writers (`out`, `inout`) and readers (`in`), a node
+- **Keys and nodes.** `KleinBlackboard.show` indexes a new tree's
+  `bindings` once: `(board, key)` to its writers (`out`, `inout`) and readers (`in`), a node
   that does both counting as a writer. Hovering a key row outlines the
   writers' cards solid and the readers' dashed (`rect.node-link`, outside
   the card, so the status stroke stays readable) and accents the key on
@@ -513,9 +556,12 @@ decides what is displayed:
   folded ancestor's card, and a fold or unfold while hovering moves the
   outline there. Hovering a card rings its keys' rows (`.linked`; a folded
   card's include the nodes it hides, and folding the hovered card by its
-  click re-rings them).
+  click re-rings them). The canvas knows nothing of the panel: the panel
+  paints its outlines and pulses on `KleinTree.cards()`, and the canvas
+  tells it of a relayout (`cardsMoved`) and of a card hovered
+  (`cardHovered`) through the hooks app.js connects.
   **The writer pulse** follows the row marks:
-  `renderBlackboards` hands `setPulses` the keys it marks statically and
+  `KleinBlackboard.render` hands `setPulses` the keys it marks statically and
   the ones whose fade it would start (whether or not their board is open),
   and a `--changed` dot at the writers' card corner holds (`mark`) or fades
   once (`fire`, 1.8 s). Streaming keys don't pulse. Only changed cards are
@@ -533,13 +579,16 @@ decides what is displayed:
   the sidebar, above the drawer: `#past-edge`). Which moment is shown is the
   drawer's clock, beside its **Go live** (see
   [The drawer](#the-drawer)).
-- **The drawer** (see [The drawer](#the-drawer)): `KleinDrawer.showRecording`
-  and `KleinDrawer.update(rec, pos)` run on every render (the drawer reads
-  `pos.mode` and keeps no clock of its own), then, once the cursor's tree is
+- **The drawer** (see [The drawer](#the-drawer)): `KleinDrawer.showRecording`,
+  `KleinTransport.update(rec, pos)` and `KleinLog.update(rec, pos)` run on
+  every render (they read `pos.mode` and keep no clock of their own), then,
+  once the cursor's tree is
   on the canvas, `KleinWindow.sync(rec, pos)` (the Timeline's window),
   `KleinTimeline.update(rec, pos, hierarchy)` and
-  `KleinOverview.update(rec, pos)`, which both paint that window. They move the cursor through one `seek(clock)`
-  (`KleinDrawer.onSeek`, `KleinTimeline.connect`, `KleinOverview.onSeek`),
+  `KleinOverview.update(rec, pos)`, which both paint that window. They move
+  the cursor through one `seek(clock)` (`KleinTransport.connect`,
+  `KleinTimeline.connect`, `KleinOverview.onSeek`; the Log's row clicks go
+  through the transport's, `KleinLog.onPick`),
   which sets the clock and asks for a render, and the window through
   `KleinWindow`'s moves, which repaint both at once (`onMove`); the
   Timeline's chevrons fold the canvas through `toggleFold` / `foldOthers`, the
@@ -552,7 +601,9 @@ decides what is displayed:
 `window.kleinDebug()` is read-only, for the test harness: the mirror's
 `describe(rec)` facts (when there is a recording) plus `displaySource`
 (`"recording"` or `"frames"`) and `displayed`, the `{uid: {status, from}}`
-last painted.
+last painted. It is one of the page globals app.js sets for the tests and
+`scripts/`, in one block at its end; the modules themselves share nothing
+through `window` (see [testing.md](testing.md), "Probes").
 
 Because the mock answers `S` and then steps, the drain after a reply already
 holds the next tick, so live cards can be one poll ahead of the latest
@@ -592,19 +643,29 @@ full-height pane over the canvas's left edge, and behaves like the drawer
 - **Who follows.** The shown width (the strip's when collapsed) is the
   `--sidebar-width` custom property on `<html>`: the drawer's left edge and
   the banner stack's centre follow it in CSS alone, live while dragging.
-  `sidebarWidth()` returns the same width for `visibleViewport()`, so R and F
-  frame the space right of it. Folding nudges the camera by half the change
-  so the tree stays centred; dragging leaves it be. A change of width also
+  `sidebarWidth()` returns the same width, which app.js hands the camera
+  (`KleinTree.connect`) for `visibleViewport()`, so R and F frame the space
+  right of it. Folding nudges the camera by half the change
+  (`KleinTree.nudge`) so the tree stays centred; dragging leaves it be. A change of width also
   asks for a render, so the Timeline redraws its bars for the drawer's new
   width.
-- **Shared with the drawer:** `KleinDrawer.pane(...)`, the dragged-edge,
-  foldable, remembered panel both are, and the fold button's and the grip's
-  CSS. Each panel keeps its own state and storage.
+- **Shared with the drawer:** `pane(...)` in `ui.js` (the dashboard's
+  toolkit), the dragged-edge, foldable, remembered panel both are, and the
+  fold button's and the grip's CSS. Each panel keeps its own state and
+  storage.
 
 ## The drawer
 
 A bottom drawer ([`klein/static/drawer.js`](../klein/static/drawer.js)) holds
-the recording views in two 48 px rows over a scrollable body:
+the recording views in two 48 px rows over a scrollable body. drawer.js is
+the drawer itself: the pane, the tabs and which one is on screen
+(`shownTab`, `selectedTab`), the recorder pill and Save, and what is kept in
+words (`keptSpan`, `droppedNote`). Its parts ask it what is on screen, and
+it knows none of them: the transport row's buttons, clock and keys
+([`transport.js`](../klein/static/transport.js), which makes the shared
+cursor's moves), the overview (`overview.js`), the Log
+([`log.js`](../klein/static/log.js)) and the Timeline (`timeline.js`). A
+tab switch tells the Log (`KleinDrawer.onTab`) before it renders.
 
 - the **transport row**, shared by both tabs: the collapse button,
   **|◀ ▶ ▶|**, `● Live` (or, in the past, **Go live ⏭**),
@@ -647,7 +708,7 @@ sidebar's width (see [The sidebar](#the-sidebar)).
   Each has a key (its tooltip names it; see Keys below): ←/→ step, Space
   plays or pauses, End (and Esc) goes live; Home has no button and pauses at
   the oldest kept moment. The **clock** is the cursor's time to the µs
-  (`14:03:22.201 030`, `KleinDrawer.formatTime`); live, the head's or the
+  (`14:03:22.201 030`, `formatTime` in `ui.js`); live, the head's or the
   newest blackboard sample's, whichever is newer (`shownTime`). Without a
   recording the buttons are off, and Live and the clock are hidden.
 - **The overview** ([`klein/static/overview.js`](../klein/static/overview.js))
@@ -753,11 +814,13 @@ sidebar's width (see [The sidebar](#the-sidebar)).
   maps linearly onto the rows (`virtualTop()`); `#log-rows` clips the rows
   (`overflow: clip`), so overscan rows can't lengthen the scroll range.
   Below that the mapping is exact. The rows are listed again from the mirror
-  whenever records arrive, eviction drops some, or the filter changes, so an
-  evicted row is never shown. While live and scrolled to the newest row, the
-  log follows it; scrolling up stops that until you scroll back down or go
-  back to live. Scrolled up, the row at the top stays at the top when rows
-  are listed again; if eviction dropped that row too, the list shows its top.
+  (`KleinRecording.logRows`) whenever records arrive, eviction drops some,
+  or the filter changes, so an evicted row is never shown. While live and
+  scrolled to the newest row, the log follows it; scrolling up stops that
+  until you scroll back down or go back to live. Scrolled up, the row at the
+  top stays at the top when rows are listed again; if eviction dropped that
+  row too (and so every row above it), the list shows its top
+  (`KleinView.anchorAfter`).
 - **Dropped history.** Once eviction has dropped transitions
   (`historyDropped`), the Log's first line, hatched like the Timeline's
   not-recorded bands, reads "Transitions older than the kept 10 min were
@@ -832,9 +895,10 @@ sidebar's width (see [The sidebar](#the-sidebar)).
     subtree name), folded away or not; sections around them stay as dimmed
     context headers. The fold is still shown, and applies again when the
     filter is cleared.
-  - **Bars.** From `intervalsAll` and `timelineMarks` over the window, for
-    every segment of the drawn tree in it (a resume after an outage is the
-    same tree): an amber bar per RUNNING span, capped by a 3 px mark in the
+  - **Bars.** From `KleinView.timelineWindow`: `intervalsAll` and
+    `timelineMarks` over the window, for every segment of the drawn tree in
+    it (a resume after an outage is the same tree): an amber bar per
+    RUNNING span, capped by a 3 px mark in the
     outcome's colour (green SUCCESS, red FAILURE, blue SKIPPED; none when
     still running or halted), and a single 3 px mark for an outcome reached
     in the tick it started. Shapes on the same pixel are drawn once. Not
@@ -887,8 +951,8 @@ sidebar's width (see [The sidebar](#the-sidebar)).
     the running frontier into view, under the axis and its section's header.
 - **Keys.** The camera keys ignore presses inside the drawer, as inside the
   sidebar (F scrolls the Timeline only when pressed outside it). The
-  cursor's keys are one window `keydown` handler in drawer.js, each doing
-  what its button does, in either tab and folded:
+  cursor's keys are a table in transport.js (`KEYS`) behind one guard
+  (`ignored`), each doing what its button does, in either tab and folded:
 
   | Key | Does | Button |
   |---|---|---|
@@ -932,8 +996,9 @@ with no RUNNING node below it. Parents like `Sequence` are RUNNING whenever a
 child is, so only the frontier tells you what the robot is actually doing. A
 `Parallel` can have several, so `F` frames all of them.
 
-Both aim at `visibleViewport()`, the part of the canvas you can see: right of
-the sidebar (`sidebarWidth()`), below a 56 px strip kept clear for one banner
+The camera is tree.js's. Both keys aim at `visibleViewport()`, the part of
+the canvas you can see: right of the sidebar (`sidebarWidth()`, which app.js
+hands it), below a 56 px strip kept clear for one banner
 pill (always, so the tree never sits under a pill and a pill coming or going
 doesn't move the camera; a second pill at once may overlap the tree's top for
 a moment), and above the drawer (precisely, above the hint line that

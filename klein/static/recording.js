@@ -12,9 +12,6 @@
 // No DOM and no d3: plain functions over plain data, so it runs under gjs.
 // See docs/architecture.md, "Browser model".
 
-(function () {
-"use strict";
-
 // Groot2 status bytes, as in klein/groot2_protocol.py.
 const IDLE = 0, RUNNING = 1, SUCCESS = 2, FAILURE = 3, SKIPPED = 4;
 const IDLE_TRANSITION = 10;
@@ -431,7 +428,7 @@ function treeName(layout) {
 }
 
 // fn(node) for every node of a d3 hierarchy, parents first, folded away or
-// not: a folded node keeps its children in _children (app.js).
+// not: a folded node keeps its children in _children (tree.js).
 function eachNode(root, fn) {
     (function walk(node) {
         fn(node);
@@ -484,54 +481,68 @@ function timelineSections(tree, folded, needle = "") {
     const matches = (name, subtree) => !needle || name.toLowerCase().includes(needle)
                                                 || subtree.toLowerCase().includes(needle);
     function walk(node, depth, tint, subtree, shown) {
-        const section = depth === 0 || Boolean(node.is_subtree_root);
         if (node.is_subtree_root) {
             subtree = node.name;
             tint++;
         }
         const children = node.children || [];
         const isFolded = folded.has(node.id) && children.length > 0;
-        const kids = children.map((c) => walk(c, depth + 1, tint, subtree, shown && !isFolded));
-        const inner = [];
-        let count = 0;
-        for (const k of kids) {
-            count += 1 + k.count;
-            if (k.uid !== null && k.uid !== undefined) inner.push(k.uid);
-            inner.push(...k.inner);
-        }
+        const open = shown && !isFolded;        // the rows below it are shown
+        const kids = children.map((c) => walk(c, depth + 1, tint, subtree, open));
+        const { count, inner } = below(kids);
         const item = {
             id: node.id, uid: node.uid === undefined ? null : node.uid, name: node.name,
             type: node.type, category: node.category, depth,
-            tint: Math.min(tint, 3), section,
+            tint: Math.min(tint, 3), section: depth === 0 || Boolean(node.is_subtree_root),
             label: depth === 0 ? treeName(tree) : node.name,
             count, expandable: children.length > 0, folded: isFolded,
             hidden: isFolded ? count : 0, inner, context: false, items: [],
             keep: matches(node.name, subtree) && (shown || Boolean(needle)),
+            // What follows this node's row: the rows below it, unless a
+            // fold hides them (a filter lists them anyway).
+            flat: needle || open ? flatten(kids) : [],
         };
-        // What follows this node's row: the rows below it, flattened into its
-        // own section or, for a header, kept inside it.
-        item.flat = [];
-        for (const k of kids) {
-            if (!(needle || (shown && !isFolded))) break;
-            if (k.section) {
-                if (k.keep || k.items.length) item.flat.push(k);
-            } else {
-                if (k.keep) item.flat.push(k);
-                item.flat.push(...k.flat);
-            }
-        }
-        if (section) {
-            item.items = item.flat;
-            item.flat = [];
-            if (!item.keep && item.items.length) {
-                item.context = true;
-                item.keep = true;
-            }
-        }
-        return item;
+        return item.section ? closeSection(item) : item;
     }
     const root = walk(tree, 0, 0, treeName(tree), true);
     return root.keep ? strip(root) : null;
+}
+
+// What a node's children hold below it: count, the nodes; inner, their
+// uids, in tree order.
+function below(kids) {
+    const inner = [];
+    let count = 0;
+    for (const k of kids) {
+        count += 1 + k.count;
+        if (k.uid !== null) inner.push(k.uid);
+        inner.push(...k.inner);
+    }
+    return { count, inner };
+}
+
+// The rows below a node, flattened in tree order: each kept child's row,
+// then what follows it (a section's rows are inside it, closeSection).
+function flatten(kids) {
+    const out = [];
+    for (const k of kids) {
+        if (k.keep) out.push(k);
+        out.push(...k.flat);
+    }
+    return out;
+}
+
+// A section's header holds the rows below it as its items, so in its
+// parent's section nothing follows it. Kept only for what it holds, it is
+// context (and kept).
+function closeSection(item) {
+    item.items = item.flat;
+    item.flat = [];
+    if (!item.keep && item.items.length) {
+        item.context = true;
+        item.keep = true;
+    }
+    return item;
 }
 
 // Drop timelineSections' working fields.
@@ -591,33 +602,18 @@ function namesOf(seg, uid) {
     return nodeNames(seg.layout).get(uid) || { name: `uid ${uid}`, subtree: "" };
 }
 
-// The Log's rows: every retained record of rec, oldest first, or with a
-// filter only those whose node or subtree name contains it (ignoring case).
-// {count, parts: [{seg, first, seqs}]}: part rows first.. come from seg, at
-// seqs (null: every seq from seg.startSeq).
-function logRows(rec, filter = "") {
-    const needle = filter.trim().toLowerCase();
-    const parts = [];
-    let count = 0;
-    for (const seg of rec.segments) {
-        let seqs = null;
-        if (needle) {
-            const match = new Set();
-            for (const [uid, { name, subtree }] of nodeNames(seg.layout)) {
-                if (name.toLowerCase().includes(needle) || subtree.toLowerCase().includes(needle)) {
-                    match.add(uid);
-                }
-            }
-            seqs = [];
-            for (const chunk of seg.chunks) {
-                for (let i = 0; i < chunk.length; i++) if (match.has(chunk.uid[i])) seqs.push(chunk.seq0 + i);
-            }
-        }
-        const n = seqs ? seqs.length : seg.headSeq - seg.startSeq;
-        if (n) parts.push({ seg, first: count, seqs });
-        count += n;
+// The seqs of seg's kept records whose node or subtree name contains needle
+// (lower case).
+function seqsMatching(seg, needle) {
+    const match = new Set();
+    for (const [uid, { name, subtree }] of nodeNames(seg.layout)) {
+        if (name.toLowerCase().includes(needle) || subtree.toLowerCase().includes(needle)) match.add(uid);
     }
-    return { count, parts };
+    const seqs = [];
+    for (const chunk of seg.chunks) {
+        for (let i = 0; i < chunk.length; i++) if (match.has(chunk.uid[i])) seqs.push(chunk.seq0 + i);
+    }
+    return seqs;
 }
 
 // The status name a node had just before the record at seq: its keyframe
@@ -631,11 +627,12 @@ function statusBefore(seg, seq, uid) {
     return decodeStatus(state[uid])[0];
 }
 
-// Row i: {seg, seq, t, uid, name, subtree, from, to}, or null past the ends.
-// from and to are status names ("IDLE" for "IDLE after X").
-function logRowAt(rows, i) {
-    if (i < 0 || i >= rows.count) return null;
-    const p = rows.parts[bisectRight(rows.parts.length, i, (j) => rows.parts[j].first) - 1];
+// The Log's rows are listed in parts, [{seg, first, seqs}]: part rows
+// first.. come from seg, at seqs (null: every seq from seg.startSeq).
+// Row i of `count`, or null past the ends.
+function rowAt(parts, count, i) {
+    if (i < 0 || i >= count) return null;
+    const p = parts[bisectRight(parts.length, i, (j) => parts[j].first) - 1];
     const seg = p.seg;
     const seq = p.seqs ? p.seqs[i - p.first] : seg.startSeq + i - p.first;
     const chunk = chunkOf(seg, seq);
@@ -646,10 +643,9 @@ function logRowAt(rows, i) {
              from: statusBefore(seg, seq, uid), to: STATUS_NAMES[chunk.status[k]] || "UNKNOWN" };
 }
 
-// The index of the first row at or after record (segId, seq): the row for it
-// when it is one, rows.count when nothing follows.
-function logRowIndex(rows, segId, seq) {
-    for (const p of rows.parts) {
+// The index of the first row at or after record (segId, seq), or count.
+function rowIndex(parts, count, segId, seq) {
+    for (const p of parts) {
         if (p.seg.id < segId) continue;
         if (p.seg.id > segId) return p.first;
         const n = p.seqs ? p.seqs.length : p.seg.headSeq - p.seg.startSeq;
@@ -657,7 +653,34 @@ function logRowIndex(rows, segId, seq) {
                          : Math.min(Math.max(seq - p.seg.startSeq, 0), n);
         if (k < n) return p.first + k;
     }
-    return rows.count;
+    return count;
+}
+
+// The Log's rows: every retained record of rec (none without one), oldest
+// first, or with a filter only those whose node or subtree name contains it
+// (ignoring case). Listed once, read by index:
+//   count               how many rows
+//   at(i)               row i, {seg, seq, t, uid, name, subtree, from, to},
+//                       or null past the ends; from and to are status names
+//                       ("IDLE" for "IDLE after X")
+//   indexOf(segId, seq) the index of the first row at or after record
+//                       (segId, seq): the row for it when it is one, count
+//                       when nothing follows
+function logRows(rec, filter = "") {
+    const needle = filter.trim().toLowerCase();
+    const parts = [];
+    let count = 0;
+    for (const seg of rec ? rec.segments : []) {
+        const seqs = needle ? seqsMatching(seg, needle) : null;
+        const n = seqs ? seqs.length : seg.headSeq - seg.startSeq;
+        if (n) parts.push({ seg, first: count, seqs });
+        count += n;
+    }
+    return {
+        count,
+        at: (i) => rowAt(parts, count, i),
+        indexOf: (segId, seq) => rowIndex(parts, count, segId, seq),
+    };
 }
 
 // True when two segments ran the same tree (one layout id).
@@ -768,12 +791,17 @@ function describe(rec) {
     };
 }
 
-globalThis.KleinRecording = {
+function createStore() {
+    return new Store();
+}
+
+function createTrack() {
+    return new BlackboardTrack();
+}
+
+export {
     decodeState, stateAtSeq, seqAtTime, stateAt, timeAtSeq, recordsRange, intervals,
-    bbAt, bbChange, BB_RECENT, describe, logRows, logRowAt, logRowIndex, intervalsAll, timelineMarks,
+    bbAt, bbChange, BB_RECENT, describe, logRows, intervalsAll, timelineMarks,
     timelineSections, historyDropped, gapsIn, treeName, eachNode, sameTree, treeRuns,
-    countIn, busiestColumn,
-    createStore: () => new Store(),
-    createTrack: () => new BlackboardTrack(),
+    countIn, busiestColumn, createStore, createTrack,
 };
-})();

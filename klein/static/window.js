@@ -3,14 +3,10 @@
 // and the overview shows it as its box and its scrollbar's thumb; both move
 // it as the reader asks (set, zoomBy, step, fit), and redraw on onMove.
 // app.js calls KleinWindow.sync on every render, whichever tab is shown,
-// before either paints. Pure: no DOM, no d3, and it needs recording.js and
-// cursor.js loaded first.
+// before either paints. Pure: no DOM, no d3.
 // See docs/architecture.md, "The drawer".
 
-(function () {
-"use strict";
-
-const C = () => globalThis.KleinCursor;
+import * as C from "./cursor.js";
 
 // Window lengths the − and + buttons step through, in µs: 200 µs (a burst of
 // transitions a few µs apart) to 1 h (beyond the default 10 min kept).
@@ -18,8 +14,8 @@ const LADDER = [200, 500, 1e3, 2e3, 5e3, 1e4, 2e4, 5e4, 1e5, 2e5, 5e5, 1e6, 2e6,
                 2e7, 3e7, 6e7, 1.2e8, 3e8, 6e8, 1.2e9, 1.8e9, 3.6e9];
 const DEFAULT_SPAN = 3e7;           // 30 s: a few CrossDoor laps
 
-// A window of its own: the dashboard's is globalThis.KleinWindow, the tests
-// make fresh ones.
+// A window of its own: the dashboard's is the one this module exports, the
+// tests make fresh ones.
 function create() {
     let rec = null;                 // what sync() was last given
     let pos = null;
@@ -32,7 +28,7 @@ function create() {
 
     // The window's right end live (KleinCursor.headTime).
     function head() {
-        return C().headTime(rec);
+        return C.headTime(rec);
     }
 
     // A window length within LADDER's.
@@ -131,7 +127,7 @@ function create() {
         zoomTo(next, pos.live && follow ? t1 : inView ? pos.t : t1 - span / 2);
     }
 
-    // Zoom to fit (⤢, and \ in drawer.js): the window is everything kept,
+    // Zoom to fit (⤢, and \ in transport.js): the window is everything kept,
     // the oldest record to the head, within LADDER's limits; it follows the
     // head again while live.
     function fit() {
@@ -165,5 +161,6 @@ function create() {
     return { sync, get, set, zoomBy, step, fit, hold, reveal, onMove };
 }
 
-globalThis.KleinWindow = Object.assign(create(), { create });
-})();
+// The dashboard's window; create() makes another.
+export const { sync, get, set, zoomBy, step, fit, hold, reveal, onMove } = create();
+export { create };

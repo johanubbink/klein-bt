@@ -136,6 +136,26 @@ card and checks the outlines, port-line accents and linked rows against
 `links(layout)`, which reads them from the layout's `bindings` on its own;
 `PULSES` reads the cards' writer pulses.
 
+The page code the UI tests, `BrowserProbe` and `scripts/` evaluate reaches
+the dashboard through globals that `app.js` puts on `window` for them, in
+one block at its end ("Page globals"): the modules as app.js imports them
+(`KleinRecording`, `KleinCursor`, `KleinWindow`, `KleinView`, `KleinUI`,
+`KleinTree`, `KleinBlackboard`, `KleinLog`, `KleinTransport`, `KleinDrawer`,
+`KleinTimeline`, `KleinOverview`, `KleinRenderers`), `kleinDebug`, app.js's
+own state and functions (`clock`, `seek`, `render`, `recordingStore`, …),
+and a few names that now live in a module but keep the name the tests know:
+the canvas's (`svg`, `zoomBehavior`, `rootNodeSnapshot`, `visibleViewport`,
+`runningFrontier`: tree.js), the blackboard panel's (`bbGroupEls`,
+`bbGroupOpen`, `renderBlackboards`, `resetBlackboards`, `frameTrack`:
+blackboard.js), and `KleinDrawer`, which is drawer.js plus the Log's
+`debugRows` (log.js), the transport's `goLive` (transport.js) and the
+clock's words (`formatTime`, `formatClock`: ui.js). The modules share
+nothing through `window`, so a name a test needs goes in that block.
+Variables are accessors; a test can set `recordingSupport` or swap `render`,
+`requestRender`, `showTree` or `paintStatus` (app.js's binding of the
+canvas's painter), and app.js uses the new one. A module's exports can't be
+swapped.
+
 ### The debug dump — `model.py`
 
 `Model(dump)` reads a gateway's `GET /debug/state` independently: each
@@ -179,13 +199,16 @@ against it.
 
 ### JavaScript — `tests/js/run.js`
 
-`gjs -m tests/js/run.js VECTORS.json` loads DOM-free plain `<script>` files
-(`"module"`, one or a list, loaded in order; the dashboard has no build step,
-so no `export`), runs the JSON cases (`call`, `args`, `expect`, and `save` +
-`$ref` for stateful objects; `{"$base64": "..."}` in `args` stands for those
-bytes as an `ArrayBuffer`), and exits 0 only if all pass. Maps and Sets are
-compared by content, and a case with no `expect` fails unless it only `save`s
-a setup value. `tests.harness.js.run_js_vectors()` is the Python entry point;
+`gjs -m tests/js/run.js VECTORS.json` imports the dashboard's DOM-free ES
+modules as the browser does (no build step), each under the name the vectors
+give it (`"modules": {"KleinRecording": ".../recording.js", …}`, as app.js
+imports them), runs the JSON cases (`call` such as
+`"KleinRecording.stateAt"`, `args`, `expect`, and `save` + `$ref` for
+stateful objects; `{"$base64": "..."}` in `args` stands for those bytes as
+an `ArrayBuffer`), and exits 0 only if all pass. Those modules must not
+touch `document`, `window` or `d3`. Maps and Sets are compared by content,
+and a case with no `expect` fails unless it only `save`s a setup value.
+`tests.harness.js.run_js_vectors()` is the Python entry point;
 `tests/unit/test_js_model.py` checks the runner fails on bad vectors.
 
 The vectors are built from the Python model when the tests run:
@@ -195,12 +218,27 @@ removals), streams it, and writes the frames (incremental and backfill) plus
 the Python model's answers, for `recording.js` and `cursor.js` (tree runs and
 the overview's transition counts are checked against the harness `Model`),
 and for `window.js`: a table of the window's moves, each step's window
-expected;
+expected. `view.js`'s `frame` and `panel` get a case per situation (live,
+paused, playing on and reaching the head, a pause whose moment was evicted,
+the robot gone and back unable to record, a tree swap, no recording, an
+opened file without a sidecar): which source shows and the flags and the
+panel's words written out by hand, the position, state and boards from the
+Python model. Its `rowMarks` gets a table of behaviours written out by hand
+(the fade matrix: moving or paused, primed, shown, first paint, streaming,
+reduced motion, the 0.5 s and 1.8 s edges), and, beside the `bbChange`
+vectors, every key at every time against the harness `Model`: paused, the
+static marks are its fresh keys; painted live in turn, the writers fire on
+each fresh change;
 `test_log_rows.py` and `test_timeline_model.py` do the same for the Log's rows
-and the Timeline's helpers, on `make_vectors.build_named` (trees with named
-nodes and subtrees) fed in by `make_vectors.store_cases`. `python -m
-tests.make_vectors FILE.json` writes the replay vectors out, to read a
-failure.
+(and, for a table of records kept, evicted, filtered out and gone, the row
+the Log keeps at its top, `anchorAfter`) and the Timeline's helpers, on
+`make_vectors.build_named` (trees with named nodes and subtrees: a restart,
+a swap, then after an outage a new run of the first tree, left open) fed in
+by `make_vectors.store_cases`; the Timeline's window
+(`KleinView.timelineWindow`) gets a table of windows, each from every
+tree's side, its marks written again from their definition and its count
+from the harness `Model`. `python -m tests.make_vectors FILE.json` writes
+the replay vectors out, to read a failure.
 
 ### Fixtures — `tests/fixtures/`
 

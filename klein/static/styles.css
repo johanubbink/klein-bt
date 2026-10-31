@@ -56,7 +56,7 @@
        (#watermark) rises by. Initially the collapsed height. */
     --drawer-height: 49px;
     /* A change's fade: the blackboard row's and the writer pulse's
-       (app.js BB_FADE). */
+       (view.js BB_FADE). */
     --fade: 1.8s;
 }
 
@@ -684,7 +684,8 @@ body.viewing-past .status-pill.running { animation: none; }
 .node-rect.focused { animation: klein-focus 0.5s ease-in-out 2; }
 
 /* Hovering a board row in the panel: say which card it belongs to. The stroke
-   is set inline by paintStatus, so this has to shout to be heard. */
+   is set inline by paintStatus (tree.js), so this has to shout to be
+   heard. */
 .node-rect.highlight { stroke: var(--accent) !important; stroke-width: 4px; }
 
 /* Hovering a key row in the panel: its writers' outline is solid, its
@@ -697,8 +698,8 @@ body.viewing-past .status-pill.running { animation: none; }
 
 /* The writer pulse: a --changed dot at the card's corner when a key the node
    writes just changed. It fades like the row's mark while live or playing and
-   holds while paused (app.js, setPulses). A dot, never a stroke: on the
-   canvas amber already means RUNNING. */
+   holds while paused (blackboard.js, setPulses). A dot, never a stroke: on
+   the canvas amber already means RUNNING. */
 .node-pulse { fill: var(--changed); opacity: 0; pointer-events: none; }
 .node-pulse.mark { opacity: 1; }
 .node-pulse.fire { animation: fade-out var(--fade) ease-in; }
@@ -1253,7 +1254,7 @@ body.viewing-past .status-pill.running { animation: none; }
 #drawer-transport, #drawer-toolbar { overflow: hidden; }
 
 #drawer-body {
-    position: relative;         /* the offsetParent drawer.js measures rows from */
+    position: relative;         /* the offsetParent log.js measures rows from */
     flex: 1;
     min-height: 0;
     overflow: auto;
@@ -1263,7 +1264,7 @@ body.viewing-past .status-pill.running { animation: none; }
 }
 
 /* ---- Log tab ------------------------------------------------------------
-   One row per transition, in fixed 20 px rows so drawer.js can place the few
+   One row per transition, in fixed 20 px rows so log.js can place the few
    in view by index; the head stays put while the body scrolls under it. */
 #drawer-log { --log-columns: 128px 64px 140px minmax(120px, 220px) minmax(0, 1fr); }
 .log-head {

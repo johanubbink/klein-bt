@@ -78,11 +78,11 @@ _HOVER_SWEEP = """() => {
   return { rows, cards };
 }"""
 
-MAX_PORT_CHARS = 36            # app.js: (220 px card - 2 * 12 px) / (9 px * 0.6) monospace
+MAX_PORT_CHARS = 36            # tree.js: (220 px card - 2 * 12 px) / (9 px * 0.6) monospace
 
 
 def port_line(ports):
-    """A card's port line: every ``port=value``, truncated as app.js does."""
+    """A card's port line: every ``port=value``, truncated as tree.js does."""
     text = "  ".join(f"{p}={v}" for p, v in (ports or {}).items())
     return text if len(text) <= MAX_PORT_CHARS else text[:MAX_PORT_CHARS - 1] + "…"
 

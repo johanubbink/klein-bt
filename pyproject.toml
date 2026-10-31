@@ -66,6 +66,7 @@ klein = [
     "static/renderers.js",
     "static/recording.js",
     "static/cursor.js",
+    "static/window.js",
     "static/drawer.js",
     "static/timeline.js",
     "static/overview.js",

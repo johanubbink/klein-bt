@@ -193,7 +193,9 @@ The vectors are built from the Python model when the tests run:
 an outage, duplicate timestamps, evicted chunks, blackboard changes and
 removals), streams it, and writes the frames (incremental and backfill) plus
 the Python model's answers, for `recording.js` and `cursor.js` (tree runs and
-the overview's transition counts are checked against the harness `Model`);
+the overview's transition counts are checked against the harness `Model`),
+and for `window.js`: a table of the window's moves, each step's window
+expected;
 `test_log_rows.py` and `test_timeline_model.py` do the same for the Log's rows
 and the Timeline's helpers, on `make_vectors.build_named` (trees with named
 nodes and subtrees) fed in by `make_vectors.store_cases`. `python -m

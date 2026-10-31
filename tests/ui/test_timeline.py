@@ -206,9 +206,8 @@ class TimelineTest(DashboardCase):
         # longer than the recording, which would move on with the head.
         mouse = self.page.mouse
         self.page.evaluate("() => { const d = kleinDebug();"
-                           " KleinTimeline.setWindow(d.head, d.head - d.tMin + 10e6); }")
-        self.addCleanup(self.page.evaluate, "() => { const w = KleinTimeline.getWindow();"
-                        " if (w) KleinTimeline.setWindow(w.t1, 30000000); }")
+                           " KleinWindow.set(d.head, d.head - d.tMin + 10e6); }")
+        self.addCleanup(self.set_span, 30_000_000)
         tl = self.page.evaluate("() => KleinTimeline.debug()")
         mouse.move(tl["left"] + tl["width"] / 2, self.ruler_y())
         mouse.down()
@@ -404,7 +403,7 @@ class TimelineTest(DashboardCase):
         paused = self.assert_timeline_starts("Recording starts", "zoomed out, paused")
         self.assertFalse(paused["tl"]["pos"]["live"])
         self.assertGreater(paused["tl"]["t1"], v["tl"]["t1"], "paused, the window follows the head")
-        self.page.evaluate("() => KleinTimeline.setWindow(KleinTimeline.getWindow().t1, 3e7)")
+        self.set_span(30_000_000)
         self.browser.go_live()
 
         _model, runs = self.attempts()
@@ -445,11 +444,14 @@ class TimelineTest(DashboardCase):
             self.page.click(longer)
         self.assertEqual(self.page.evaluate("() => KleinTimeline.debug().span"), 30_000_000)
 
-        # Zoom to fit, by ⤢, by \ and by \ typed with AltGr (Ctrl+Alt on
+        # Zoom to fit, by ⤢, by \ (the drawer folded too: the overview's
+        # strip is 8 windows long) and by \ typed with AltGr (Ctrl+Alt on
         # Windows; a plain Ctrl+\ or Alt+\ does nothing): the window is the
         # oldest record to the head, paused or live (then following the head
         # on). A mouse click on ⤢ or a tab lets go of the focus, so Space
-        # plays. The Log has no window: \ does nothing there.
+        # plays. The Log has no window: \ does nothing there. A cursor moved
+        # there (Home) is in the window as soon as the Timeline's tab is
+        # clicked, its bars drawn for that window in the same task.
         # The newest moment kept, from the mirror's own data: the head or
         # the newest segment's newest blackboard sample, whichever is later.
         head = """() => { const r = shownRecording(), b = r.segments.at(-1).bb;
@@ -458,11 +460,11 @@ class TimelineTest(DashboardCase):
         span = "() => KleinTimeline.debug().span"
         try:
             for live in (False, True):
-                for how in ("button", "\\", "Control+Alt+Backslash"):
+                for how in ("button", "\\", "folded", "Control+Alt+Backslash"):
                     with self.subTest(fit=how, live=live):
                         if live:
                             self.browser.go_live()
-                        self.page.evaluate("() => KleinTimeline.setWindow(KleinTimeline.getWindow().t1, 2e6)")
+                        self.set_span(2_000_000)
                         for other in ("Control+Backslash", "Alt+Backslash"):
                             self.page.keyboard.press(other)
                             self.assertEqual(self.page.evaluate(span), 2e6, other)
@@ -471,6 +473,10 @@ class TimelineTest(DashboardCase):
                             self.page.click("#tl-fit")
                             self.assertNotEqual(self.page.evaluate("document.activeElement.id"),
                                                 "tl-fit")
+                        elif how == "folded":
+                            self.page.click("#drawer-collapse")
+                            self.page.keyboard.press("\\")
+                            self.page.click("#drawer-collapse")
                         else:
                             self.page.keyboard.press(how)
                         tl = self.page.evaluate("() => KleinTimeline.debug()")
@@ -485,15 +491,21 @@ class TimelineTest(DashboardCase):
                             self.assertEqual(tl["t0"], t_min)
             self.page.click("#drawer-tab-log")
             self.assertNotEqual(self.page.evaluate("document.activeElement.id"), "drawer-tab-log")
-            before = self.page.evaluate("() => KleinTimeline.getWindow()")
+            self.set_span(2_000_000)
             self.page.keyboard.press("\\")
-            self.assertEqual(self.page.evaluate("() => KleinTimeline.getWindow()"), before)
-            self.page.click("#drawer-tab-timeline")
+            self.assertEqual(self.page.evaluate(span), 2e6, "the Log has no window to fit")
+            self.page.keyboard.press("Home")
+            self.frame()
+            tl = self.page.evaluate("() => { document.getElementById('drawer-tab-timeline').click();"
+                                    " return KleinTimeline.debug(); }")
+            self.assertFalse(tl["pos"]["live"])
+            self.assertTrue(tl["t0"] <= tl["pos"]["t"] <= tl["t1"], tl)
+            self.assertEqual((tl["span"], tl["barsT1"]), (2e6, tl["t1"]))
             self.assertEqual({b: self.page.get_attribute(b, "title")[-3:]
                               for b in ("#tr-prev", "#tr-next", "#tl-fit")},
                              {"#tr-prev": "(←)", "#tr-next": "(→)", "#tl-fit": "(\\)"})
         finally:
-            self.page.evaluate("() => KleinTimeline.setWindow(KleinTimeline.getWindow().t1, 3e7)")
+            self.set_span(30_000_000)
 
     def test_the_overview_box_is_the_window(self):
         """Live, the overview's box (the Timeline's window, an eighth of the
@@ -521,7 +533,7 @@ class TimelineTest(DashboardCase):
             for button in ["#tl-zoom-in"] * 4 + ["#tl-zoom-out", "#tl-fit", "#tl-zoom-in"]:
                 page.click(button)
                 overview(button)
-            page.evaluate("() => KleinTimeline.setWindow(KleinTimeline.getWindow().t1, 2e6)")
+            self.set_span(2_000_000)
             ctrl_wheel(lanes["x"] + 700, lanes["y"] + 40, 200)
             overview("Ctrl+wheel on the lanes")
             self.browser.drag((lanes["x"] + 700, lanes["y"] + 40), (lanes["x"] + 640, lanes["y"] + 40))
@@ -578,8 +590,7 @@ class TimelineTest(DashboardCase):
             self.assertGreaterEqual(after["tl"]["pos"]["t"], overview_t(v, x - 1))
             self.assertLessEqual(after["tl"]["pos"]["t"], overview_t(after, x + 1))
         finally:
-            page.evaluate("() => { const w = KleinTimeline.getWindow();"
-                          " if (w) KleinTimeline.setWindow(w.t1, 30000000); }")
+            self.set_span(30_000_000)
 
 
 class TimelineAcrossASwapTest(DashboardCase):
@@ -751,7 +762,7 @@ class TimelineReplayTest(DashboardCase):
         ruler = page.locator("#tl-ruler").bounding_box()
         page.mouse.click(tl["left"] + tl["width"] - 3, ruler["y"] + 10)
         cls.frame()
-        page.evaluate("() => KleinTimeline.fit()")
+        page.evaluate("() => KleinWindow.fit()")
         cls.frame()
         cls.tl = page.evaluate("() => KleinTimeline.debug()")
         cls.rows = page.evaluate(_ROW_SHAPES)

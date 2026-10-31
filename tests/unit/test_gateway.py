@@ -582,7 +582,8 @@ class StaticAssetsTest(GatewayTestCase):
     def test_recording_model_scripts_served_and_packaged(self):
         pyproject = (Path(__file__).resolve().parents[2] / "pyproject.toml").read_text()
         html = self.gw._static["/index.html"][0].decode()
-        for name in ("recording.js", "cursor.js", "drawer.js", "timeline.js", "overview.js"):
+        for name in ("recording.js", "cursor.js", "window.js", "drawer.js", "timeline.js",
+                     "overview.js"):
             with self.subTest(name):
                 r = self.request(f"/{name}")
                 self.assertEqual(r.status_code, 200)

@@ -33,11 +33,13 @@ The code:
 - [`klein/static/`](../klein/static/): the dashboard. `app.js` handles state,
   the WebSocket, the tree and the sidebar; `renderers.js` formats blackboard
   values; `recording.js` and `cursor.js` mirror the recording (see
-  [Browser model](#browser-model)); `drawer.js`, `timeline.js` and
-  `overview.js` are the drawer, its Timeline tab and its overview. D3 is
-  vendored so it works without internet. Dependabot can't see a vendored
-  file, so check [D3's releases](https://github.com/d3/d3/releases) when
-  cutting a klein release.
+  [Browser model](#browser-model)); `window.js` is the Timeline's window,
+  which the Timeline and the overview both show and move; `drawer.js`,
+  `timeline.js` and `overview.js` are the drawer, its Timeline tab and its
+  overview. D3 is vendored so it works without internet. Dependabot can't
+  see a vendored file, so check
+  [D3's releases](https://github.com/d3/d3/releases) when cutting a klein
+  release.
 
 ## Robot side: one socket, two pollers
 
@@ -314,7 +316,7 @@ seen, as a pure data model (no asyncio, no ZeroMQ). The gateway feeds it (see
 
 One `websockets` server owns `--port`. It serves the static files over HTTP
 (`/`, `/styles.css`, `/app.js`, `/renderers.js`, `/recording.js`,
-`/cursor.js`, `/drawer.js`, `/timeline.js`, `/overview.js`,
+`/cursor.js`, `/window.js`, `/drawer.js`, `/timeline.js`, `/overview.js`,
 `/d3.v7.min.js`) and upgrades `/ws` to a WebSocket. Because both come from
 the same origin, the page just opens `ws://<same host:port>/ws`.
 
@@ -367,9 +369,10 @@ from the frames the gateway streams. Everything that shows a past moment
 locally from that mirror; **scrubbing never asks the backend anything.** The
 mirror holds everything the gateway keeps.
 
-The mirror is two classic scripts with no DOM and no d3, so the tests run
-them under `gjs` against vectors `tests/make_vectors.py` builds from the
-Python model. That pins the two implementations together.
+The mirror is two classic scripts with no DOM and no d3, and the Timeline's
+window a third, so the tests run them under `gjs` against vectors
+`tests/make_vectors.py` builds from the Python model. That pins the two
+implementations together.
 
 - [`klein/static/recording.js`](../klein/static/recording.js) →
   `globalThis.KleinRecording`. `createStore()` returns a store whose
@@ -393,6 +396,13 @@ Python model. That pins the two implementations together.
   to `[tMin, headTime]` and to its segment's `tStart`; the Timeline's axis,
   the overview and Home use it. `evicted` says whether eviction dropped the
   moment a clock shows.
+- [`klein/static/window.js`](../klein/static/window.js) →
+  `globalThis.KleinWindow`: the Timeline's window (its rules: see
+  [The drawer](#the-drawer)). `sync(rec, pos)` applies them once per
+  render, and `get()` is `{t0, t1, span, follow}` (null without a
+  recording). The reader's moves (`set`, `zoomBy`, `step`, `fit`, `reveal`)
+  call the `onMove` listeners; `hold` keeps the window still while a scrub
+  lasts. `create()` makes another.
 
 `app.js` routes binary frames and the recording's message types to the store.
 
@@ -477,12 +487,18 @@ decides what is displayed:
 - **The drawer** (see [The drawer](#the-drawer)): `KleinDrawer.showRecording`
   and `KleinDrawer.update(rec, pos)` run on every render (the drawer reads
   `pos.mode` and keeps no clock of its own), then, once the cursor's tree is
-  on the canvas, `KleinTimeline.update(rec, pos, hierarchy)` and
-  `KleinOverview.update(rec, pos)`. They move the cursor through one
-  `seek(clock)` (`KleinDrawer.onSeek`, `KleinTimeline.connect`,
-  `KleinOverview.onSeek`), which sets the clock and asks for a render; the
+  on the canvas, `KleinWindow.sync(rec, pos)` (the Timeline's window),
+  `KleinTimeline.update(rec, pos, hierarchy)` and
+  `KleinOverview.update(rec, pos)`, which both paint that window. They move the cursor through one `seek(clock)`
+  (`KleinDrawer.onSeek`, `KleinTimeline.connect`, `KleinOverview.onSeek`),
+  which sets the clock and asks for a render, and the window through
+  `KleinWindow`'s moves, which repaint both at once (`onMove`); the
   Timeline's chevrons fold the canvas through `toggleFold` / `foldOthers`, the
-  same `toggleFold` a card's click uses.
+  same `toggleFold` a card's click uses. Only the tab on screen
+  (`KleinDrawer.shownTab()`: `"log"`, `"timeline"`, or null folded) is
+  painted, so a tab switch renders at once (the tab is painted when the
+  click returns) and a fold on the next frame. The Timeline's zoom and `\`
+  go by the tab selected, folded or not (`selectedTab()`).
 
 `window.kleinDebug()` is read-only, for the test harness: the mirror's
 `describe(rec)` facts (when there is a recording) plus `displaySource`
@@ -617,16 +633,18 @@ sidebar's width (see [The sidebar](#the-sidebar)).
     amber in the past. Above the pointer a readout gives the time there and
     how long before now, `13:05:12.4 · 42 s ago` (an opened file: the time
     only).
-  - **The box** (the Timeline tab, unfolded) is the Timeline's window, an
-    eighth of the strip whatever the zoom: faint at rest, brighter while the
-    pointer is over the overview. Dragging it pans the window with the box
-    under the pointer (`S / W` per px while the recording fits in the strip,
-    else `(R − w) / (W − box)`, so one drag from end to end crosses all of
-    it); a click on it without a drag (under 3 px) moves the cursor there.
+  - **The box** (the Timeline tab, unfolded) is the Timeline's window
+    (`KleinWindow`), an eighth of the strip whatever the zoom: faint at
+    rest, brighter while the pointer is over the overview. Dragging it pans
+    the window with the box under the pointer (`S / W` per px while the
+    recording fits in the strip, else `(R − w) / (W − box)`, so one drag
+    from end to end crosses all of it); a click on it without a drag (under
+    3 px) moves the cursor there.
   - **Pressing the strip** elsewhere pauses the cursor there
     (`KleinCursor.pauseAt`) and dragging scrubs. Meanwhile the strip and the
-    Timeline's window hold still (`KleinTimeline.hold`); after the release,
-    a cursor outside the window has the window centred on it.
+    Timeline's window hold still (`KleinWindow.hold`); after the release
+    the cursor counts as moved (`KleinWindow.reveal`), so one outside the
+    window has the window centred on it.
   - **The wheel** over the overview (the Timeline tab) pans the window as
     the Timeline's sideways wheel does; Ctrl+wheel zooms around the time
     under the pointer.
@@ -791,20 +809,21 @@ sidebar's width (see [The sidebar](#the-sidebar)).
     10 s (1-2-5), 20 s, 30 s, 1, 2, 5, 10, 20, 30 min and 1 h, keeping the
     head at the right edge while following live, else the playhead in place
     when it is in view, else the middle; **Ctrl+wheel** zooms around the
-    pointer, **dragging the lanes** (or Shift+wheel, or a sideways wheel)
-    pans; a plain wheel scrolls the rows. The window never runs past the
+    pointer (held inside the window), **dragging the lanes** (or Shift+wheel, or a sideways wheel)
+    pans; a plain wheel scrolls the rows. The window is
+    [`window.js`](../klein/static/window.js)'s (`KleinWindow`), whose rules
+    run on every render, whichever tab is shown. It never runs past the
     head, nor before the oldest record once the recording is longer than
-    it (`clampWindow`).
-    One longer than the recording ends at the head, live or paused, so now
-    is at the axis's right end from a session's first second; the time
+    it. One longer than the recording ends at the head, live or paused, so
+    now is at the axis's right end from a session's first second; the time
     before the oldest record is empty, its start edge marked (see Dropped
     history). While live it follows the head, until you pan or zoom it off
     the head (back onto the head, or back to live, follows again); paused,
     a window longer than the recording still moves on with the head, except
     while the playhead is dragged. **⤢** (or `\`) zooms to fit: the window
     becomes everything kept, `rec.tMin` to the head, its length kept within
-    the ladder's 200 µs and 1 h (`clampWindow`); while live it then follows
-    the head at that length, so the oldest moment drifts off its left edge.
+    the ladder's 200 µs and 1 h; while live it then follows the head at
+    that length, so the oldest moment drifts off its left edge.
   - **The playhead** is the shared cursor. Pressing the axis pauses there,
     and dragging scrubs: the cursor is paused at that time to the µs,
     `pause(seg, seqAtTime(seg, t), t)` in the segment holding it, so the

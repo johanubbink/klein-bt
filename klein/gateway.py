@@ -14,7 +14,8 @@ Everything the browser needs is served from a **single port** (``--port``):
 
 * plain HTTP for the dashboard (``/`` and ``/index.html``), its ``/styles.css``,
   ``/app.js``, ``/renderers.js``, ``/recording.js``, ``/cursor.js``,
-  ``/drawer.js``, ``/timeline.js`` and ``/overview.js``, and the bundled D3.js (``/d3.v7.min.js``), and
+  ``/window.js``, ``/drawer.js``, ``/timeline.js`` and ``/overview.js``, and the
+  bundled D3.js (``/d3.v7.min.js``), and
 * a WebSocket endpoint (``/ws``) that pushes the unrolled tree layout on connect
   and then broadcasts live status and blackboard frames — and, while recording,
   streams the recording itself (``klein/streaming.py``), and
@@ -94,7 +95,7 @@ _CONTENT_TYPES = {
     ".js": "text/javascript; charset=utf-8",
 }
 _STATIC_FILES = ("index.html", "styles.css", "d3.v7.min.js", "renderers.js", "recording.js",
-                 "cursor.js", "drawer.js", "timeline.js", "overview.js", "app.js")
+                 "cursor.js", "window.js", "drawer.js", "timeline.js", "overview.js", "app.js")
 _STATIC_ROUTES = {f"/{name}": (name, _CONTENT_TYPES[Path(name).suffix])
                   for name in _STATIC_FILES}
 _INDEX_FALLBACK = b"<!doctype html><h1>klein: index.html missing from package</h1>"

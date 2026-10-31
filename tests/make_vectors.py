@@ -12,7 +12,8 @@ Functions the Python model has (``state_at_seq``, ``seq_at_time``,
 ``iter_records``, ``BlackboardTrack.at``) give their own expectations; the
 rest (``intervals``, ``timeAtSeq``, the cursor) are written out
 here in Python from their definitions in docs/architecture.md, "Browser
-model".
+model", and the Timeline's window (``window.js``) step by step from its
+rules in "The drawer".
 
 Chunks are 8 records here, not 1024, so the vectors stay small: the browser
 takes chunk boundaries from the frames and never assumes a size.
@@ -367,6 +368,78 @@ def _cursor_cases(name, rec):
 
 
 # --------------------------------------------------------------------------- #
+# The Timeline's window (window.js)
+# --------------------------------------------------------------------------- #
+def _window(t1, span, follow):
+    return {"t0": t1 - span, "t1": t1, "span": span, "follow": follow}
+
+
+def _window_call(w, name, call, args, expect):
+    """``call`` on the window saved as ``w`` (it returns nothing), then the
+    window its ``get()`` gives."""
+    return [{"name": f"{name}: {call}", "call": f"${w}.{call}", "args": args, "save": f"{w}_"},
+            {"name": f"{name}: get after {call}", "call": f"${w}.get", "expect": expect}]
+
+
+def _paused_at(rec, t):
+    """The cursor paused at robot time t, as KleinCursor.pauseAt gives it."""
+    segment = [s for s in rec.segments if s.t_begin <= t][-1]
+    return {"seg": segment.id, "seq": segment.seq_at_time(t), "t": t, "live": False}
+
+
+def _window_cases(name, rec):
+    """A fresh ``KleinWindow`` over the recording (3 ms kept), one call at a
+    time, each expecting the window after it (the steps say what each pins)."""
+    ref = {"$ref": f"{name}_rec"}
+    head, t_min = rec.head, rec.t_min       # no blackboard sample after the head
+    live, at = _head_pos(rec), lambda t: _paused_at(rec, t)
+    c = t_min + 1200                        # where the scrubs leave the cursor
+    steps = [
+        ("live: 30 s, longer than the recording, ends at the head",
+         "sync", [ref, live], _window(head, 30_000_000, True)),
+        ("1 ms at the head follows", "set", [head, 1000], _window(head, 1000, True)),
+        ("panned off the head, it stops following", "set", [head - 500],
+         _window(head - 500, 1000, False)),
+        ("live, it stays there", "sync", [ref, live], _window(head - 500, 1000, False)),
+        ("never before the oldest record", "set", [t_min - 5000],
+         _window(t_min + 1000, 1000, False)),
+        ("never past the head; back on it, it follows", "set", [head + 5000],
+         _window(head, 1000, True)),
+        ("a cursor moved outside is centred", "sync", [ref, at(t_min + 1500)],
+         _window(t_min + 2000, 1000, True)),
+        ("paused, panned off the cursor", "set", [head], _window(head, 1000, False)),
+        ("a cursor that stayed is left outside", "sync", [ref, at(t_min + 1500)],
+         _window(head, 1000, False)),
+        ("a scrub holds it", "hold", [True], _window(head, 1000, False)),
+        ("held, a moved cursor is left outside", "sync", [ref, at(c)],
+         _window(head, 1000, False)),
+        ("the playhead's release leaves it", "hold", [False], _window(head, 1000, False)),
+        ("and so does the next sync", "sync", [ref, at(c)], _window(head, 1000, False)),
+        ("the overview's release reveals the cursor, centred", "reveal", [],
+         _window(c + 500, 1000, False)),
+        ("zoomed around an anchor, 200 µs at least", "zoomBy", [-1e4, c + 250],
+         _window(c + 300, 200, False)),
+        ("panned back over the cursor", "set", [c + 150], _window(c + 150, 200, False)),
+        ("+ around the cursor in view", "step", [1], _window(c + 375, 500, False)),
+        ("panned off the cursor", "set", [c + 1000], _window(c + 1000, 500, False)),
+        ("+ around the middle", "step", [1], _window(c + 1250, 1000, False)),
+        ("zoomed around an anchor outside, held at its edge", "zoomBy", [-1e4, t_min - 10**6],
+         _window(c + 450, 200, False)),
+        ("1 h at most, which ends at the head", "zoomBy", [1e4, c + 500],
+         _window(head, 3_600_000_000, False)),
+        ("+ at the longest rung", "step", [1], _window(head, 3_600_000_000, False)),
+        ("fit: everything kept", "fit", [], _window(head, head - t_min, False)),
+        ("back to live, it follows", "sync", [ref, live], _window(head, head - t_min, True)),
+        ("live, − keeps the head at the right edge", "step", [-1], _window(head, 2000, True)),
+    ]
+    w = f"{name}_window"
+    cases = [{"name": f"{w}: a fresh one", "call": "KleinWindow.create", "save": w}]
+    for i, (what, call, args, expect) in enumerate(steps):
+        cases += _window_call(w, f"{w} {i}: {what}", call, args, expect)
+    return cases
+
+
+# --------------------------------------------------------------------------- #
 # bbChange, expected from the harness Model (not from klein)
 # --------------------------------------------------------------------------- #
 SEC = 1_000_000
@@ -519,10 +592,13 @@ def _count_cases(name, rec):
     return cases
 
 
-def _busiest_growing_cases(d=50):
-    """``busiestColumn`` asked again as the recording grows, at one column
-    length (as the overview asks it): a drain adding to the column the last
-    one ended in, then a new segment after a gap."""
+def _growing_cases(d=50):
+    """``busiestColumn`` (at one column length, as the overview asks it) and
+    two windows, asked again as the recording grows: a drain adding to the
+    column the last one ended in, then a new segment after a gap. Live, a
+    200 µs window follows the head. Paused, a 30 s one (longer than the
+    recording, so at the head) holds still while a scrub lasts and catches
+    up with the head after the release."""
     rec, frames, ref = Recording(), [], {"$ref": "grow_rec"}
     Streamer(rec, lambda clients, f: frames.append(f)).subscribe("grow")
     a, b = _layout(1, [1, 2, 3]), _layout(2, [1, 2, 3, 4])
@@ -532,7 +608,22 @@ def _busiest_growing_cases(d=50):
              lambda: (rec.end_segment(T0 + 300), rec.add_gap(T0 + 300, T0 + 400, "outage"),
                       rec.begin_segment(b, T0 + 400, bytearray(b.size)),
                       rec.append([(T0 + 401, 4, 1), (T0 + 420, 4, 2), (T0 + 449, 1, 1)]))]
+    # After each step, given the cursor live and paused at T0 + 10: the
+    # windows' calls, [(window, call, args, the window expected)]. The heads
+    # are T0 + 20, + 200 and + 449.
+    wide = lambda t: _window(t, 30_000_000, True)      # 30 s: longer than the recording
+    windows = [
+        lambda live, paused: [("following", "sync", [ref, live], wide(T0 + 20)),
+                              ("following", "set", [T0 + 20, 200], _window(T0 + 20, 200, True)),
+                              ("held", "sync", [ref, paused], wide(T0 + 20)),
+                              ("held", "hold", [True], wide(T0 + 20))],
+        lambda live, paused: [("following", "sync", [ref, live], _window(T0 + 200, 200, True)),
+                              ("held", "sync", [ref, paused], wide(T0 + 20)),
+                              ("held", "hold", [False], wide(T0 + 20))],
+        lambda live, paused: [("held", "sync", [ref, paused], wide(T0 + 449))]]
     cases = store_cases("grow", frames)
+    cases += [{"name": f"grow: a {w} window", "call": "KleinWindow.create", "save": f"grow_{w}"}
+              for w in ("following", "held")]
     for i, step in enumerate(steps):
         del frames[:]
         step()
@@ -542,6 +633,9 @@ def _busiest_growing_cases(d=50):
         cases.append({"name": f"grow: busiestColumn {d} after step {i}",
                       "call": "KleinRecording.busiestColumn", "args": [ref, d],
                       "expect": Model(dump(rec)).busiest_column(d)})
+        for w, call, args, expect in windows[i](_head_pos(rec), _paused_at(rec, T0 + 10)):
+            cases += _window_call(f"grow_{w}", f"grow: the {w} window after step {i}",
+                                  call, args, expect)
     return cases
 
 
@@ -552,8 +646,9 @@ def vectors():
                  + _cursor_cases("live", rec) + _cursor_cases("late", rec)
                  + _tree_run_cases("live", rec) + _tree_run_cases("late", rec)
                  + _count_cases("live", rec) + _count_cases("late", rec)
-                 + _busiest_growing_cases())
-    return {"module": [str(STATIC / "recording.js"), str(STATIC / "cursor.js")],
+                 + _window_cases("live", rec) + _growing_cases())
+    return {"module": [str(STATIC / "recording.js"), str(STATIC / "cursor.js"),
+                       str(STATIC / "window.js")],
             "cases": cases}
 
 

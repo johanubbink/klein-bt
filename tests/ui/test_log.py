@@ -345,9 +345,8 @@ class LogTest(LogView, DashboardCase):
             box = page.locator(selector).bounding_box()
             return box["y"], box["y"] + box["height"]
 
-        span = "(s) => KleinTimeline.setWindow(KleinTimeline.debug().t1, s)"     # the Log's tab
-        self.addCleanup(page.evaluate, span, 30_000_000)
-        page.evaluate(span, 1_000_000)          # an 8 s strip: all 5 s kept on it
+        self.addCleanup(self.set_span, 30_000_000)
+        self.set_span(1_000_000)                # an 8 s strip: all 5 s kept on it
         self.frame()
         v, x = self.assert_overview(self.model, self.state["gaps"], "what is kept")
         ov = v["ov"]
@@ -400,13 +399,13 @@ class LogTest(LogView, DashboardCase):
             self.assertIsNone(page.evaluate(OVERVIEW)["box"])
             # A 200 µs window: the 1.6 ms strip is placed by the cursor, its
             # line where the cursor is in the whole recording.
-            page.evaluate(span, 200)
+            self.set_span(200)
             self.frame()
             ov = page.evaluate(OVERVIEW)
             f = (pos["t"] - t_min) / (head - t_min)
             self.assertAlmostEqual(ov["ov"]["m0"], t_min + f * (head - t_min - ov["ov"]["S"]), delta=1)
             self.assertAlmostEqual(mid(ov["cursor"]), ov["ov"]["left"] + f * ov["ov"]["width"], delta=1)
-            page.evaluate(span, 1_000_000)
+            self.set_span(1_000_000)
             # The row before the cursor's record (or before where it would be).
             rows = self.model.rows()
             here = next(i for i, (k, *_r) in enumerate(rows)

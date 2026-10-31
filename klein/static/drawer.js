@@ -152,6 +152,8 @@ const drawerPane = pane({
 });
 
 // The tabs share the scrolling body, so each keeps its own scroll position.
+// Only the tab shown is painted on every render, so a switch renders at
+// once (app.js): the tab is painted when the click returns.
 const scrollTops = {};
 for (const tab of tabs) {
     tab.addEventListener("click", () => {
@@ -164,7 +166,7 @@ for (const tab of tabs) {
         drawerBody.scrollTop = scrollTops[tab.id] || 0;
         paintKey = null;            // the Log's rows were not kept current while hidden
         revealed = null;            // and the cursor may have moved meanwhile
-        update(rec, pos);
+        render();
     });
 }
 
@@ -483,10 +485,22 @@ function fillRow(el, index, row, prev, selected, shift) {
     c.to.dataset.status = row.to;
 }
 
-// Whether the Log's rows are on screen: its tab is shown and the drawer open.
-// While they are not, the rows are not listed again on every render.
+// The tab selected, "log" or "timeline", folded or not: the Timeline's zoom
+// and \ work on its tab, the folded overview's strip being 8 windows long.
+function selectedTab() {
+    return logPanel.hidden ? "timeline" : "log";
+}
+
+// The tab on screen, or null while the drawer is folded. A tab not on
+// screen isn't painted (the Timeline), or its rows aren't listed again (the
+// Log), on every render; the overview shows the window only beside the
+// Timeline.
+function shownTab() {
+    return drawerPane.collapsed() ? null : selectedTab();
+}
+
 function logShown() {
-    return !logPanel.hidden && !drawerPane.collapsed();
+    return shownTab() === "log";
 }
 
 // Place the rows in view. Cheap when nothing moved: it runs on every render.
@@ -779,7 +793,8 @@ window.addEventListener("keydown", (event) => {
         goLive();
         break;
     case "\\":
-        if (!globalThis.KleinTimeline.fit()) return;
+        if (selectedTab() !== "timeline") return;
+        globalThis.KleinWindow.fit();
         break;
     default:
         return;
@@ -800,7 +815,7 @@ function debugRows() {
 
 globalThis.KleinDrawer = {
     showRecording, summary, update, formatTime, formatClock, debugRows, goLive,
-    keptSpan, droppedNote, pane, drag,
+    keptSpan, droppedNote, pane, drag, selectedTab, shownTab,
     onSeek: (fn) => { seek = fn; },
 };
 })();

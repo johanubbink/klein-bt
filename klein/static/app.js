@@ -1385,7 +1385,10 @@ function requestRender({ boards = false } = {}) {
     renderQueued = true;
     // A hidden tab gets no animation frames; a (throttled) timer still keeps
     // the displayed state, and so where F goes, current.
-    (document.hidden ? setTimeout : requestAnimationFrame)(render);
+    (document.hidden ? setTimeout : requestAnimationFrame)(() => {
+        renderQueued = false;
+        render();
+    });
 }
 
 // A new tree: rebuild the hierarchy, the board list and the camera.
@@ -1410,8 +1413,9 @@ function showTree(treeData) {
     boardsDirty = true;
 }
 
+// Also run at once on a tab switch (drawer.js): a render already asked for
+// stays queued, so playing still renders once a frame.
 function render() {
-    renderQueued = false;
     const rec = shownRecording();
     KleinDrawer.showRecording(rec, recordingSupport);
     const now = performance.now();
@@ -1448,8 +1452,10 @@ function render() {
 
     const tree = recording ? seg.layout : frameTree;
     if (tree && tree.id !== drawnTreeId) showTree(tree);
-    KleinTimeline.update(recording ? rec : null, pos, rootNodeSnapshot);
-    KleinOverview.update(recording ? rec : null, pos);
+    const drawerRec = recording ? rec : null;   // what the window and its views show
+    KleinWindow.sync(drawerRec, pos);
+    KleinTimeline.update(drawerRec, pos, rootNodeSnapshot);
+    KleinOverview.update(drawerRec, pos);
     if (!rootNodeSnapshot) return;
 
     lastStatusMap = recording

@@ -216,6 +216,10 @@ class DashboardCase(unittest.TestCase):
                 self.assertAlmostEqual((left + right) / 2, w, delta=1, msg=msg)
         return v, lambda t: overview_x(v, t)
 
+    def set_span(self, span):
+        """The Timeline's window ``span`` µs long, keeping its right edge."""
+        self.page.evaluate("(s) => { const w = KleinWindow.get(); if (w) KleinWindow.set(w.t1, s); }", span)
+
     def overview(self, what=""):
         """The overview after the next frame (``OVERVIEW``), its box checked
         (``assert_box``). Returns the view."""

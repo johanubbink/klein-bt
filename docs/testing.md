@@ -139,7 +139,7 @@ card and checks the outlines, port-line accents and linked rows against
 The page code the UI tests, `BrowserProbe` and `scripts/` evaluate reaches
 the dashboard through globals that `app.js` puts on `window` for them, in one
 block at its end ("Page globals"): the modules as app.js imports them
-(`KleinRecording`, `KleinCursor`, `KleinWindow`, `KleinDrawer`,
+(`KleinRecording`, `KleinCursor`, `KleinWindow`, `KleinView`, `KleinDrawer`,
 `KleinTimeline`, `KleinOverview`, `KleinRenderers`), `kleinDebug`, and
 app.js's own state and functions (`clock`, `seek`, `render`,
 `recordingStore`, `bbGroupEls`, …). The modules share nothing through
@@ -210,7 +210,12 @@ removals), streams it, and writes the frames (incremental and backfill) plus
 the Python model's answers, for `recording.js` and `cursor.js` (tree runs and
 the overview's transition counts are checked against the harness `Model`),
 and for `window.js`: a table of the window's moves, each step's window
-expected;
+expected. `view.js`'s `frame` and `panel` get a case per situation (live,
+paused, playing on and reaching the head, a pause whose moment was evicted,
+the robot gone and back unable to record, a tree swap, no recording, an
+opened file without a sidecar): which source shows and the flags and the
+panel's words written out by hand, the position, state and boards from the
+Python model;
 `test_log_rows.py` and `test_timeline_model.py` do the same for the Log's rows
 and the Timeline's helpers, on `make_vectors.build_named` (trees with named
 nodes and subtrees) fed in by `make_vectors.store_cases`. `python -m

@@ -34,7 +34,8 @@ The code:
   the WebSocket, the tree and the sidebar; `renderers.js` formats blackboard
   values; `recording.js` and `cursor.js` mirror the recording (see
   [Browser model](#browser-model)); `window.js` is the Timeline's window,
-  which the Timeline and the overview both show and move; `drawer.js`,
+  which the Timeline and the overview both show and move; `view.js` decides
+  what each render shows (see [Rendering](#rendering)); `drawer.js`,
   `timeline.js` and `overview.js` are the drawer, its Timeline tab and its
   overview. They are native ES modules with no build step: `index.html`
   loads D3 as a classic script (the modules use its global `d3`) and
@@ -319,7 +320,7 @@ seen, as a pure data model (no asyncio, no ZeroMQ). The gateway feeds it (see
 
 One `websockets` server owns `--port`. It serves the static files over HTTP
 (`/`, `/styles.css`, `/app.js`, `/renderers.js`, `/recording.js`,
-`/cursor.js`, `/window.js`, `/drawer.js`, `/timeline.js`, `/overview.js`,
+`/cursor.js`, `/window.js`, `/view.js`, `/drawer.js`, `/timeline.js`, `/overview.js`,
 `/d3.v7.min.js`) and upgrades `/ws` to a WebSocket. Because both come from
 the same origin, the page just opens `ws://<same host:port>/ws`.
 
@@ -372,11 +373,12 @@ from the frames the gateway streams. Everything that shows a past moment
 locally from that mirror; **scrubbing never asks the backend anything.** The
 mirror holds everything the gateway keeps.
 
-The mirror is two ES modules with no DOM and no d3, and the Timeline's
-window a third, so the tests import them under `gjs` and run them against
-vectors `tests/make_vectors.py` builds from the Python model. That pins the
-two implementations together. Each is named here as app.js imports it
-(`import * as KleinRecording from "./recording.js"`).
+The mirror is two ES modules with no DOM and no d3, the Timeline's window a
+third and what a render shows a fourth, so the tests import them under
+`gjs` and run them against vectors `tests/make_vectors.py` builds from the
+Python model. That pins the two implementations together. Each is named
+here as app.js imports it (`import * as KleinRecording from
+"./recording.js"`).
 
 - [`klein/static/recording.js`](../klein/static/recording.js) →
   `KleinRecording`. `createStore()` returns a store whose
@@ -407,6 +409,16 @@ two implementations together. Each is named here as app.js imports it
   recording). The reader's moves (`set`, `zoomBy`, `step`, `fit`, `reveal`)
   call the `onMove` listeners; `hold` keeps the window still while a scrub
   lasts. `create()` makes another.
+- [`klein/static/view.js`](../klein/static/view.js) → `KleinView`: what
+  one render shows (see [Rendering](#rendering)). `frame({rec, clock,
+  nowMs, frames, support})` is the display at one render: the clock from
+  then on and whether it was moved off an evicted moment (`evicted`) or
+  plays on (`playing`), `pos`, `source` (`"recording"` or `"frames"`),
+  `seg`, `tree`, `status`, the time and `mode` the blackboard is shown at,
+  `viewingPast` and `noBoards`. `panel(view, frames, wasLive)` is the
+  blackboard panel's input at it, `{boards, opts}` for `renderBlackboards`
+  (`opts.empty` the panel's words when it lists no board), or null to leave
+  the panel as it is.
 
 `app.js` routes binary frames and the recording's message types to the store.
 
@@ -414,8 +426,10 @@ two implementations together. Each is named here as app.js imports it
 
 There is one render path. A WebSocket message only stores what it carries
 (into the store, or as "the latest `layout`/`status`/`blackboard` frame") and
-asks for a frame; `render()` runs on the next `requestAnimationFrame` and
-decides what is displayed:
+asks for a frame; `render()` runs on the next `requestAnimationFrame`.
+`KleinView.frame` decides what is displayed, by the rules below, and
+`render()` applies it (the painters, the body classes, the banners); the
+board panel's input is `KleinView.panel`'s:
 
 - **The display source.** While the recording has a backfilled segment, the
   source is the **recording**: `pos = cursorPos(clock)`, live being the head

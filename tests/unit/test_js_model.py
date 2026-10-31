@@ -4,7 +4,8 @@ First the runner itself: that it *fails* — with a non-zero exit — on wrong
 expectations (Maps and Sets included), unknown functions and cases with
 nothing to check. Then the dashboard's recording mirror (``recording.js``,
 ``cursor.js``) against the vectors ``tests/make_vectors.py`` generates from the
-Python model. Everything skips when gjs is missing.
+Python model, and what one render shows (``view.js``). Everything skips when
+gjs is missing.
 """
 import unittest
 from pathlib import Path
@@ -46,6 +47,17 @@ class ReplayVectorsTest(unittest.TestCase):
         # Status frames through addBoards: after a 2.5 s gap, one change.
         self.assertEqual(got["frames: bbChange Main/phase at +9.5"],
                          {"tChange": make_vectors.T0 + 9_500_000, "recent": 1})
+        assert_vectors_pass(self, data)
+
+    def test_a_frame_shows_the_source_the_rules_pick(self):
+        data = make_vectors.frame_vectors()
+        got = {c["name"]: c["expect"] for c in data["cases"] if "expect" in c}
+        # The cases cover each source and each word the panel has.
+        self.assertEqual({got[k] for k in got if k.endswith(": source")}, {"recording", "frames"})
+        self.assertEqual({got[k] for k in got if k.endswith(": opts.empty")},
+                         {make_vectors.NONE_TEXT, make_vectors.EARLY_TEXT,
+                          make_vectors.DROPPED_TEXT, make_vectors.FILE_TEXT,
+                          make_vectors.WAITING_TEXT})
         assert_vectors_pass(self, data)
 
 

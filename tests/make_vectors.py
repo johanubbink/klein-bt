@@ -639,6 +639,216 @@ def _growing_cases(d=50):
     return cases
 
 
+# --------------------------------------------------------------------------- #
+# What one render shows (view.js)
+# --------------------------------------------------------------------------- #
+# The latest frames, for when the recording isn't the source: a tree of their
+# own, a status, the boards (None before the first blackboard frame) and
+# their track, fed one sample at the gateway's own clock (FRAMES_T).
+FRAMES_TREE = {"id": "9:1", "uid": 1, "name": "FromFrames", "children": []}
+FRAMES_STATUS = {"1": {"status": "RUNNING", "from": "IDLE"}}
+FRAMES_BOARDS = {"Main": {"x": 1}}
+FRAMES_T = 42_000_000
+# What the blackboard panel says when it lists no board.
+NONE_TEXT = "This robot reports no blackboards."
+EARLY_TEXT = "No blackboard sample yet at this moment."
+DROPPED_TEXT = "Blackboard history from this moment was dropped."
+FILE_TEXT = "No blackboard in this file."
+WAITING_TEXT = "Waiting for values…"
+
+
+def _frames(boards=FRAMES_BOARDS):
+    return {"tree": FRAMES_TREE, "status": FRAMES_STATUS, "boards": boards,
+            "track": {"$ref": "frames_track"}}
+
+
+def _status(segment, seq):
+    return {str(uid): v for uid, v in decode_state(segment.state_at_seq(seq),
+                                                   segment.layout.uids).items()}
+
+
+def _of_recording(rec, clock, now):
+    """What a frame shows of ``rec`` at ``clock``: the position (cursor_pos),
+    its segment, tree and state."""
+    pos = cursor_pos(clock, now, rec)
+    segment = next(s for s in rec.segments if s.id == pos["seg"])
+    return {"pos": pos, "source": "recording", "seg.id": segment.id,
+            "tree.id": segment.layout.tree["id"], "status": _status(segment, pos["seq"])}
+
+
+# What a frame of the latest frames shows (the cursor aside).
+OF_FRAMES = {"source": "frames", "seg": None, "tree": FRAMES_TREE, "status": FRAMES_STATUS,
+             "t": FRAMES_T, "mode": "live", "viewingPast": False, "noBoards": False}
+
+
+def _frame_cases(name, rec, clock, expect, panels=(), now=0, support="on", frames=None):
+    """``KleinView.frame`` saved as ``name`` and each path of ``expect`` read
+    from it; then ``KleinView.panel`` at it for each ``(wasLive, want)`` in
+    ``panels``, ``want`` None (the panel left as it is) or paths to read."""
+    frames = frames or _frames()
+    args = {"rec": rec, "clock": clock, "nowMs": now, "frames": frames, "support": support}
+    cases = [{"name": f"{name}: frame", "call": "KleinView.frame", "args": [args], "save": name}]
+    cases += [{"name": f"{name}: {path}", "get": f"${name}.{path}", "expect": value}
+              for path, value in expect.items()]
+    for was_live, want in panels:
+        p = f"{name}_panel_{'live' if was_live else 'past'}"
+        call = {"name": p, "call": "KleinView.panel", "args": [{"$ref": name}, frames, was_live]}
+        if want is None:
+            cases.append({**call, "expect": None})
+            continue
+        cases.append({**call, "save": p})
+        cases += [{"name": f"{p}: {path}", "get": f"${p}.{path}", "expect": value}
+                  for path, value in want.items()]
+    return cases
+
+
+def _frame_scenario():
+    """A robot's recording streamed into a store a step at a time (before
+    and after its backfill, a first segment, the first chunk and blackboard
+    evicted, the robot gone, a tree swap), with a frame after each step;
+    then an opened file without a sidecar."""
+    rec, sent = Recording(keep_us=2_000), []
+    Streamer(rec, lambda clients, f: sent.append(f)).subscribe("view")
+    ref, at = {"$ref": "view_rec"}, lambda t: T0 + t
+    cases = [{"name": "view: a store", "call": "KleinRecording.createStore", "save": "view"},
+             {"name": "frames: a track", "call": "KleinRecording.createTrack",
+              "save": "frames_track"},
+             {"name": "frames: a sample", "call": "$frames_track.addBoards",
+              "args": [FRAMES_T, FRAMES_BOARDS], "save": "frames_track_"}]
+
+    def feed(step, count=None):
+        out = [{"name": f"view: ingest {step}.{i}", "call": "$view.ingest", "args": [_arg(f)],
+                "expect": True} for i, f in enumerate(sent[:count])]
+        del sent[:count]
+        return out + [{"name": f"view: the recording after {step}", "get": "$view.recording",
+                       "save": "view_rec"}]
+
+    live, still = {"mode": "live"}, {"evicted": False, "playing": False}
+    # Without a recording, and before its backfill is done: the frames.
+    cases += _frame_cases("no recording", None, live, {
+        **OF_FRAMES, **still, "clock": live, "pos": None}, panels=[
+        (True, {"boards": FRAMES_BOARDS, "opts.t": FRAMES_T, "opts.mode": "live",
+                "opts.track.tLast": FRAMES_T, "opts.empty": NONE_TEXT})])
+    cases += _frame_cases("no blackboard frame yet", None, live, {"source": "frames"},
+                          frames=_frames(boards=None), panels=[
+        (True, None), (False, {"boards": {}, "opts.empty": WAITING_TEXT, "opts.mode": "live"})])
+    cases += feed("rec", 1)
+    cases += _frame_cases("before the backfill", ref, live, {**OF_FRAMES, "pos": None})
+    cases += feed("backfill")
+    cases += _frame_cases("nothing recorded yet", ref, live, {**OF_FRAMES, "pos": None})
+
+    # A first segment: transitions to +500 µs, blackboard samples at +250,
+    # +450 and, after the head, +600.
+    a = _layout(1, [1, 2, 3])
+    rec.begin_segment(a, T0, bytearray(a.size))
+    rec.append([(at(100), 1, 1), (at(100), 2, 1), (at(200), 2, 2), (at(300), 3, 1),
+                (at(400), 3, 3), (at(500), 1, 2)])
+    rec.add_blackboard(at(250), {"Main": {"n": 1}})
+    rec.add_blackboard(at(450), {"Main": {"n": 2}})
+    rec.advance_head(at(500))
+    rec.add_blackboard(at(600), {"Main": {"n": 3}})
+    cases += feed("a segment")
+    seg = rec.segments[0]
+    cases += _frame_cases("live", ref, live, {
+        **_of_recording(rec, live, 0), **still, "clock": live, "t": at(600), "mode": "live",
+        "viewingPast": False, "noBoards": False}, panels=[
+        (True, {"boards": {"Main": {"n": 3}}, "opts.t": at(600), "opts.mode": "live",
+                "opts.track.tLast": at(600), "opts.empty": NONE_TEXT})])
+    cases += _frame_cases("live, a robot that can't record", ref, live,
+                          {"source": "recording"}, support="unsupported")
+    paused = {"mode": "paused", "seg": 0, "seq": 5}
+    cases += _frame_cases("paused in the past", ref, paused, {
+        **_of_recording(rec, paused, 0), **still, "clock": paused, "t": at(400),
+        "mode": "paused", "viewingPast": True, "noBoards": False}, panels=[
+        (True, {"boards": seg.blackboard.at(at(400)), "opts.t": at(400),
+                "opts.mode": "paused", "opts.empty": NONE_TEXT})])
+    early = {"mode": "paused", "seg": 0, "seq": 3}
+    cases += _frame_cases("paused before the first sample", ref, early, {
+        "t": at(200), "viewingPast": True}, panels=[
+        (True, {"boards": {}, "opts.t": at(200), "opts.empty": EARLY_TEXT})])
+    playing = {"mode": "playing", "seg": 0, "seq": 3, "startMs": 1000}
+    cases += _frame_cases("playing", ref, playing, {
+        **_of_recording(rec, playing, 1000.125), "clock": playing, "evicted": False,
+        "playing": True, "t": at(325), "mode": "playing", "viewingPast": True}, now=1000.125,
+        panels=[(False, {"boards": seg.blackboard.at(at(325)), "opts.mode": "playing"})])
+    cases += _frame_cases("playing reaches the head", ref, playing, {
+        **_of_recording(rec, live, 0), **still, "clock": live, "t": at(600), "mode": "live",
+        "viewingPast": False}, now=1000.5)
+
+    # Eviction: 16 more transitions to +3700 µs and a sample at +3000, then
+    # everything before +1700 µs dropped: the first chunk (to seq 8) and the
+    # blackboard before it.
+    rec.append([(at(700 + 200 * i), 1 + i % 3, 1 + i % 2) for i in range(16)])
+    rec.add_blackboard(at(3000), {"Main": {"n": 4}})
+    rec.advance_head(at(3700))
+    rec.evict(at(3700))
+    assert seg.start_seq == 8 and seg.blackboard.t_start == at(1700)
+    cases += feed("an eviction")
+    clamped = {"mode": "paused", "seg": 0, "seq": 9}     # just after the oldest kept record
+    assert evicted(early, 0, rec) and not evicted(clamped, 0, rec)
+    cases += _frame_cases("a pause whose moment was evicted", ref, early, {
+        **_of_recording(rec, clamped, 0), "clock": clamped, "evicted": True,
+        "playing": False, "t": at(1100), "mode": "paused", "viewingPast": True}, panels=[
+        (True, {"boards": {}, "opts.empty": DROPPED_TEXT})])
+    cases += _frame_cases("then it stays", ref, clamped, {"clock": clamped, "evicted": False})
+
+    # The robot gone: the segment ended. Live, its head stays the source
+    # until klein says the robot is back but can't record.
+    rec.end_segment(at(3800))
+    cases += feed("the robot gone")
+    kept = {"mode": "paused", "seg": 0, "seq": 20}
+    head = {**_of_recording(rec, live, 0), "t": at(3700), "viewingPast": False}
+    cases += _frame_cases("ended, live", ref, live, head)
+    cases += _frame_cases("ended, live, back unable to record", ref, live, {
+        **OF_FRAMES, **still, "clock": live, "pos": head["pos"]}, support="unsupported",
+        panels=[(True, {"boards": FRAMES_BOARDS, "opts.t": FRAMES_T,
+                        "opts.track.tLast": FRAMES_T})])
+    cases += _frame_cases("ended, paused, back unable to record", ref, kept, {
+        **_of_recording(rec, kept, 0), "viewingPast": True}, support="unsupported", panels=[
+        (True, {"boards": seg.blackboard.at(at(3300)), "opts.mode": "paused"})])
+
+    # A tree swap: the new segment has no blackboard sample yet.
+    b = _layout(2, [1, 2, 3, 4])
+    rec.begin_segment(b, at(4000), bytearray(b.size))
+    rec.append([(at(4100), 4, 1)])
+    rec.advance_head(at(4100))
+    cases += feed("a tree swap")
+    cases += _frame_cases("a new tree, live", ref, live, {
+        **_of_recording(rec, live, 0), "t": at(4100), "viewingPast": False}, panels=[
+        (True, None), (False, {"boards": {}, "opts.empty": WAITING_TEXT, "opts.mode": "live"})])
+
+    # An opened file without a .bb.jsonl sidecar.
+    opened, sent_file = Recording(), []
+    c = _layout(3, [1, 2])
+    opened.begin_segment(c, T0, bytearray(c.size))
+    opened.append([(at(10), 1, 1), (at(20), 2, 1), (at(30), 2, 2)])
+    opened.advance_head(at(30))
+    opened.end_segment(at(30))
+    Streamer(opened, lambda clients, f: sent_file.append(f), source="file",
+             name="alone.btlog").subscribe("file")
+    cases += store_cases("opened", sent_file)
+    file_ref, end = {"$ref": "opened_rec"}, {"mode": "paused", "seg": 0, "seq": 2}
+    for name, clock, past in (("a file without a sidecar, at its end", live, False),
+                              ("a file without a sidecar, paused", end, True)):
+        cases += _frame_cases(name, file_ref, clock, {
+            **_of_recording(opened, clock, 0), "viewingPast": past, "noBoards": True},
+            support="file", panels=[(True, {"boards": {}, "opts.empty": FILE_TEXT,
+                                            "opts.mode": "paused" if past else "live"})])
+    return cases
+
+
+def frame_vectors():
+    """The view's frame and the blackboard panel's input (``KleinView.frame``
+    and ``panel``), case by case: which source shows, the clock rewritten,
+    the flags and the panel's words by hand from docs/architecture.md,
+    "Rendering"; the position, state and boards from the Python model."""
+    with mock.patch.object(recording, "CHUNK_SIZE", CHUNK_SIZE):
+        cases = _frame_scenario()
+    return {"modules": {"KleinRecording": str(STATIC / "recording.js"),
+                        "KleinView": str(STATIC / "view.js")},
+            "cases": cases}
+
+
 def vectors():
     with mock.patch.object(recording, "CHUNK_SIZE", CHUNK_SIZE):
         rec, live, late = build()

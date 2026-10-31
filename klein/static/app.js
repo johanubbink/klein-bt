@@ -10,6 +10,7 @@ import * as KleinWindow from "./window.js";
 import * as KleinDrawer from "./drawer.js";
 import * as KleinTimeline from "./timeline.js";
 import * as KleinOverview from "./overview.js";
+import * as KleinView from "./view.js";
 
 let rootNodeSnapshot = null;
 
@@ -1377,12 +1378,11 @@ KleinTimeline.connect({
     glyphFor,
 });
 
-// The latest frames, for when there is no recording to show.
-let frameTree = null;
-let frameStatus = {};
-let frameBoards = null;
-// Their blackboard changes over the last BB_RECENT, timed by the gateway (`t`).
+// The latest frames, for when there is no recording to show: the layout,
+// status and blackboard frames' data, and their blackboard changes over the
+// last BB_RECENT, timed by the gateway (`t`).
 const frameTrack = KleinRecording.createTrack();
+const frames = { tree: null, status: {}, boards: null, track: frameTrack };
 
 // The root id of the tree on the canvas. Node ids are generation-prefixed (see
 // updateTreeLayout), so an equal id is the same tree: a `segment` and a `layout`
@@ -1428,53 +1428,35 @@ function showTree(treeData) {
 }
 
 // Also run at once on a tab switch (drawer.js): a render already asked for
-// stays queued, so playing still renders once a frame.
+// stays queued, so playing still renders once a frame. What is shown is
+// decided by KleinView.frame (view.js); this applies it.
 function render() {
     const rec = shownRecording();
     KleinDrawer.showRecording(rec, recordingSupport);
-    const now = performance.now();
-    // Eviction dropped the moment shown: pause on the oldest kept record (just
-    // after it, as clicking its Log row does), and say so rather than jump
-    // silently. Eviction goes oldest first, so that is the first segment's.
-    if (rec && rec.backfillDone && KleinCursor.evicted(clock, now, rec)) {
-        const first = rec.segments[0];
-        clock = KleinCursor.pause(first.id, Math.min(first.startSeq + 1, first.headSeq));
+    const view = KleinView.frame({ rec, clock, nowMs: performance.now(), frames,
+                                   support: recordingSupport });
+    clock = view.clock;
+    if (view.evicted) {             // say so, rather than jump silently
         showBanner("evicted", `Older than the kept ${KleinDrawer.keptSpan(rec)}: `
                    + "moved to the oldest kept transition", { kind: "info", timeout: 6000 });
     }
-    let pos = rec && rec.backfillDone ? KleinCursor.cursorPos(clock, now, rec) : null;
-    // Playing moves on every frame, and goes live once it reaches the head.
-    if (pos && clock.mode === "playing") {
-        if (pos.live) clock = KleinCursor.live();
-        else requestRender({ boards: true });
-    }
-    const seg = pos && rec.segment(pos.seg);
-    // An ended segment stays the source while the robot is away (its head is
-    // the last state klein saw); once klein says the robot is back but can't
-    // record, its status frames are shown instead.
-    const recording = Boolean(seg)
-        && !(pos.live && seg.tEnd !== null && recordingSupport === "unsupported");
-    const source = recording ? "recording" : "frames";
-    if (source !== displaySource) boardsDirty = true;
-    displaySource = source;
+    if (view.playing) requestRender({ boards: true });     // playing moves on every frame
+    if (view.source !== displaySource) boardsDirty = true;
+    displaySource = view.source;
     // The past: amber canvas edge and blackboard note (styles.css).
-    document.body.classList.toggle("viewing-past", recording && !pos.live);
-    // An opened file without a .bb.jsonl sidecar: there is no blackboard at any moment.
-    const noBoards = recording && rec.source === "file" && seg.bb.tStart === null;
-    document.body.classList.toggle("no-blackboard", noBoards);
-    KleinDrawer.update(pos && rec, pos);
+    document.body.classList.toggle("viewing-past", view.viewingPast);
+    document.body.classList.toggle("no-blackboard", view.noBoards);
+    KleinDrawer.update(view.pos && rec, view.pos);
 
-    const tree = recording ? seg.layout : frameTree;
-    if (tree && tree.id !== drawnTreeId) showTree(tree);
-    const drawerRec = recording ? rec : null;   // what the window and its views show
-    KleinWindow.sync(drawerRec, pos);
-    KleinTimeline.update(drawerRec, pos, rootNodeSnapshot);
-    KleinOverview.update(drawerRec, pos);
+    if (view.tree && view.tree.id !== drawnTreeId) showTree(view.tree);
+    // What the Timeline's window and its views show.
+    const drawerRec = view.source === "recording" ? rec : null;
+    KleinWindow.sync(drawerRec, view.pos);
+    KleinTimeline.update(drawerRec, view.pos, rootNodeSnapshot);
+    KleinOverview.update(drawerRec, view.pos);
     if (!rootNodeSnapshot) return;
 
-    lastStatusMap = recording
-        ? KleinRecording.decodeState(KleinRecording.stateAtSeq(seg, pos.seq), seg.uids)
-        : frameStatus;
+    lastStatusMap = view.status;
     if (Object.values(lastStatusMap).some(entry => entry.status === "RUNNING")) {
         lastActiveStatusMap = lastStatusMap;
     }
@@ -1482,30 +1464,9 @@ function render() {
 
     if (!boardsDirty) return;
     boardsDirty = false;
-    // Live takes the newest sample, even one stamped a moment after the last
-    // drain's head. Null before a segment's first sample: live keeps what is
-    // shown (or waits for values); a past moment shows no values, since what
-    // is shown belongs to another moment.
-    const boards = recording ? KleinRecording.bbAt(seg, pos.live ? Infinity : pos.t)
-                             : frameBoards;
-    const live = !recording || pos.live;
-    const mode = live ? "live" : pos.mode;
-    const shown = recording ? { track: seg.bb, t: KleinCursor.shownTime(pos, rec), mode } : { mode };
-    if (boards) {
-        renderBlackboards(boards, shown);
-    } else if (noBoards) {
-        renderBlackboards({}, { ...shown, empty: "No blackboard in this file." });
-    } else if (!live) {
-        // Before the segment's kept blackboard: dropped by eviction (which
-        // cuts the blackboard at the exact cutoff, transitions by whole
-        // chunks), or a moment before its first sample.
-        const empty = seg.bbDropped ? "Blackboard history from this moment was dropped."
-                                    : "No blackboard sample yet at this moment.";
-        renderBlackboards({}, { ...shown, empty });
-    } else if (!boardsLive) {
-        renderBlackboards({}, { ...shown, empty: "Waiting for values…" });
-    }
-    boardsLive = live;
+    const panel = KleinView.panel(view, frames, boardsLive);
+    if (panel) renderBlackboards(panel.boards, panel.opts);
+    boardsLive = !view.viewingPast;
 }
 
 // Read-only facts about the mirror and the display, for the test harness
@@ -1539,9 +1500,9 @@ function connectGatewayPipeline() {
         // klein re-sends everything, and the first tree it names redraws the
         // canvas.
         drawnTreeId = null;
-        frameTree = null;
-        frameStatus = {};
-        frameBoards = null;
+        frames.tree = null;
+        frames.status = {};
+        frames.boards = null;
         frameTrack.clear();
     };
 
@@ -1568,20 +1529,20 @@ function connectGatewayPipeline() {
 
         if (message.type === "layout") {
             if (!message.data) return;
-            frameTree = message.data;
-            frameStatus = {};        // its uids indexed the previous tree
-            frameBoards = null;
+            frames.tree = message.data;
+            frames.status = {};      // its uids indexed the previous tree
+            frames.boards = null;
             requestRender({ boards: true });
         }
 
         else if (message.type === "status") {
-            frameStatus = message.data;
+            frames.status = message.data;
             requestRender();
         }
 
         else if (message.type === "blackboard") {
-            frameBoards = message.data || {};
-            frameTrack.addBoards(message.t, frameBoards);
+            frames.boards = message.data || {};
+            frameTrack.addBoards(message.t, frames.boards);
             frameTrack.evictBefore(message.t - KleinRecording.BB_RECENT);
             requestRender({ boards: true });
         }
@@ -1627,8 +1588,8 @@ window.addEventListener("DOMContentLoaded", () => {
 // recordingSupport and swap render, requestRender, showTree or paintStatus:
 // app.js's own calls use the new one from then on.
 Object.assign(window, {
-    KleinRenderers, KleinRecording, KleinCursor, KleinWindow, KleinDrawer, KleinTimeline,
-    KleinOverview, kleinDebug, recordingStore, shownRecording, seek, frameTrack, svg,
+    KleinRenderers, KleinRecording, KleinCursor, KleinWindow, KleinView, KleinDrawer,
+    KleinTimeline, KleinOverview, kleinDebug, recordingStore, shownRecording, seek, frameTrack, svg,
     zoomBehavior, bbGroupEls, bbGroupOpen, renderBlackboards, resetBlackboards, banners,
     showBanner, hideBanner, sidebarWidth, visibleViewport, runningFrontier,
 });

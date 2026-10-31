@@ -28,8 +28,11 @@ The code:
 - [`klein/recorder.py`](../klein/recorder.py): `Recorder`, the recording
   session: arming, `t` drains, overflow and outage gaps, and a publisher that
   can't record ([Recording](#recording)).
+- [`klein/routes.py`](../klein/routes.py): `Routes`, the plain-HTTP side of
+  the one port: the static files, the recording's downloads and
+  `/debug/state` ([Browser side](#browser-side-one-port)).
 - [`klein/gateway.py`](../klein/gateway.py): the asyncio process. It holds the
-  robot link, the recorder, the pollers and the HTTP + WebSocket server.
+  robot link, the recorder, the pollers, the routes and the WebSocket server.
 - [`klein/cli.py`](../klein/cli.py): the `klein-bt` command, which parses the
   flags and runs the gateway.
 - [`klein/recording.py`](../klein/recording.py): the recording model
@@ -346,11 +349,21 @@ seen, as a pure data model (no asyncio, no ZeroMQ). The gateway feeds it (see
 
 ## Browser side: one port
 
-One `websockets` server owns `--port`. It serves the static files over HTTP
-(`/`, `/styles.css`, `/app.js`, `/renderers.js`, `/recording.js`,
-`/cursor.js`, `/window.js`, `/drawer.js`, `/timeline.js`, `/overview.js`,
-`/d3.v7.min.js`) and upgrades `/ws` to a WebSocket. Because both come from
-the same origin, the page just opens `ws://<same host:port>/ws`.
+One `websockets` server owns `--port`. Before any WebSocket handshake it
+hands each request to `Routes.handle(path)` (`klein/routes.py`), which
+answers it over plain HTTP (a response, or for a download a coroutine that
+exports it) or, for `/ws`, returns None so the request upgrades to a
+WebSocket. Because both come from the same origin, the page just opens
+`ws://<same host:port>/ws`.
+
+`Routes` serves every `.html`, `.css` and `.js` file in `static/` at
+`/<name>` (`/` is `/index.html`), read into memory once at startup, so a new
+file needs no list: `index.html` loads the vendored D3 and `app.js`, a
+native ES module that imports the rest of the dashboard. A missing
+`index.html` is served as a stub page, and a missing `index.html`, D3 or
+`app.js` is warned about at startup. Anything else is a 404. The gateway
+hands `Routes` the recording and the `/debug/state` dump as providers, so
+the tests serve a bare `Recording` with no gateway.
 
 While recording, the same port serves the recording as downloads, per tree
 run or all in one `.zip` ([protocol.md](protocol.md#saving-a-recording) has
@@ -358,7 +371,7 @@ the file formats). All GET; with `--record-buffer 0` they 404.
 
 | path | answer |
 | --- | --- |
-| `/log/runs` | JSON `[{run, tree_id, t_begin, t_end, filename, blackboard}]`, oldest run first: `t_begin` is the run's retained start (µs), `t_end` its end or `null` while it records, `tree_id` the main tree's ID, `filename` `<tree_id>_<YYYY-MM-DD>_<HH-MM-SS>.btlog` from `t_begin` in the gateway machine's local time (a name already used by an earlier run gets `_2`, `_3`… before `.btlog`), `blackboard` whether the run has any blackboard sample |
+| `/log/runs` | JSON `[{run, tree_id, t_begin, t_end, filename, blackboard}]` (`run_entries(runs)`), oldest run first: `t_begin` is the run's retained start (µs), `t_end` its end or `null` while it records, `tree_id` the main tree's ID, `filename` `<tree_id>_<YYYY-MM-DD>_<HH-MM-SS>.btlog` from `t_begin` in the gateway machine's local time (a name already used by an earlier run gets `_2`, `_3`… before `.btlog`), `blackboard` whether the run has any blackboard sample |
 | `/log.zip` | every run in `/log/runs` in one zip (`application/zip`, `Content-Disposition: attachment; filename="klein_<YYYY-MM-DD>_<HH-MM-SS>.zip"`, the local time of the request): per run its `filename` and, when `blackboard`, the `.bb.jsonl` beside it, each byte for byte the two routes below |
 | `/log.btlog?run=N` | run `N`'s `.btlog` (`application/octet-stream`, `Content-Disposition: attachment` with that filename) |
 | `/log.bb.jsonl?run=N` | run `N`'s blackboard sidecar, with the matching `.bb.jsonl` name; a 404 when the run has no blackboard (a file opened without its sidecar, or a run that ended before the first 2 Hz poll), since a header-only sidecar would reopen as empty boards instead of "No blackboard in this file." |
@@ -369,7 +382,7 @@ same run in `/log/runs` and a download only when both are asked for before
 the next eviction.
 
 Each download is a synchronous snapshot of the recording at request time:
-the gateway reads the runs and copies them (`snapshot_run`) without yielding
+`Routes` reads the runs and copies them (`snapshot_run`) without yielding
 to the event loop, so eviction can't change them halfway and a zip never
 mixes two states. All exporting and compressing then runs on the snapshot in
 a worker thread (`asyncio.to_thread`), so polling and streaming go on. The

@@ -8,7 +8,6 @@ import asyncio
 import inspect
 import json
 import struct
-import types
 
 import msgpack
 
@@ -119,10 +118,11 @@ def opened(path):
     return gw
 
 
-def answer(gw, path):
-    """The gateway's HTTP answer for ``path``, as websockets gets it (the
-    ``/log.zip`` coroutine, which compresses in a thread, run to its response)."""
-    response = gw._process_request(None, types.SimpleNamespace(path=path))
+def answer(routes, path):
+    """The HTTP answer of ``routes`` (a ``klein.routes.Routes``) for ``path``,
+    as websockets gets it, a download (exported in a thread) run to its
+    response."""
+    response = routes.handle(path)
     return asyncio.run(response) if inspect.isawaitable(response) else response
 
 

@@ -1,27 +1,27 @@
 """klein.gateway — ZeroMQ→WebSocket telemetry gateway for BehaviorTree.CPP v4.
 
 klein connects to a running BehaviorTree.CPP robot node exposing the Groot2
-publisher protocol (a ``ZMQ_REP`` socket, default port 1667), performs the
-FULLTREE handshake, recursively unrolls nested subtrees into a single tree, and
-then streams 10 Hz status telemetry — plus 2 Hz blackboard values, one board per
-subtree — to browser dashboards over WebSockets. A robot that loads a
-*different* tree is noticed on the next poll, from the tree UUID every reply
-carries, and the handshake is re-run. Unless ``--record-buffer 0``, every
-transition the robot reports is also drained after each status poll into an
+publisher protocol (a ``ZMQ_REP`` socket, default port 1667) over one
+``RobotLink``, performs the FULLTREE handshake, unrolls nested subtrees into a
+single tree (klein/layout.py), and then streams 10 Hz status telemetry — plus
+2 Hz blackboard values, one board per subtree — to browser dashboards over
+WebSockets. A robot that loads a *different* tree is noticed on the next
+poll, from the tree UUID every reply carries, and the handshake is re-run.
+Unless ``--record-buffer 0``, a ``Recorder`` (klein/recorder.py) also drains
+every transition the robot reports, after each status poll, into an
 in-memory ``Recording`` (see docs/architecture.md, "Recording").
 
 Everything the browser needs is served from a **single port** (``--port``):
 
-* plain HTTP for the dashboard (``/`` and ``/index.html``), its ``/styles.css``,
-  ``/app.js``, ``/renderers.js``, ``/recording.js``, ``/cursor.js``,
-  ``/window.js``, ``/drawer.js``, ``/timeline.js`` and ``/overview.js``, and the
-  bundled D3.js (``/d3.v7.min.js``), and
+* plain HTTP (``Routes``, klein/routes.py) for every file in ``static/``:
+  ``index.html`` (also ``/``) loads the bundled D3.js and ``app.js``, a native
+  ES module that imports the rest of the dashboard; and, while recording, the
+  recorded tree runs as downloads: ``/log/runs``, ``/log.btlog?run=N``,
+  ``/log.bb.jsonl?run=N``, and all of them in one ``/log.zip`` (the Save
+  button), and
 * a WebSocket endpoint (``/ws``) that pushes the unrolled tree layout on connect
   and then broadcasts live status and blackboard frames — and, while recording,
-  streams the recording itself (``klein/streaming.py``), and
-* while recording, the recorded tree runs as downloads: ``/log/runs``,
-  ``/log.btlog?run=N``, ``/log.bb.jsonl?run=N``, and all of them in one
-  ``/log.zip`` (the Save button).
+  streams the recording itself (``klein/streaming.py``).
 
 ``--open FILE.btlog`` shows a saved recording instead, with no robot: the file
 (and its ``FILE.bb.jsonl`` blackboard sidecar, if present) is loaded into the
@@ -35,33 +35,24 @@ translator between the robot's REQ/REP world and the browser's push world.
 """
 
 import asyncio
-import io
 import json
 import logging
 import sys
 import time
 import webbrowser
-import zipfile
 import xml.etree.ElementTree as ET
-from http import HTTPStatus
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
 
 import websockets
-from websockets.datastructures import Headers
-from websockets.http11 import Response
 
 from .groot2_protocol import (REQ_BLACKBOARD, REQ_FULLTREE, REQ_STATUS, parse_blackboard,
                               parse_status)
-from .btlog import BtlogError, export_blackboard, export_run, load_btlog, read_btlog
+from .btlog import BtlogError, load_btlog, read_btlog
 from .layout import parse_layout
 from .recorder import Recorder
-from .recording import snapshot_run
 from .robot_link import REQUEST_TIMEOUT, RobotLink, RobotRefused, RobotTimeout
+from .routes import STATIC_DIR, Routes
 from .streaming import Streamer
-
-PACKAGE_DIR = Path(__file__).resolve().parent
-STATIC_DIR = PACKAGE_DIR / "static"    # dashboard web assets live here, not beside the .py
 
 # Timeouts / cadence
 # 10 Hz status poll. Read on every poll: the tests set it lower, since the mock
@@ -69,32 +60,6 @@ STATIC_DIR = PACKAGE_DIR / "static"    # dashboard web assets live here, not bes
 POLL_INTERVAL = 0.1
 BLACKBOARD_POLL_INTERVAL = 0.5  # 2 Hz blackboard poll — values change slower than status
 LAYOUT_RETRY_MAX = 5.0          # cap on handshake retry backoff
-
-# Static files served over HTTP at "/<name>" ("/" is "/index.html"): every file
-# in static/ with one of these types, so a new script needs no list. The
-# dashboard can't render without the page, D3 and app.js.
-_CONTENT_TYPES = {
-    ".html": "text/html; charset=utf-8",
-    ".css": "text/css; charset=utf-8",
-    ".js": "text/javascript; charset=utf-8",
-}
-_RENDER_CRITICAL = ("index.html", "d3.v7.min.js", "app.js")
-_INDEX_FALLBACK = b"<!doctype html><h1>klein: index.html missing from package</h1>"
-
-# The recording's downloads (docs/architecture.md, "Browser side: one port"):
-# a run's files by suffix (None: all of them in one zip) and their types.
-_LOG_SUFFIXES = (".btlog", ".bb.jsonl")
-_LOG_TYPES = {".btlog": "application/octet-stream", ".bb.jsonl": "application/x-ndjson",
-              None: "application/zip"}
-_LOG_ROUTES = ("/log/runs", "/log.zip", *(f"/log{suffix}" for suffix in _LOG_SUFFIXES))
-
-
-def _load_asset(name):
-    """Read a packaged static asset as bytes, or None if it is missing."""
-    try:
-        return (STATIC_DIR / name).read_bytes()
-    except OSError:
-        return None
 
 
 def tree_changed(loaded, uuid):
@@ -116,7 +81,6 @@ class KleinGateway:
     def __init__(self, robot_host, robot_port, port, recording=None, debug=False, link=None):
         self.robot_endpoint = f"tcp://{robot_host}:{robot_port}"
         self.port = port
-        self.debug = debug                  # serve GET /debug/state
         # The robot's REQ socket (klein/robot_link.py); the tests pass a fake.
         # REQUEST_TIMEOUT is read here, not at import: the UI tests lower it
         # before the CLI builds the gateway.
@@ -147,8 +111,10 @@ class KleinGateway:
         self._robot_state_json = None
         self._publish_robot_state()
 
-        # request path -> (body_bytes, content_type); populated once in run().
-        self._static = {}
+        # The HTTP side of the port (klein/routes.py): the static files, the
+        # recording's downloads and, with --debug, GET /debug/state.
+        self.routes = Routes(STATIC_DIR, recording=lambda: self.recording,
+                             debug_state=self.debug_state if debug else None)
 
     # ------------------------------------------------------------------ #
     # Layout: the FULLTREE handshake (the unrolling is klein/layout.py)
@@ -421,123 +387,8 @@ class KleinGateway:
             await asyncio.sleep(POLL_INTERVAL)
 
     # ------------------------------------------------------------------ #
-    # HTTP + WebSocket on one port
+    # WebSocket + HTTP on one port (the HTTP side is klein/routes.py)
     # ------------------------------------------------------------------ #
-    @staticmethod
-    def _http_response(status, body, content_type, attachment=None):
-        """``attachment`` is a filename: the browser saves the body under it."""
-        headers = Headers()
-        headers["Content-Type"] = content_type
-        headers["Content-Length"] = str(len(body))
-        headers["Cache-Control"] = "no-store"
-        if attachment is not None:
-            headers["Content-Disposition"] = f'attachment; filename="{attachment}"'
-        return Response(status, HTTPStatus(status).phrase, headers, body)
-
-    def log_runs(self):
-        """``[(run, entry)]``: each tree run of the recording with its
-        ``GET /log/runs`` entry. Run indices count from the oldest retained run,
-        so they shift when eviction drops one. ``blackboard`` is False when the
-        run has no blackboard sample (a file opened without its sidecar): its
-        ``/log.bb.jsonl`` is then a 404, not a header-only sidecar that would
-        reopen as empty boards. Two runs of one tree that start in the same
-        second get ``_2``, ``_3``… after the time, so every name (and the
-        zip's entries) stays unique."""
-        out = []
-        used = set()
-        for i, run in enumerate(self.recording.runs()):
-            start = run[0].t_start
-            tree_id = run[0].layout.tree["root_tree_id"]
-            stamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime(start / 1e6))
-            stem = base = f"{tree_id}_{stamp}"
-            n = 1
-            while stem in used:
-                n += 1
-                stem = f"{base}_{n}"
-            used.add(stem)
-            out.append((run, {"run": i, "tree_id": tree_id, "t_begin": start,
-                              "t_end": run[-1].t_end,
-                              "filename": f"{stem}.btlog",
-                              "blackboard": any(s.blackboard.t_start is not None
-                                                for s in run)}))
-        return out
-
-    @staticmethod
-    def _log_files(run, entry, suffixes=_LOG_SUFFIXES):
-        """Run ``run``'s downloads among ``suffixes``, ``{suffix: (filename,
-        bytes)}``: its ``.btlog`` and, when it has a blackboard, its
-        ``.bb.jsonl`` under the same stem."""
-        stem = entry["filename"].removesuffix(".btlog")
-        files = {}
-        if ".btlog" in suffixes:
-            files[".btlog"] = (entry["filename"], export_run(run, run[0].layout.xml))
-        if ".bb.jsonl" in suffixes and entry["blackboard"]:
-            files[".bb.jsonl"] = (stem + ".bb.jsonl", export_blackboard(run, entry["tree_id"]))
-        return files
-
-    async def _download(self, runs, suffix, name=None):
-        """Export ``runs`` (``[(run, entry)]``, snapshots) in a worker thread:
-        the one run's ``suffix`` file, or with ``suffix`` None every run's
-        files as one deflated ``.zip`` named ``name``. The ``process_request``
-        hook awaits it."""
-        def build():
-            if suffix is not None:
-                (run, entry), = runs
-                return self._log_files(run, entry, (suffix,))[suffix]
-            buffer = io.BytesIO()
-            with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-                for run, entry in runs:
-                    for filename, data in self._log_files(run, entry).values():
-                        archive.writestr(filename, data)
-            return name, buffer.getvalue()
-        filename, body = await asyncio.to_thread(build)
-        return self._http_response(200, body, _LOG_TYPES[suffix], filename)
-
-    def _log_response(self, path, query):
-        """``GET /log/runs``, ``/log.zip``, ``/log.btlog?run=N`` and
-        ``/log.bb.jsonl?run=N``. Each request reads the runs once and
-        snapshots them in one go (no await), so eviction can't change them
-        halfway through; a download returns a coroutine (``_download``) that
-        exports the snapshots off the event loop."""
-        runs = self.log_runs()
-        if path == "/log/runs":
-            body = json.dumps([entry for _run, entry in runs]).encode()
-            return self._http_response(200, body, "application/json")
-        if path == "/log.zip":
-            name = time.strftime("klein_%Y-%m-%d_%H-%M-%S.zip")
-            return self._download([(snapshot_run(run), entry) for run, entry in runs],
-                                  None, name)
-        index = parse_qs(query).get("run", [""])[0]
-        if not index.isdigit() or int(index) >= len(runs):
-            return self._http_response(404, b"no such run", "text/plain; charset=utf-8")
-        run, entry = runs[int(index)]
-        suffix = path.removeprefix("/log")
-        if suffix == ".bb.jsonl" and not entry["blackboard"]:  # e.g. a file opened without one
-            return self._http_response(404, b"no blackboard in this run",
-                                       "text/plain; charset=utf-8")
-        return self._download([(snapshot_run(run), entry)], suffix)
-
-    def _process_request(self, connection, request):
-        """Serve the dashboard's static files (HTML, CSS, JS, D3) and the
-        recording's downloads over plain HTTP; let ``/ws`` upgrade to a WebSocket. Runs for every incoming
-        connection before the handshake."""
-        url = urlsplit(request.path)
-        path = url.path
-        if path == "/ws":
-            return None  # not an HTTP response -> proceed with the WS upgrade
-        if path == "/debug/state" and self.debug:
-            body = json.dumps(self.debug_state()).encode()
-            return self._http_response(200, body, "application/json")
-        if path in _LOG_ROUTES and self.recording is not None:
-            return self._log_response(path, url.query)
-        if path == "/":
-            path = "/index.html"
-        asset = self._static.get(path)
-        if asset is None:
-            return self._http_response(404, b"not found", "text/plain; charset=utf-8")
-        body, content_type = asset
-        return self._http_response(200, body, content_type)
-
     async def ws_handler(self, websocket):
         """Push the recording's backfill and the layout on connect (if loaded),
         then keep the connection open for broadcasts."""
@@ -563,30 +414,6 @@ class KleinGateway:
                 self.streamer.unsubscribe(websocket)
             print(f"[klein] dashboard disconnected ({len(self.clients)} active).")
 
-    def _load_static(self):
-        """Load the packaged static files into memory once, keyed by URL path.
-
-        A missing ``index.html`` falls back to a stub page; any other missing
-        file just means its route 404s (and, for D3 or a dashboard script,
-        that the dashboard can't render).
-        """
-        try:
-            names = sorted(f.name for f in STATIC_DIR.iterdir()
-                           if f.suffix in _CONTENT_TYPES)
-        except OSError:
-            names = []
-        for name in names:
-            body = _load_asset(name)
-            if body is not None:
-                self._static[f"/{name}"] = (body, _CONTENT_TYPES[Path(name).suffix])
-        for name in _RENDER_CRITICAL:
-            if f"/{name}" not in self._static:
-                print(f"[klein] warning: {name} not bundled; dashboard will not render.",
-                      file=sys.stderr)
-        self._static.setdefault(
-            "/index.html", (_INDEX_FALLBACK, "text/html; charset=utf-8")
-        )
-
     async def run(self, open_browser=False):
         """Serve HTTP+WebSocket on one port; load the layout and poll forever."""
         # Stray non-WebSocket TCP connections to the port (health checks, port
@@ -594,13 +421,14 @@ class KleinGateway:
         # client connects/disconnects ourselves, so silence the library log.
         logging.getLogger("websockets.server").setLevel(logging.CRITICAL)
 
-        self._load_static()
+        self.routes.load()
 
         # The server starts accepting connections here, so the dashboard page
         # loads (and shows "connecting…") even while we wait for the robot.
         async with websockets.serve(
             self.ws_handler, "0.0.0.0", self.port,
-            process_request=self._process_request,
+            # Plain HTTP, before any handshake: a Response, or None for /ws.
+            process_request=lambda _connection, request: self.routes.handle(request.path),
             # An HTTP answer is part of the opening handshake, which this
             # bounds (default 10 s): a Save of a full 200 MiB recording takes
             # ~15 s to export and compress, and would be cut off unanswered.

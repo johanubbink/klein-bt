@@ -1,6 +1,8 @@
-"""Unit tests for klein.gateway: status and blackboard decoding, static-asset
-serving, the robot frame, tree swaps, recording, and the CLI. The tree it
-unrolls is klein.layout's, tested in test_layout.py.
+"""Unit tests for klein.gateway: status and blackboard decoding, the robot
+frame, tree swaps, recording, and the CLI; and the static files klein.routes
+serves (the recording's downloads are in test_save.py). The tree it unrolls
+is klein.layout's, tested in test_layout.py; the recorder it drives is
+tested in test_recorder.py.
 
 ``TreeSwapTest`` and ``RecordingGatewayTest`` drive the real pollers, since the
 re-handshake and the recording live inside them, against a ``FakeRobot`` link
@@ -13,6 +15,7 @@ import json
 import re
 import socket
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -20,13 +23,13 @@ from unittest import mock
 
 import msgpack
 
-from klein import cli, gateway
+from klein import cli, gateway, routes
 from klein.cli import _port_available
-from klein.gateway import KleinGateway
 from klein.groot2_protocol import parse_blackboard, parse_status
 from klein.layout import parse_layout
 from klein.recording import Recording
 from klein.robot_link import RobotTimeout
+from klein.routes import Routes, http_response
 from tests.helpers import (MODEL_LESS_XML, UUID_A, UUID_B, FakeRobot, FakeSocket, answer,
                            collect_ids, collect_uids, new_gateway, status_record)
 
@@ -54,13 +57,13 @@ class ParseStatusTest(unittest.TestCase):
                 self.assertEqual(parse_status(buf), expected)
 
 
-class StaticAssetsTest(GatewayTestCase):
+class StaticAssetsTest(unittest.TestCase):
     def setUp(self):
-        super().setUp()
-        self.gw._load_static()
+        self.routes = Routes(gateway.STATIC_DIR)
+        self.routes.load()
 
     def request(self, path):
-        return answer(self.gw, path)
+        return answer(self.routes, path)
 
     def test_every_static_file_served(self):
         # Every file in static/ is served at "/<name>" with its type, so a new
@@ -73,7 +76,7 @@ class StaticAssetsTest(GatewayTestCase):
                 r = self.request(f"/{f.name}")
                 self.assertEqual(r.status_code, 200)
                 self.assertEqual(r.body, f.read_bytes())
-                self.assertEqual(r.headers["Content-Type"], gateway._CONTENT_TYPES[f.suffix])
+                self.assertEqual(r.headers["Content-Type"], routes.CONTENT_TYPES[f.suffix])
         pyproject = (Path(__file__).resolve().parents[2] / "pyproject.toml").read_text()
         self.assertIn('klein = ["static/*"]', pyproject)
 
@@ -94,10 +97,10 @@ class StaticAssetsTest(GatewayTestCase):
 
     def test_routes(self):
         self.assertIsNone(self.request("/ws"))          # deferred to the upgrade
+        index = (gateway.STATIC_DIR / "index.html").read_bytes()
         cases = [
-            ("root serves index", "/", 200, self.gw._static["/index.html"][0]),
-            ("query string stripped", "/index.html?v=2", 200,
-             self.gw._static["/index.html"][0]),
+            ("root serves index", "/", 200, index),
+            ("query string stripped", "/index.html?v=2", 200, index),
             ("unknown path", "/nope", 404, b"not found"),
         ]
         for label, path, status, body in cases:
@@ -108,16 +111,17 @@ class StaticAssetsTest(GatewayTestCase):
         self.assertEqual(self.request("/").headers["Content-Type"], "text/html; charset=utf-8")
 
     def test_missing_files_fall_back(self):
-        # Simulate a package where none of the static assets are bundled.
-        with mock.patch.object(gateway, "_load_asset", return_value=None):
-            fresh = new_gateway(self)
-            err = io.StringIO()
-            with contextlib.redirect_stderr(err):
-                fresh._load_static()
-        self.assertEqual(fresh._static["/index.html"][0], gateway._INDEX_FALLBACK)
-        self.assertNotIn("/styles.css", fresh._static)
-        self.assertNotIn("/app.js", fresh._static)
-        self.assertNotIn("/d3.v7.min.js", fresh._static)
+        # A package where none of the static assets are bundled.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        empty = Routes(tmp.name)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            empty.load()
+        self.assertEqual(answer(empty, "/").body, routes.INDEX_FALLBACK)
+        for path in ("/styles.css", "/app.js", "/d3.v7.min.js"):
+            with self.subTest(path):
+                self.assertEqual(answer(empty, path).status_code, 404)
         # Both render-critical assets are reported missing.
         self.assertIn("d3.v7.min.js not bundled", err.getvalue())
         self.assertIn("app.js not bundled", err.getvalue())
@@ -207,7 +211,7 @@ class BlackboardTest(unittest.TestCase):
 
 class HttpResponseTest(unittest.TestCase):
     def test_headers_and_body(self):
-        r = KleinGateway._http_response(200, b"hello", "text/plain; charset=utf-8")
+        r = http_response(200, b"hello", "text/plain; charset=utf-8")
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.body, b"hello")
         self.assertEqual(r.headers["Content-Type"], "text/plain; charset=utf-8")
@@ -406,11 +410,12 @@ class RecordingGatewayTest(unittest.IsolatedAsyncioTestCase):
     and idling. The recorder's own cases are in test_recorder.py. No dashboard
     is connected unless a test says so: a recording gateway polls regardless."""
 
-    def make_gateway(self, robot=None, record=True, **caps):
+    def make_gateway(self, robot=None, record=True, debug=False):
         patch = mock.patch.object(gateway, "POLL_INTERVAL", 0)
         patch.start()
         self.addCleanup(patch.stop)
-        return new_gateway(self, link=robot, recording=Recording(**caps) if record else None)
+        return new_gateway(self, link=robot, recording=Recording() if record else None,
+                           debug=debug)
 
     async def run_gateway(self, gw, blackboard=False):
         """Handshake, then the status poller (and optionally the blackboard
@@ -581,10 +586,9 @@ class RecordingGatewayTest(unittest.IsolatedAsyncioTestCase):
     async def test_debug_state_reports_the_recording(self):
         robot = FakeRobot(limit=7)
         robot.drains = [[(10, 1, 1)], [(20, 1, 2)]]
-        gw = self.make_gateway(robot)
-        gw.debug = True
+        gw = self.make_gateway(robot, debug=True)
         await self.run_gateway(gw)
-        response = answer(gw, "/debug/state")
+        response = answer(gw.routes, "/debug/state")
         self.assertEqual(response.status_code, 200)
         state = json.loads(response.body)
         start = robot.starts[0]
@@ -603,12 +607,12 @@ class RecordingGatewayTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["blackboard"], [{"seg": 0, "t_start": None, "boards": {},
                                                "changes": []}])
         gw.recording.add_blackboard(start + 30, {"MainTree": {"x": 1}})
-        response = answer(gw, "/debug/state")
+        response = answer(gw.routes, "/debug/state")
         self.assertEqual(json.loads(response.body)["blackboard"],
                          [{"seg": 0, "t_start": start + 30, "boards": {"MainTree": start + 30},
                            "changes": [[start + 30, "MainTree", "x", "1"]]}])
         quiet = self.make_gateway()                     # without --debug
-        response = answer(quiet, "/debug/state")
+        response = answer(quiet.routes, "/debug/state")
         self.assertEqual(response.status_code, 404)
 
 

@@ -588,33 +588,18 @@ function namesOf(seg, uid) {
     return nodeNames(seg.layout).get(uid) || { name: `uid ${uid}`, subtree: "" };
 }
 
-// The Log's rows: every retained record of rec, oldest first, or with a
-// filter only those whose node or subtree name contains it (ignoring case).
-// {count, parts: [{seg, first, seqs}]}: part rows first.. come from seg, at
-// seqs (null: every seq from seg.startSeq).
-function logRows(rec, filter = "") {
-    const needle = filter.trim().toLowerCase();
-    const parts = [];
-    let count = 0;
-    for (const seg of rec.segments) {
-        let seqs = null;
-        if (needle) {
-            const match = new Set();
-            for (const [uid, { name, subtree }] of nodeNames(seg.layout)) {
-                if (name.toLowerCase().includes(needle) || subtree.toLowerCase().includes(needle)) {
-                    match.add(uid);
-                }
-            }
-            seqs = [];
-            for (const chunk of seg.chunks) {
-                for (let i = 0; i < chunk.length; i++) if (match.has(chunk.uid[i])) seqs.push(chunk.seq0 + i);
-            }
-        }
-        const n = seqs ? seqs.length : seg.headSeq - seg.startSeq;
-        if (n) parts.push({ seg, first: count, seqs });
-        count += n;
+// The seqs of seg's kept records whose node or subtree name contains needle
+// (lower case).
+function seqsMatching(seg, needle) {
+    const match = new Set();
+    for (const [uid, { name, subtree }] of nodeNames(seg.layout)) {
+        if (name.toLowerCase().includes(needle) || subtree.toLowerCase().includes(needle)) match.add(uid);
     }
-    return { count, parts };
+    const seqs = [];
+    for (const chunk of seg.chunks) {
+        for (let i = 0; i < chunk.length; i++) if (match.has(chunk.uid[i])) seqs.push(chunk.seq0 + i);
+    }
+    return seqs;
 }
 
 // The status name a node had just before the record at seq: its keyframe
@@ -628,11 +613,12 @@ function statusBefore(seg, seq, uid) {
     return decodeStatus(state[uid])[0];
 }
 
-// Row i: {seg, seq, t, uid, name, subtree, from, to}, or null past the ends.
-// from and to are status names ("IDLE" for "IDLE after X").
-function logRowAt(rows, i) {
-    if (i < 0 || i >= rows.count) return null;
-    const p = rows.parts[bisectRight(rows.parts.length, i, (j) => rows.parts[j].first) - 1];
+// The Log's rows are listed in parts, [{seg, first, seqs}]: part rows
+// first.. come from seg, at seqs (null: every seq from seg.startSeq).
+// Row i of `count`, or null past the ends.
+function rowAt(parts, count, i) {
+    if (i < 0 || i >= count) return null;
+    const p = parts[bisectRight(parts.length, i, (j) => parts[j].first) - 1];
     const seg = p.seg;
     const seq = p.seqs ? p.seqs[i - p.first] : seg.startSeq + i - p.first;
     const chunk = chunkOf(seg, seq);
@@ -643,10 +629,9 @@ function logRowAt(rows, i) {
              from: statusBefore(seg, seq, uid), to: STATUS_NAMES[chunk.status[k]] || "UNKNOWN" };
 }
 
-// The index of the first row at or after record (segId, seq): the row for it
-// when it is one, rows.count when nothing follows.
-function logRowIndex(rows, segId, seq) {
-    for (const p of rows.parts) {
+// The index of the first row at or after record (segId, seq), or count.
+function rowIndex(parts, count, segId, seq) {
+    for (const p of parts) {
         if (p.seg.id < segId) continue;
         if (p.seg.id > segId) return p.first;
         const n = p.seqs ? p.seqs.length : p.seg.headSeq - p.seg.startSeq;
@@ -654,7 +639,34 @@ function logRowIndex(rows, segId, seq) {
                          : Math.min(Math.max(seq - p.seg.startSeq, 0), n);
         if (k < n) return p.first + k;
     }
-    return rows.count;
+    return count;
+}
+
+// The Log's rows: every retained record of rec (none without one), oldest
+// first, or with a filter only those whose node or subtree name contains it
+// (ignoring case). Listed once, read by index:
+//   count               how many rows
+//   at(i)               row i, {seg, seq, t, uid, name, subtree, from, to},
+//                       or null past the ends; from and to are status names
+//                       ("IDLE" for "IDLE after X")
+//   indexOf(segId, seq) the index of the first row at or after record
+//                       (segId, seq): the row for it when it is one, count
+//                       when nothing follows
+function logRows(rec, filter = "") {
+    const needle = filter.trim().toLowerCase();
+    const parts = [];
+    let count = 0;
+    for (const seg of rec ? rec.segments : []) {
+        const seqs = needle ? seqsMatching(seg, needle) : null;
+        const n = seqs ? seqs.length : seg.headSeq - seg.startSeq;
+        if (n) parts.push({ seg, first: count, seqs });
+        count += n;
+    }
+    return {
+        count,
+        at: (i) => rowAt(parts, count, i),
+        indexOf: (segId, seq) => rowIndex(parts, count, segId, seq),
+    };
 }
 
 // True when two segments ran the same tree (one layout id).
@@ -775,7 +787,7 @@ function createTrack() {
 
 export {
     decodeState, stateAtSeq, seqAtTime, stateAt, timeAtSeq, recordsRange, intervals,
-    bbAt, bbChange, BB_RECENT, describe, logRows, logRowAt, logRowIndex, intervalsAll, timelineMarks,
+    bbAt, bbChange, BB_RECENT, describe, logRows, intervalsAll, timelineMarks,
     timelineSections, historyDropped, gapsIn, treeName, eachNode, sameTree, treeRuns,
     countIn, busiestColumn, createStore, createTrack,
 };

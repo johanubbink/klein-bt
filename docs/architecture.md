@@ -385,9 +385,10 @@ here as app.js imports it (`import * as KleinRecording from
   `ingest(message)` takes a parsed text frame or a binary `ArrayBuffer`;
   `store.recording` is the one recording klein streams. The Python model's
   queries have mirrors here (`stateAtSeq`, `seqAtTime`, `stateAt`, `bbAt`,
-  `decodeState`), next to what the cursor, the Log (`logRows`, `logRowAt`)
-  the Timeline (`intervalsAll`, `timelineMarks`, `timelineSections`) and
-  the overview (`treeRuns`, `countIn`, `busiestColumn`) need.
+  `decodeState`), next to what the cursor, the Log (`logRows`: the rows
+  listed once, `{count, at(i), indexOf(segId, seq)}`), the Timeline
+  (`intervalsAll`, `timelineMarks`, `timelineSections`) and the overview
+  (`treeRuns`, `countIn`, `busiestColumn`) need.
 - [`klein/static/cursor.js`](../klein/static/cursor.js) →
   `KleinCursor`. A clock is data: `live()`, `pause(segId, seq,
   t?)`, `play(fromSegId, fromSeq, nowMs, t?)` (1× only).
@@ -427,7 +428,9 @@ here as app.js imports it (`import * as KleinRecording from
   that is more than `maxRecords` (then no bars), the marks per uid
   (`timelineMarks`), the bands of other trees and gaps with their labels
   and tooltips, and `rec.tMin` when the recording starts inside it (else
-  null).
+  null). `anchorAfter(rows, topRow)` is where the Log's top row `{seg,
+  seq}` is once the rows are listed again: its index, or null when it is no
+  longer listed.
 
 `app.js` routes binary frames and the recording's message types to the store.
 
@@ -739,11 +742,13 @@ sidebar's width (see [The sidebar](#the-sidebar)).
   maps linearly onto the rows (`virtualTop()`); `#log-rows` clips the rows
   (`overflow: clip`), so overscan rows can't lengthen the scroll range.
   Below that the mapping is exact. The rows are listed again from the mirror
-  whenever records arrive, eviction drops some, or the filter changes, so an
-  evicted row is never shown. While live and scrolled to the newest row, the
-  log follows it; scrolling up stops that until you scroll back down or go
-  back to live. Scrolled up, the row at the top stays at the top when rows
-  are listed again; if eviction dropped that row too, the list shows its top.
+  (`KleinRecording.logRows`) whenever records arrive, eviction drops some,
+  or the filter changes, so an evicted row is never shown. While live and
+  scrolled to the newest row, the log follows it; scrolling up stops that
+  until you scroll back down or go back to live. Scrolled up, the row at the
+  top stays at the top when rows are listed again; if eviction dropped that
+  row too (and so every row above it), the list shows its top
+  (`KleinView.anchorAfter`).
 - **Dropped history.** Once eviction has dropped transitions
   (`historyDropped`), the Log's first line, hatched like the Timeline's
   not-recorded bands, reads "Transitions older than the kept 10 min were

@@ -2,9 +2,11 @@
 // the source (the recording at the cursor, or the latest frames), the clock
 // after the render's rewrites, the tree, the status and the blackboard
 // panel's input (frame, panel); each blackboard row's change marks
-// (rowMarks); and what the Timeline's window shows (timelineWindow). app.js
-// and timeline.js compute them and then apply them: the painters, the body
-// classes, the banners, the rows' classes, the lanes. Pure: no DOM, no d3.
+// (rowMarks); what the Timeline's window shows (timelineWindow); and which
+// row the Log keeps at its top (anchorAfter). app.js, timeline.js and
+// drawer.js compute them and then apply them: the painters, the body
+// classes, the banners, the rows' classes, the lanes, the scroll position.
+// Pure: no DOM, no d3.
 // See docs/architecture.md, "Rendering" and "The drawer".
 
 import * as R from "./recording.js";
@@ -232,4 +234,19 @@ function timelineWindow(rec, seg, t0, t1, maxRecords) {
     return { count, tooMany, per, bands, edge };
 }
 
-export { frame, panel, rowMarks, timelineWindow };
+// ------------------------------------------------------------------ //
+// The Log's anchor: the row at the top, across a new listing
+// ------------------------------------------------------------------ //
+// Where the row at the top of the Log, topRow {seg, seq}, is once the rows
+// (KleinRecording.logRows) are listed again after new records, eviction or
+// a new filter: its index, which the Log keeps at the top, or null when it
+// is no longer listed. The Log then shows its top, the dropped line
+// included: eviction goes oldest first, so a dropped row took every row
+// above it.
+function anchorAfter(rows, topRow) {
+    const index = rows.indexOf(topRow.seg, topRow.seq);
+    const row = rows.at(index);
+    return row && row.seg === topRow.seg && row.seq === topRow.seq ? index : null;
+}
+
+export { frame, panel, rowMarks, timelineWindow, anchorAfter };

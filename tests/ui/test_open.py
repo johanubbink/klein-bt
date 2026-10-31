@@ -67,8 +67,8 @@ _JUMP = """() => { const j = document.getElementById('tr-jump'), s = getComputed
           document.getElementById('overview').getBoundingClientRect().left]; }"""
 
 # Every Log row, as the Log computes it (the DOM holds only the rows in view).
-_ALL_ROWS = """() => { const R = KleinRecording, rows = R.logRows(shownRecording());
-  return Array.from({length: rows.count}, (_, i) => { const r = R.logRowAt(rows, i);
+_ALL_ROWS = """() => { const rows = KleinRecording.logRows(shownRecording());
+  return Array.from({length: rows.count}, (_, i) => { const r = rows.at(i);
     return [r.seg, r.seq, r.t, r.uid, r.from, r.to]; }); }"""
 
 _CHIP = """() => ({ text: document.getElementById('drawer-chip').title,

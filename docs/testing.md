@@ -222,14 +222,15 @@ vectors, every key at every time against the harness `Model`: paused, the
 static marks are its fresh keys; painted live in turn, the writers fire on
 each fresh change;
 `test_log_rows.py` and `test_timeline_model.py` do the same for the Log's rows
-and the Timeline's helpers, on `make_vectors.build_named` (trees with named
-nodes and subtrees: a restart, a swap, then after an outage a new run of the
-first tree, left open) fed in by `make_vectors.store_cases`; the Timeline's
-window (`KleinView.timelineWindow`) gets a table of windows, each from every
+(and, for a table of records kept, evicted, filtered out and gone, the row
+the Log keeps at its top, `anchorAfter`) and the Timeline's helpers, on
+`make_vectors.build_named` (trees with named nodes and subtrees: a restart,
+a swap, then after an outage a new run of the first tree, left open) fed in
+by `make_vectors.store_cases`; the Timeline's window
+(`KleinView.timelineWindow`) gets a table of windows, each from every
 tree's side, its marks written again from their definition and its count
-from the harness `Model`. `python -m
-tests.make_vectors FILE.json` writes the replay vectors out, to read a
-failure.
+from the harness `Model`. `python -m tests.make_vectors FILE.json` writes
+the replay vectors out, to read a failure.
 
 ### Fixtures — `tests/fixtures/`
 

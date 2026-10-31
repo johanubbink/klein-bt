@@ -15,6 +15,7 @@
 import * as R from "./recording.js";
 import * as C from "./cursor.js";
 import * as W from "./window.js";
+import * as V from "./view.js";
 
 const DEFAULT_HEIGHT = 300;             // px
 const MAX_FRACTION = 0.8;               // of the window's height
@@ -366,7 +367,7 @@ const filterInput = document.getElementById("drawer-filter");
 
 let rec = null;                     // the recording and position last shown
 let pos = null;
-let rows = { count: 0, parts: [] }; // KleinRecording.logRows
+let rows = R.logRows(null);         // KleinRecording.logRows
 let rowsRec = null;
 let rowsKey = null;
 let follow = true;                  // scrolled to the newest row: stay there while live
@@ -434,7 +435,7 @@ function cursorRecord() {
 }
 
 function isRow(index, record) {
-    const row = R.logRowAt(rows, index);
+    const row = rows.at(index);
     return Boolean(row && record && row.seg === record.seg && row.seq === record.seq);
 }
 
@@ -506,52 +507,64 @@ function logShown() {
     return shownTab() === "log";
 }
 
+// The cursor moved, here or in the Timeline: bring its row into view (the
+// next row, when the filter hides its own).
+function revealCursor() {
+    const record = cursorRecord();
+    const recordKey = record && `${record.seg}:${record.seq}`;
+    if (recordKey === revealed) return;
+    revealed = recordKey;
+    if (record && rows.count) {
+        follow = false;
+        reveal(Math.min(rows.indexOf(record.seg, record.seq), rows.count - 1));
+    }
+}
+
+// The row at index, at the top: refreshRows keeps it there. Noted while
+// painting, while rows matches the store: by the next refresh, eviction may
+// have changed the segments it indexes.
+function noteTopRow(index) {
+    if (topRow && topRow.index === index) return;
+    const row = rows.at(index);
+    topRow = row && { seg: row.seg, seq: row.seq, index };
+}
+
+// Rows first..last-1 into the pool, placed `shift` px up; the rest of the
+// pool hidden.
+function placeRows(first, last, shift, selected) {
+    logDropped.style.transform = `translateY(${-shift}px)`;
+    while (pool.length < last - first) pool.push(makeRow());
+    let prev = first > 0 ? rows.at(first - 1) : null;
+    for (let i = 0; i < pool.length; i++) {
+        if (first + i >= last) {
+            pool[i].hidden = true;
+            continue;
+        }
+        const row = rows.at(first + i);
+        fillRow(pool[i], first + i, row, prev, selected, shift);
+        prev = row;
+    }
+}
+
 // Place the rows in view. Cheap when nothing moved: it runs on every render.
 function paint() {
     if (!logShown()) return;
     refreshRows();
-    // The cursor moved, here or in the Timeline: bring its row into view
-    // (the next row, when the filter hides its own).
-    const record = cursorRecord();
-    const recordKey = record && `${record.seg}:${record.seq}`;
-    if (recordKey !== revealed) {
-        revealed = recordKey;
-        if (record && rows.count) {
-            follow = false;
-            reveal(Math.min(R.logRowIndex(rows, record.seg, record.seq), rows.count - 1));
-        }
-    }
+    revealCursor();
     // Rows are placed in virtual px less `shift`, which is 0 at scale 1; when
     // scaled, the rows follow every scrolled px.
     const top = virtualTop();
     const shift = Math.round(top - drawerBody.scrollTop);
-    // The row at the top, which refreshRows keeps there. Read now, while
-    // rows matches the store: by the next refresh, eviction may have
-    // changed the segments it indexes.
     const topIndex = Math.floor(top / ROW_HEIGHT) - lead;
-    if (!topRow || topRow.index !== topIndex) {
-        const row = R.logRowAt(rows, topIndex);
-        topRow = row && { seg: row.seg, seq: row.seq, index: topIndex };
-    }
-    const first = Math.max(0, Math.floor(top / ROW_HEIGHT) - lead - OVERSCAN);
+    noteTopRow(topIndex);
+    const first = Math.max(0, topIndex - OVERSCAN);
     const last = Math.min(rows.count,
                           Math.ceil((top + drawerBody.clientHeight) / ROW_HEIGHT) - lead + OVERSCAN);
     const selected = cursorRecord();
     const key = `${first} ${last} ${shift} ${rowsKey} ${selected ? selected.seg + ":" + selected.seq : ""}`;
     if (key === paintKey) return;
     paintKey = key;
-    logDropped.style.transform = `translateY(${-shift}px)`;
-    while (pool.length < last - first) pool.push(makeRow());
-    let prev = first > 0 ? R.logRowAt(rows, first - 1) : null;
-    for (let i = 0; i < pool.length; i++) {
-        if (first + i >= last) {
-            pool[i].hidden = true;
-            continue;
-        }
-        const row = R.logRowAt(rows, first + i);
-        fillRow(pool[i], first + i, row, prev, selected, shift);
-        prev = row;
-    }
+    placeRows(first, last, shift, selected);
 }
 
 // Scroll just enough that row `index` is in view, below the sticky head;
@@ -568,39 +581,46 @@ function scrollToNewest() {
     drawerBody.scrollTop = drawerBody.scrollHeight;
 }
 
+// The row at the top to keep there when the rows are listed again, with
+// the px scrolled into it ({seg, seq, index, within}): scrolled away from the
+// newest row on the Log's tab; else null.
+function topAnchor() {
+    if (follow || !logShown() || !topRow) return null;
+    return { ...topRow, within: virtualTop() - (topRow.index + lead) * ROW_HEIGHT };
+}
+
+// What the Log says when it lists no row.
+function paintEmpty() {
+    const filter = filterInput.value.trim();
+    setText(logEmpty, filter ? `No transitions match “${filter}”.`
+                             : rec ? "No transitions recorded yet." : "Nothing recorded.");
+    logEmpty.hidden = rows.count > 0;
+}
+
 // New records, eviction, a reconnect or the filter: list the rows again.
 // The store changes between frames, so painting checks this too. Scrolled
-// away from the newest row, the row at the top stays there (or the next
-// kept one, when eviction dropped it).
+// away from the newest row, the row at the top stays there, or the list
+// shows its top when that row went (KleinView.anchorAfter).
 function refreshRows() {
     const dropped = droppedNote(rec);
     const key = filterInput.value + "|" + dropped + "|"
         + (rec ? rec.segments.map((s) => `${s.id}:${s.startSeq}:${s.headSeq}`).join(",") : "");
-    if (rec !== rowsRec || key !== rowsKey) {
-        const anchor = !follow && logShown() && topRow
-            ? { ...topRow, within: virtualTop() - (topRow.index + lead) * ROW_HEIGHT } : null;
-        topRow = null;
-        rowsRec = rec;
-        rowsKey = key;
-        rows = rec ? R.logRows(rec, filterInput.value) : { count: 0, parts: [] };
-        lead = dropped && rows.count ? 1 : 0;
-        logDropped.hidden = !lead;
-        if (lead) setText(logDropped, dropped);
-        logRowsEl.style.height = `${Math.min(virtualHeight(), MAX_SPACER)}px`;
-        if (anchor) {
-            // Eviction dropped that row too: everything above the oldest
-            // kept row went, so show the top, the dropped line included.
-            const index = R.logRowIndex(rows, anchor.seg, anchor.seq);
-            const row = R.logRowAt(rows, index);
-            const kept = row && row.seg === anchor.seg && row.seq === anchor.seq;
-            setVirtualTop(kept ? (index + lead) * ROW_HEIGHT + anchor.within : 0);
-        }
-        paintKey = null;
-        const filter = filterInput.value.trim();
-        setText(logEmpty, filter ? `No transitions match “${filter}”.`
-                                 : rec ? "No transitions recorded yet." : "Nothing recorded.");
-        logEmpty.hidden = rows.count > 0;
+    if (rec === rowsRec && key === rowsKey) return;
+    const anchor = topAnchor();
+    topRow = null;
+    rowsRec = rec;
+    rowsKey = key;
+    rows = R.logRows(rec, filterInput.value);
+    lead = dropped && rows.count ? 1 : 0;
+    logDropped.hidden = !lead;
+    if (lead) setText(logDropped, dropped);
+    logRowsEl.style.height = `${Math.min(virtualHeight(), MAX_SPACER)}px`;
+    if (anchor) {
+        const index = V.anchorAfter(rows, anchor);
+        setVirtualTop(index === null ? 0 : (index + lead) * ROW_HEIGHT + anchor.within);
     }
+    paintKey = null;
+    paintEmpty();
 }
 
 // What the dashboard shows, from app.js's render(): the recording (null
@@ -654,11 +674,11 @@ function stepRow(dir) {
         index = rows.count - 1;
     } else {
         const record = cursorRecord();
-        const at = R.logRowIndex(rows, record.seg, record.seq);
+        const at = rows.indexOf(record.seg, record.seq);
         index = dir < 0 ? at - 1 : isRow(at, record) ? at + 1 : at;
         if (index < 0 || index >= rows.count) return true;
     }
-    const row = R.logRowAt(rows, index);
+    const row = rows.at(index);
     if (logShown()) reveal(index);
     goTo(row.seg, row.seq);
     return true;
@@ -746,7 +766,7 @@ function filterChanged() {
         scrollToNewest();
     } else {
         const record = cursorRecord();
-        const at = R.logRowIndex(rows, record.seg, record.seq);
+        const at = rows.indexOf(record.seg, record.seq);
         if (isRow(at, record)) reveal(at);
     }
     paint();
@@ -810,7 +830,7 @@ function debugRows() {
     refreshRows();
     const keys = [];
     for (let i = 0; i < rows.count; i++) {
-        const row = R.logRowAt(rows, i);
+        const row = rows.at(i);
         keys.push([row.seg, row.seq]);
     }
     return { count: rows.count, keys, filter: filterInput.value };

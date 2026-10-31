@@ -5,8 +5,8 @@
 // cursor's controls (the transport buttons, Log rows, the keys).
 //
 // The drawer's height lives in the --drawer-height custom property on <html>,
-// so the hint line (#watermark) rises with it in CSS alone; app.js reads the
-// drawer's top edge for the camera (visibleViewport). app.js calls
+// so the hint line (#watermark) rises with it in CSS alone; the camera
+// (tree.js, visibleViewport) reads the drawer's top edge. app.js calls
 // KleinDrawer.showRecording and KleinDrawer.update on every render, and the
 // drawer calls back through the hooks app.js connects (KleinDrawer.connect):
 // to move its cursor, to render, and to show a banner.

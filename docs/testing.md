@@ -139,14 +139,21 @@ card and checks the outlines, port-line accents and linked rows against
 The page code the UI tests, `BrowserProbe` and `scripts/` evaluate reaches
 the dashboard through globals that `app.js` puts on `window` for them, in one
 block at its end ("Page globals"): the modules as app.js imports them
-(`KleinRecording`, `KleinCursor`, `KleinWindow`, `KleinView`, `KleinDrawer`,
-`KleinTimeline`, `KleinOverview`, `KleinRenderers`), `kleinDebug`, and
-app.js's own state and functions (`clock`, `seek`, `render`,
-`recordingStore`, `bbGroupEls`, …). The modules share nothing through
-`window`, so a name a test needs goes in that block. Variables are
+(`KleinRecording`, `KleinCursor`, `KleinWindow`, `KleinView`, `KleinUI`,
+`KleinTree`, `KleinBlackboard`, `KleinDrawer`, `KleinTimeline`,
+`KleinOverview`, `KleinRenderers`), `kleinDebug`, app.js's own state and
+functions (`clock`, `seek`, `render`, `recordingStore`, …), and a few names
+that now live in a module but keep the name the tests know: the canvas's
+(`svg`, `zoomBehavior`, `rootNodeSnapshot`, `visibleViewport`,
+`runningFrontier`: tree.js), the blackboard panel's (`bbGroupEls`,
+`bbGroupOpen`, `renderBlackboards`, `resetBlackboards`, `frameTrack`:
+blackboard.js), and `KleinDrawer`, which is drawer.js plus the clock's
+words (`formatTime`, `formatClock`: ui.js). The modules share nothing
+through `window`, so a name a test needs goes in that block. Variables are
 accessors; a test can set `recordingSupport` or swap `render`,
-`requestRender`, `showTree` or `paintStatus`, and app.js uses the new one.
-A module's exports can't be swapped.
+`requestRender`, `showTree` or `paintStatus` (app.js's binding of the
+canvas's painter), and app.js uses the new one. A module's exports can't be
+swapped.
 
 ### The debug dump — `model.py`
 

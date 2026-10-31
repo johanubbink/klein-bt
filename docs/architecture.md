@@ -30,9 +30,12 @@ The code:
   ([Recording model](#recording-model)). [`klein/streaming.py`](../klein/streaming.py)
   streams it to dashboards, and [`klein/btlog.py`](../klein/btlog.py) saves and
   loads it as `.btlog` files.
-- [`klein/static/`](../klein/static/): the dashboard. `app.js` handles state,
-  the WebSocket, the tree and the sidebar; `renderers.js` formats blackboard
-  values; `recording.js` and `cursor.js` mirror the recording (see
+- [`klein/static/`](../klein/static/): the dashboard. `app.js` is its
+  composition root: the WebSocket, the one render path, the connection line,
+  the banners and the sidebar's pane. `tree.js` is the tree canvas (cards,
+  folding, the camera); `blackboard.js` the sidebar's blackboard panel and
+  its links to the cards; `ui.js` the toolkit the views share (drags,
+  panels, writes, words); `renderers.js` formats blackboard values; `recording.js` and `cursor.js` mirror the recording (see
   [Browser model](#browser-model)); `window.js` is the Timeline's window,
   which the Timeline and the overview both show and move; `view.js` decides
   what each render shows (see [Rendering](#rendering)); `drawer.js`,
@@ -417,7 +420,7 @@ here as app.js imports it (`import * as KleinRecording from
   plays on (`playing`), `pos`, `source` (`"recording"` or `"frames"`),
   `seg`, `tree`, `status`, the time and `mode` the blackboard is shown at,
   `viewingPast` and `noBoards`. `panel(view, frames, wasLive)` is the
-  blackboard panel's input at it, `{boards, opts}` for `renderBlackboards`
+  blackboard panel's input at it, `{boards, opts}` for `KleinBlackboard.render`
   (`opts.empty` the panel's words when it lists no board), or null to leave
   the panel as it is. `rowMarks({change, t, mode, primed, reducedMotion,
   shown, seen})` is one blackboard row's marks at a paint, `{streaming,
@@ -464,10 +467,11 @@ board panel's input is `KleinView.panel`'s:
   same-tree restart or re-arm (a new segment sharing the layout) doesn't
   redraw. A WebSocket reconnect forgets the drawn id, so the first tree
   klein names redraws the canvas and resets the camera.
-- **Painting.** The same `paintStatus` (strokes and pills, skipping cards
-  whose status is unchanged) and `renderBlackboards` draw either source.
-  `updateTreeLayout` repaints the displayed state too, so cards revealed by
-  unfolding show it at once. `renderBlackboards(boards, {track, t, mode})`
+- **Painting.** The same `KleinTree.paintStatus` (tree.js: strokes and
+  pills, skipping cards whose status is unchanged) and
+  `KleinBlackboard.render` (blackboard.js) draw either source. A relayout
+  (`updateTreeLayout`) repaints the displayed state too, so cards revealed by
+  unfolding show it at once. `KleinBlackboard.render(boards, {track, t, mode})`
   marks changes from a segment's blackboard `track` at time `t` in mode
   `live`, `playing` or `paused`. `KleinRecording.bbChange(track, board, key,
   t)` gives a key's last change at or before `t` (`tChange`; a value at or
@@ -481,16 +485,16 @@ board panel's input is `KleinView.panel`'s:
   hidden rows never start a fade. `KleinView.rowMarks` decides each row's
   marks from its `bbChange`, the paint's mode, whether the panel was last
   painted in that mode from the same source (`primed`), and the change the
-  row was last painted for (`seen`); `renderBlackboards` only reconciles the
-  boards and rows with the DOM (`syncKeyed`, which reorders rows only when
-  the order is wrong, since re-appending one restarts its fade) and applies
-  the marks. Without a recording, the same rule runs
+  row was last painted for (`seen`); `KleinBlackboard.render` only
+  reconciles the boards and rows with the DOM (`syncKeyed` in ui.js, which
+  reorders rows only when the order is wrong, since re-appending one
+  restarts its fade) and applies the marks. Without a recording, the same rule runs
   on a local track of the `blackboard` frames (`addBoards`, at their newest
   `t`, kept to the last 3 s): timed by the gateway, so a busy browser
   doesn't change the answer. The board panel is re-rendered only when a
   blackboard input changed or the cursor moved, not on every `head`.
-- **Keys and nodes.** `showTree` indexes the layout's `bindings` once:
-  `(board, key)` to its writers (`out`, `inout`) and readers (`in`), a node
+- **Keys and nodes.** `KleinBlackboard.show` indexes a new tree's
+  `bindings` once: `(board, key)` to its writers (`out`, `inout`) and readers (`in`), a node
   that does both counting as a writer. Hovering a key row outlines the
   writers' cards solid and the readers' dashed (`rect.node-link`, outside
   the card, so the status stroke stays readable) and accents the key on
@@ -500,9 +504,12 @@ board panel's input is `KleinView.panel`'s:
   folded ancestor's card, and a fold or unfold while hovering moves the
   outline there. Hovering a card rings its keys' rows (`.linked`; a folded
   card's include the nodes it hides, and folding the hovered card by its
-  click re-rings them).
+  click re-rings them). The canvas knows nothing of the panel: the panel
+  paints its outlines and pulses on `KleinTree.cards()`, and the canvas
+  tells it of a relayout (`cardsMoved`) and of a card hovered
+  (`cardHovered`) through the hooks app.js connects.
   **The writer pulse** follows the row marks:
-  `renderBlackboards` hands `setPulses` the keys it marks statically and
+  `KleinBlackboard.render` hands `setPulses` the keys it marks statically and
   the ones whose fade it would start (whether or not their board is open),
   and a `--changed` dot at the writers' card corner holds (`mark`) or fades
   once (`fire`, 1.8 s). Streaming keys don't pulse. Only changed cards are
@@ -581,9 +588,10 @@ full-height pane over the canvas's left edge, and behaves like the drawer
 - **Who follows.** The shown width (the strip's when collapsed) is the
   `--sidebar-width` custom property on `<html>`: the drawer's left edge and
   the banner stack's centre follow it in CSS alone, live while dragging.
-  `sidebarWidth()` returns the same width for `visibleViewport()`, so R and F
-  frame the space right of it. Folding nudges the camera by half the change
-  so the tree stays centred; dragging leaves it be. A change of width also
+  `sidebarWidth()` returns the same width, which app.js hands the camera
+  (`KleinTree.connect`) for `visibleViewport()`, so R and F frame the space
+  right of it. Folding nudges the camera by half the change
+  (`KleinTree.nudge`) so the tree stays centred; dragging leaves it be. A change of width also
   asks for a render, so the Timeline redraws its bars for the drawer's new
   width.
 - **Shared with the drawer:** `pane(...)` in `ui.js` (the dashboard's
@@ -925,8 +933,9 @@ with no RUNNING node below it. Parents like `Sequence` are RUNNING whenever a
 child is, so only the frontier tells you what the robot is actually doing. A
 `Parallel` can have several, so `F` frames all of them.
 
-Both aim at `visibleViewport()`, the part of the canvas you can see: right of
-the sidebar (`sidebarWidth()`), below a 56 px strip kept clear for one banner
+The camera is tree.js's. Both keys aim at `visibleViewport()`, the part of
+the canvas you can see: right of the sidebar (`sidebarWidth()`, which app.js
+hands it), below a 56 px strip kept clear for one banner
 pill (always, so the tree never sits under a pill and a pill coming or going
 doesn't move the camera; a second pill at once may overlap the tree's top for
 a moment), and above the drawer (precisely, above the hint line that

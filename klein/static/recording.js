@@ -428,7 +428,7 @@ function treeName(layout) {
 }
 
 // fn(node) for every node of a d3 hierarchy, parents first, folded away or
-// not: a folded node keeps its children in _children (app.js).
+// not: a folded node keeps its children in _children (tree.js).
 function eachNode(root, fn) {
     (function walk(node) {
         fn(node);

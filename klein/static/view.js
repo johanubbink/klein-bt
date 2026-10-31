@@ -103,7 +103,7 @@ function noBoardsReason(view, wasLive) {
     return wasLive ? null : "waiting";
 }
 
-// The blackboard panel's input at a frame: renderBlackboards' arguments
+// The blackboard panel's input at a frame: KleinBlackboard.render's arguments
 // {boards, opts: {track, t, mode, empty}}, or null to leave the panel as it
 // is. `wasLive`: the panel last showed live values. Live takes the newest
 // sample, even one stamped a moment after the last drain's head; there is

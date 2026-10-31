@@ -50,7 +50,8 @@ const empty = document.getElementById("tl-empty");
 const droppedNoteEl = document.getElementById("tl-dropped-note");
 const tooManyEl = document.getElementById("tl-too-many");
 
-// app.js: move the shared cursor, fold the canvas, and the cards' glyphs.
+// app.js: move the shared cursor, fold the canvas, and the cards' glyphs
+// (the last two tree.js's).
 let hooks = { seek() {}, toggleFold() {}, foldOthers() {}, glyphFor: () => "" };
 let rec = null;                     // what update() was last given
 let pos = null;
@@ -423,7 +424,7 @@ window.addEventListener("resize", () => {
 });
 
 // F with the drawer open: scroll the first of these nodes' rows (the running
-// frontier, app.js) into view, under the sticky axis and section header.
+// frontier, tree.js) into view, under the sticky axis and section header.
 function revealRows(ids) {
     if (!shown()) return;
     refreshRows();

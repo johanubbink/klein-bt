@@ -3,8 +3,8 @@ unrolling, ports, node categories, layout caching, blackboard decoding,
 static-asset serving and the CLI.
 
 ``TreeSwapTest`` and ``RecordingGatewayTest`` drive the real pollers, since the
-re-handshake and the recording live inside them; they stub ``_request`` rather
-than opening a socket.
+re-handshake and the recording live inside them, against a ``FakeRobot`` link
+rather than a socket.
 """
 import asyncio
 import contextlib
@@ -24,11 +24,11 @@ import msgpack
 from klein import btlog, cli, gateway, layout, mock_robot
 from klein.cli import _port_available
 from klein.gateway import KleinGateway
-from klein.groot2_protocol import (REQ_FULLTREE, REQ_STATUS, TRANSITION_BUFFER_MAX,
-                                   parse_blackboard, parse_status)
+from klein.groot2_protocol import TRANSITION_BUFFER_MAX, parse_blackboard, parse_status
 from klein.recording import Recording
+from klein.robot_link import RobotTimeout
 from tests.helpers import (UUID_A, UUID_B, FakeRobot, answer, collect_ids, collect_uids,
-                           new_gateway, reply_header, status_record)
+                           new_gateway, status_record)
 
 
 def _find(node, uid):
@@ -870,33 +870,30 @@ class ConstructionTest(unittest.TestCase):
         # so nothing in __init__ may touch the loop.
         asyncio.set_event_loop(None)
         try:
-            gw = new_gateway(self)
+            new_gateway(self)               # and its link, which makes its lock on first use
         finally:
             asyncio.set_event_loop(asyncio.new_event_loop())
-        self.assertIsNone(gw._req_lock)     # made on first use, inside the loop
 
 
 class TreeIdentityTest(GatewayTestCase):
-    """Deciding, from a reply header alone, whether the robot swapped trees."""
+    """Deciding, from a reply's tree UUID alone, whether the robot swapped trees."""
 
     def test_tree_changed(self):
         # Before the first handshake there is nothing to differ from.
         self.assertIsNone(self.gw._tree_uuid)
         cases = [
-            ("nothing recorded yet", None, reply_header(UUID_A), False),
-            # Absence of information must never be reported as a change, or an
-            # error reply would send the gateway into a handshake loop.
-            ("error frame", UUID_A, b"error", False),
-            ("empty frame", UUID_A, b"", False),
-            ("truncated header", UUID_A, reply_header(UUID_B)[:21], False),
-            # The mock stamps the header, the gateway reads it.
-            ("mock publisher, same tree", mock_robot.DEFAULT_TREE_UUID, reply_header(), False),
-            ("mock publisher, swapped", mock_robot.DEFAULT_TREE_UUID, reply_header(UUID_B), True),
+            ("nothing recorded yet", None, UUID_A, False),
+            # Absence of information must never be reported as a change, or a
+            # header too short to carry a UUID would send the gateway into a
+            # handshake loop. (An error reply never gets here: RobotRefused.)
+            ("no uuid in the reply", UUID_A, None, False),
+            ("same tree", UUID_A, UUID_A, False),
+            ("swapped", UUID_A, UUID_B, True),
         ]
-        for label, recorded, frame, changed in cases:
+        for label, recorded, uuid, changed in cases:
             with self.subTest(label):
                 self.gw._tree_uuid = recorded
-                self.assertEqual(self.gw._tree_changed(frame), changed)
+                self.assertEqual(self.gw._tree_changed(uuid), changed)
 
     def test_the_detector_never_records(self):
         # fetch_layout is the only writer, and it takes the UUID from the same
@@ -904,7 +901,7 @@ class TreeIdentityTest(GatewayTestCase):
         # the re-handshake then failed, the next status frame would compare
         # equal and paint the new tree's UIDs onto the old tree's cards.
         self.gw._tree_uuid = UUID_A
-        self.assertTrue(self.gw._tree_changed(reply_header(UUID_B)))
+        self.assertTrue(self.gw._tree_changed(UUID_B))
         self.assertEqual(self.gw._tree_uuid, UUID_A)
 
 
@@ -931,46 +928,28 @@ class NoticeTest(GatewayTestCase):
 
 
 class TreeSwapTest(unittest.IsolatedAsyncioTestCase):
-    """A swapped tree, end to end through status_poller.
+    """A swapped tree, end to end through status_poller, against a
+    ``FakeRobot`` link that handed over CROSSDOOR under ``UUID_A``."""
 
-    ``_request`` is stubbed, so no socket is ever opened.
-    """
+    async def asyncSetUp(self):
+        await self.fresh_gateway()
 
-    def setUp(self):
-        self.fresh_gateway()
-
-    def fresh_gateway(self):
-        self.gw = new_gateway(self)
-        # Marked connected before any client exists, so the poller's own
+    async def fresh_gateway(self):
+        self.robot = FakeRobot(limit=1)
+        self.gw = new_gateway(self, link=self.robot)
+        # Handshaken before any client exists, so the poller's own
         # _mark_connected stays a no-op and the broadcast log holds only the
         # frames these tests are about.
-        self.gw._mark_connected()
+        with contextlib.redirect_stdout(io.StringIO()):
+            await self.gw.fetch_layout()
         self.gw.clients = {object()}        # else both pollers idle
-        self.gw._parse_layout(mock_robot.CROSSDOOR.xml)
-        self.gw._tree_uuid = UUID_A
-        self.sent = []                      # request types the poller issued
+        self.robot.sent = []                # requests the poller issued
         self.frames = []                    # frames broadcast to dashboards
 
-    async def _run_poller(self, queue, poller=None, before_reply=None):
-        """Run one poller against a queue of canned replies, then stop it.
-
-        The stub parks once the queue is drained; the poller is cancelled from
-        here rather than left to the loop. ``before_reply`` runs just before each
-        reply is handed back, for tests that need something to happen while a
-        request is in flight.
-        """
-        drained = asyncio.Event()
-
-        async def request(request_type, payload=None):
-            self.sent.append(request_type)
-            if not queue:
-                drained.set()
-                await asyncio.sleep(3600)   # cancelled below
-            if before_reply is not None:
-                before_reply()
-            return queue.pop(0)
-
-        self.gw._request = request
+    async def run_poller(self, limit, poller=None):
+        """Run one poller until the robot has answered ``limit`` requests and
+        parked on the next, then stop it."""
+        self.robot.limit = limit
         with contextlib.redirect_stdout(io.StringIO()), \
              contextlib.redirect_stderr(io.StringIO()), \
              mock.patch.object(gateway, "POLL_INTERVAL", 0), \
@@ -979,12 +958,15 @@ class TreeSwapTest(unittest.IsolatedAsyncioTestCase):
                                side_effect=lambda _c, m: self.frames.append(json.loads(m))):
             task = asyncio.create_task((poller or self.gw.status_poller)())
             try:
-                await asyncio.wait_for(drained.wait(), 2)
+                await asyncio.wait_for(self.robot.done.wait(), 2)
                 await asyncio.sleep(0)      # let the poller finish the iteration
             finally:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+
+    def seq(self):
+        return "".join(self.robot.sent)
 
     def types(self):
         return [f["type"] for f in self.frames]
@@ -997,24 +979,22 @@ class TreeSwapTest(unittest.IsolatedAsyncioTestCase):
         self.gw.clients = clients
 
     async def test_matching_uuid_just_streams_status(self):
-        await self._run_poller([[reply_header(UUID_A), status_record(1, 1)]])
-        self.assertEqual(self.sent, [REQ_STATUS, REQ_STATUS])   # 2nd drains
+        await self.run_poller(limit=1)
+        self.assertEqual(self.seq(), "S")               # and then the next S
         self.assertEqual(self.types(), ["status"])
 
     async def test_a_new_uuid_re_handshakes_and_sends_only_a_layout_then_a_notice(self):
-        await self._run_poller([
-            [reply_header(UUID_B), status_record(1, 1)],
-            [reply_header(UUID_B, REQ_FULLTREE), MODEL_LESS_XML.encode()],
-        ])
-        self.assertIn(REQ_FULLTREE, self.sent)
-        self.assertEqual(self.gw._tree_uuid, UUID_B)
+        self.robot.uuid, self.robot.xml = UUID_B, MODEL_LESS_XML
+        await self.run_poller(limit=3)
+        self.assertEqual(self.seq(), "STS")
         self.assertEqual(self.gw.tree_structure["root_tree_id"], "MainTree")
         self.assertEqual(sorted(collect_uids(self.gw.tree_structure)), [1, 2, 3, 4, 5])
-        # No "status": the buffer that carried the new UUID indexes a tree the
-        # dashboard has not been sent, so broadcasting it would land those UIDs
-        # on the old tree's cards. And the note comes after the layout, so the
-        # canvas has already redrawn by the time it explains why.
-        self.assertEqual(self.types(), ["layout", "notice"])
+        # No "status" for the buffer that carried the new UUID: it indexes a
+        # tree the dashboard has not been sent, so broadcasting it would land
+        # those UIDs on the old tree's cards. The note comes after the layout,
+        # so the canvas has already redrawn by the time it explains why. Only
+        # the next poll's status, under the UUID the handshake adopted, streams.
+        self.assertEqual(self.types(), ["layout", "notice", "status"])
         self.assertIn("new behaviour tree", self.frames[1]["text"])
 
     async def test_the_same_tree_again_is_absorbed_quietly(self):
@@ -1025,19 +1005,18 @@ class TreeSwapTest(unittest.IsolatedAsyncioTestCase):
                  ("reconnect after an outage", False, UUID_A)]
         for label, connected, uuid in cases:
             with self.subTest(label):
-                self.fresh_gateway()
+                await self.fresh_gateway()
                 if not connected:
                     self.lose_robot()
                 layout_before = self.gw._layout_json
-                await self._run_poller([
-                    [reply_header(uuid), status_record(1, 1)],
-                    [reply_header(uuid, REQ_FULLTREE), mock_robot.CROSSDOOR.xml.encode()],
-                ])
-                self.assertEqual(self.gw._tree_uuid, uuid)
+                self.robot.uuid = uuid
+                await self.run_poller(limit=3)
+                self.assertEqual(self.seq(), "STS")
                 self.assertEqual(self.gw._layout_generation, 1)     # not re-parsed
                 self.assertIs(self.gw._layout_json, layout_before)
                 self.assertNotIn("layout", self.types())
                 self.assertNotIn("notice", self.types())
+                self.assertEqual(self.types()[-1], "status")       # the UUID adopted
 
     async def test_telemetry_resuming_after_an_outage_re_handshakes(self):
         # Killing a robot and starting another on the same port looks like this
@@ -1045,49 +1024,44 @@ class TreeSwapTest(unittest.IsolatedAsyncioTestCase):
         # fresh UUID — here it deliberately reuses its predecessor's, and the
         # swap still has to be caught.
         self.lose_robot()
-        await self._run_poller([
-            [reply_header(UUID_A), status_record(1, 1)],
-            [reply_header(UUID_A, REQ_FULLTREE), MODEL_LESS_XML.encode()],
-        ])
-        self.assertIn(REQ_FULLTREE, self.sent)
+        self.robot.xml = MODEL_LESS_XML
+        await self.run_poller(limit=2)
+        self.assertEqual(self.seq(), "ST")
         self.assertEqual(self.gw.tree_structure["root_tree_id"], "MainTree")
         self.assertEqual(sorted(collect_uids(self.gw.tree_structure)), [1, 2, 3, 4, 5])
         self.assertEqual(self.types(), ["robot", "layout", "notice"])
 
     async def test_an_error_reply_does_not_re_handshake(self):
-        await self._run_poller([[b"error", b"boom"]])
-        self.assertNotIn(REQ_FULLTREE, self.sent)
-        self.assertEqual(self.gw._tree_uuid, UUID_A)
+        self.robot.refusals = {1}
+        await self.run_poller(limit=1)
+        self.assertEqual(self.seq(), "S")               # and then the next S, not a T
         self.assertEqual(self.frames, [])
 
     async def test_blackboard_values_from_a_retired_tree_are_dropped(self):
         # The blackboard poller does not detect swaps, so one can land while its
         # request is in flight. See the guard in blackboard_poller for why the
         # reply must then be dropped rather than cached.
-        await self._run_poller(
-            [[reply_header(UUID_B), msgpack.packb({"MainTree": {"x": 1}})]],
-            poller=self.gw.blackboard_poller,
-            before_reply=lambda: self.gw._parse_layout(MODEL_LESS_XML),
-        )
+        self.robot.on_request[1] = lambda _r: self.gw._parse_layout(MODEL_LESS_XML)
+        await self.run_poller(limit=1, poller=self.gw.blackboard_poller)
         self.assertIsNone(self.gw._blackboard_json)
         self.assertEqual(self.types(), [])
 
 
 class RecordingGatewayTest(unittest.IsolatedAsyncioTestCase):
     """Arming, `t` drains, swaps, outages and overflow, through the real
-    pollers with ``_request`` stubbed by ``FakeRobot``. No dashboard is
-    connected in any of these: a recording gateway polls regardless."""
+    pollers against a ``FakeRobot`` link. No dashboard is connected in any of
+    these: a recording gateway polls regardless."""
 
-    def make_gateway(self, record=True, **caps):
+    def make_gateway(self, robot=None, record=True, **caps):
         patch = mock.patch.object(gateway, "POLL_INTERVAL", 0)
         patch.start()
         self.addCleanup(patch.stop)
-        return new_gateway(self, recording=Recording(**caps) if record else None)
+        return new_gateway(self, link=robot, recording=Recording(**caps) if record else None)
 
-    async def run_gateway(self, gw, robot, blackboard=False):
+    async def run_gateway(self, gw, blackboard=False):
         """Handshake, then the status poller (and optionally the blackboard
         poller), until the robot has answered ``robot.limit`` requests."""
-        gw._request = robot
+        robot = gw.link
         frames = []
 
         async def main():
@@ -1114,10 +1088,10 @@ class RecordingGatewayTest(unittest.IsolatedAsyncioTestCase):
         return "".join(robot.sent)
 
     async def test_startup_arms_then_pairs_every_status_poll_with_a_drain(self):
-        gw = self.make_gateway()
         robot = FakeRobot(limit=9)
+        gw = self.make_gateway(robot)
         robot.drains = [[(10, 1, 1), (15, 2, 1)], [(40, 2, 2), (41, 2, 0)]]
-        await self.run_gateway(gw, robot)
+        await self.run_gateway(gw)
         self.assertEqual(gw.clients, set())             # no dashboard, still polling
         self.assertEqual(self.seq(robot), "TrSStStSt")
         rec = gw.recording
@@ -1135,10 +1109,10 @@ class RecordingGatewayTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rec.gaps, [])
 
     async def test_blackboard_polls_interleave_and_are_recorded(self):
-        gw = self.make_gateway()
         robot = FakeRobot(limit=30)
+        gw = self.make_gateway(robot)
         gw.clients = {object()}
-        frames = await self.run_gateway(gw, robot, blackboard=True)
+        frames = await self.run_gateway(gw, blackboard=True)
         seq = self.seq(robot)
         self.assertIn("B", seq)
         self.assertRegex(seq.replace("B", ""), r"^TrS(St)+S?$")
@@ -1157,18 +1131,18 @@ class RecordingGatewayTest(unittest.IsolatedAsyncioTestCase):
         at the next drain: whatever runs between (a dashboard connecting and
         getting its backfill's sizes) never sees more than the cap."""
         cap = 6                             # bytes: the base "n" and a change or two
-        gw = self.make_gateway(bb_max_bytes=cap)
         robot = FakeRobot(limit=40)
+        gw = self.make_gateway(robot, bb_max_bytes=cap)
         seen = []
         robot.on_request = {n: lambda _r: seen.append(gw.recording.bytes_used()[1])
                             for n in range(1, 41)}
-        await self.run_gateway(gw, robot, blackboard=True)
+        await self.run_gateway(gw, blackboard=True)
         self.assertTrue(gw.recording.blackboard_capped)
         self.assertLessEqual(max(seen), cap, seen)
 
     async def test_a_tree_swap_starts_a_segment_with_a_new_layout(self):
-        gw = self.make_gateway()
         robot = FakeRobot(limit=11)
+        gw = self.make_gateway(robot)
 
         def swap(r):
             r.uuid, r.xml = UUID_B, MODEL_LESS_XML
@@ -1176,7 +1150,7 @@ class RecordingGatewayTest(unittest.IsolatedAsyncioTestCase):
         robot.on_request[6] = swap
         robot.drains = [[(5, 1, 1)], [(7, 3, 1)]]
         gw.clients = {object()}
-        frames = await self.run_gateway(gw, robot)
+        frames = await self.run_gateway(gw)
         self.assertEqual(self.seq(robot), "TrSSt" "S" "TrSSt")
         rec = gw.recording
         first, second = rec.segments
@@ -1191,12 +1165,12 @@ class RecordingGatewayTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({f["type"] for f in frames}, {"robot", "status", "layout", "notice"})
 
     async def test_an_outage_ends_the_segment_and_the_resume_reuses_the_layout(self):
-        gw = self.make_gateway()
         robot = FakeRobot(limit=12)
+        gw = self.make_gateway(robot)
         robot.timeouts = {6}                            # the 2nd poll's S
         heads = []                                      # the head when the robot went
         robot.on_request[6] = lambda r: heads.append(gw.recording.head)
-        await self.run_gateway(gw, robot)
+        await self.run_gateway(gw)
         self.assertEqual(self.seq(robot), "TrSSt" "S" "S" "TrSSt")
         rec = gw.recording
         first, second = rec.segments
@@ -1211,10 +1185,10 @@ class RecordingGatewayTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_quick_restart_on_the_same_tree_stays_in_one_run(self):
         # Back before any poll timed out: only the UUID says it restarted.
-        gw = self.make_gateway()
         robot = FakeRobot(limit=11)
+        gw = self.make_gateway(robot)
         robot.on_request[6] = lambda r: setattr(r, "uuid", UUID_B)
-        await self.run_gateway(gw, robot)
+        await self.run_gateway(gw)
         self.assertEqual(self.seq(robot), "TrSSt" "S" "TrSSt")
         first, second = gw.recording.segments
         self.assertIs(first.layout, second.layout)
@@ -1225,16 +1199,16 @@ class RecordingGatewayTest(unittest.IsolatedAsyncioTestCase):
     async def test_an_outage_seen_only_by_a_blackboard_timeout_still_gets_a_gap(self):
         # The robot dies while a B is in flight and is back, as a new publisher,
         # before any S times out: B's timeout marks where the segment ends.
-        gw = self.make_gateway()
         robot = FakeRobot(limit=40)
+        gw = self.make_gateway(robot)
         heads = []                          # the head when the re-handshake began
 
         def die(r):
             r.uuid = UUID_B                 # restarted by the time S gets through
             r.on_letter["T"] = lambda _r: heads.append(gw.recording.head)
-            raise gateway.RobotTimeout("stub timeout")
+            raise RobotTimeout("stub timeout")
         robot.on_letter["B"] = die
-        await self.run_gateway(gw, robot, blackboard=True)
+        await self.run_gateway(gw, blackboard=True)
         first, second = gw.recording.segments[:2]
         self.assertEqual(first.t_end, heads[0])
         self.assertIs(first.layout, second.layout)
@@ -1242,23 +1216,23 @@ class RecordingGatewayTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gw.recording.gaps[0], (first.t_end, second.t_begin, "outage"))
 
     async def test_a_blackboard_timeout_alone_changes_nothing(self):
-        gw = self.make_gateway()
         robot = FakeRobot(limit=40)
+        gw = self.make_gateway(robot)
 
         def blip(r):
-            raise gateway.RobotTimeout("stub timeout")
+            raise RobotTimeout("stub timeout")
         robot.on_letter["B"] = blip
-        await self.run_gateway(gw, robot, blackboard=True)
+        await self.run_gateway(gw, blackboard=True)
         self.assertEqual(len(gw.recording.segments), 1)
         self.assertEqual(gw.recording.gaps, [])
         self.assertFalse(gw._timed_out)
 
     async def test_a_full_drain_records_an_overflow_gap_and_re_arms(self):
-        gw = self.make_gateway()
         robot = FakeRobot(limit=9)
+        gw = self.make_gateway(robot)
         burst = [(1000 + i, 1 + i % 13, 1 + i % 3) for i in range(TRANSITION_BUFFER_MAX)]
         robot.drains = [[(5, 1, 1)], burst, [(3, 4, 1)]]
-        await self.run_gateway(gw, robot)
+        await self.run_gateway(gw)
         self.assertEqual(self.seq(robot), "TrSSt" "St" "rS")
         rec = gw.recording
         first, second = rec.segments
@@ -1271,11 +1245,11 @@ class RecordingGatewayTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second.head_seq, 0)            # the re-arm's own baseline
 
     async def test_overflow_re_arm_then_keeps_draining(self):
-        gw = self.make_gateway()
         robot = FakeRobot(limit=12)
+        gw = self.make_gateway(robot)
         burst = [(1000 + i, 1, 1 + i % 2) for i in range(TRANSITION_BUFFER_MAX)]
         robot.drains = [burst, [(3, 4, 1)]]
-        await self.run_gateway(gw, robot)
+        await self.run_gateway(gw)
         self.assertEqual(self.seq(robot), "TrSSt" "rS" "St" "St" "S")
         second = gw.recording.segments[1]
         self.assertEqual(list(s[1:] for s in second.iter_records(0, 1)),
@@ -1284,17 +1258,17 @@ class RecordingGatewayTest(unittest.IsolatedAsyncioTestCase):
     async def test_a_robot_without_recording_gets_no_t_and_the_same_status(self):
         robot = FakeRobot(limit=7)
         robot.supports_recording = False
-        gw = self.make_gateway()
+        gw = self.make_gateway(robot)
         gw.clients = {object()}
-        frames = await self.run_gateway(gw, robot)
+        frames = await self.run_gateway(gw)
         self.assertEqual(self.seq(robot), "Tr" "SSSSS")
         self.assertEqual(gw.recording.segments, [])
         self.assertFalse(gw._armed)
         # Status broadcasts are exactly those of a non-recording gateway.
         plain = FakeRobot(limit=6)
-        other = self.make_gateway(record=False)
+        other = self.make_gateway(plain, record=False)
         other.clients = {object()}
-        plain_frames = await self.run_gateway(other, plain)
+        plain_frames = await self.run_gateway(other)
         self.assertEqual(self.seq(plain), "TSSSSS")
         self.assertEqual([f for f in frames if f["type"] == "status"],
                          [f for f in plain_frames if f["type"] == "status"])
@@ -1304,12 +1278,13 @@ class RecordingGatewayTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(gw._robot_state_json)["recording"], "unsupported")
         self.assertEqual({f["recording"] for f in plain_frames if f["type"] == "robot"}, {"off"})
         # The robot frame says recording is on again after a capable handshake.
-        frames = await self.run_gateway(gw, FakeRobot(limit=4))
+        robot.supports_recording, robot.sent, robot.limit = True, [], 4
+        robot.done.clear()
+        frames = await self.run_gateway(gw)
         self.assertEqual([f["recording"] for f in frames if f["type"] == "robot"], ["on"])
 
-    async def poll_without_clients(self, gw, robot):
+    async def poll_without_clients(self, gw):
         """Handshake, then give both pollers 50 loop turns with no dashboard."""
-        gw._request = robot
         with contextlib.redirect_stdout(io.StringIO()), \
              contextlib.redirect_stderr(io.StringIO()):
             await gw.fetch_layout()
@@ -1329,24 +1304,24 @@ class RecordingGatewayTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(label):
                 robot = FakeRobot(limit=20)
                 robot.supports_recording = supports
-                gw = self.make_gateway(record=record)
-                await self.poll_without_clients(gw, robot)
+                gw = self.make_gateway(robot, record=record)
+                await self.poll_without_clients(gw)
                 self.assertEqual(self.seq(robot), expected)     # then nothing polled
                 if supports:
                     continue
                 self.assertTrue(gw._cannot_record)
                 # The next handshake tries again, and a robot that can record is polled.
                 robot.supports_recording, robot.sent = True, []
-                await self.poll_without_clients(gw, robot)
+                await self.poll_without_clients(gw)
                 self.assertFalse(gw._cannot_record)
                 self.assertTrue(self.seq(robot).startswith("TrSSt"), self.seq(robot))
 
     async def test_debug_state_reports_the_recording(self):
-        gw = self.make_gateway()
-        gw.debug = True
         robot = FakeRobot(limit=7)
         robot.drains = [[(10, 1, 1)], [(20, 1, 2)]]
-        await self.run_gateway(gw, robot)
+        gw = self.make_gateway(robot)
+        gw.debug = True
+        await self.run_gateway(gw)
         response = answer(gw, "/debug/state")
         self.assertEqual(response.status_code, 200)
         state = json.loads(response.body)

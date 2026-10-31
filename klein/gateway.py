@@ -38,8 +38,6 @@ import asyncio
 import io
 import json
 import logging
-import random
-import struct
 import sys
 import time
 import webbrowser
@@ -49,15 +47,11 @@ from http import HTTPStatus
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-import zmq
-import zmq.asyncio
 import websockets
 from websockets.datastructures import Headers
 from websockets.http11 import Response
 
 from .groot2_protocol import (
-    HEADER_FORMAT,
-    PROTOCOL_ID,
     RECORDING_START,
     REQ_BLACKBOARD,
     REQ_FULLTREE,
@@ -66,7 +60,6 @@ from .groot2_protocol import (
     REQ_TOGGLE_RECORDING,
     TRANSITION_BUFFER_MAX,
     decode_transitions,
-    decode_tree_uuid,
     iter_status,
     parse_blackboard,
     parse_status,
@@ -74,6 +67,7 @@ from .groot2_protocol import (
 from .btlog import BtlogError, export_blackboard, export_run, load_btlog, read_btlog
 from .layout import collect_uids, extract_blackboard_names, parse_node_categories, unroll_tree
 from .recording import Layout, RobotClock, decode_state, snapshot_run
+from .robot_link import REQUEST_TIMEOUT, RobotLink, RobotRefused, RobotTimeout
 from .streaming import Streamer
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -84,7 +78,6 @@ STATIC_DIR = PACKAGE_DIR / "static"    # dashboard web assets live here, not bes
 # steps once per STATUS and so runs its missions and swaps faster. Not a flag.
 POLL_INTERVAL = 0.1
 BLACKBOARD_POLL_INTERVAL = 0.5  # 2 Hz blackboard poll — values change slower than status
-REQUEST_TIMEOUT = 2.0           # seconds to wait for a robot reply
 LAYOUT_RETRY_MAX = 5.0          # cap on handshake retry backoff
 
 # Static files served over HTTP at "/<name>" ("/" is "/index.html"): every file
@@ -106,10 +99,6 @@ _LOG_TYPES = {".btlog": "application/octet-stream", ".bb.jsonl": "application/x-
 _LOG_ROUTES = ("/log/runs", "/log.zip", *(f"/log{suffix}" for suffix in _LOG_SUFFIXES))
 
 
-class RobotTimeout(Exception):
-    """Raised when a robot request times out or the REQ socket faults."""
-
-
 def _load_asset(name):
     """Read a packaged static asset as bytes, or None if it is missing."""
     try:
@@ -122,10 +111,15 @@ class KleinGateway:
     """Bridges the robot's ZeroMQ REQ/REP channel to browser WebSockets, and
     serves the dashboard + telemetry from a single HTTP/WebSocket port."""
 
-    def __init__(self, robot_host, robot_port, port, recording=None, debug=False):
+    def __init__(self, robot_host, robot_port, port, recording=None, debug=False, link=None):
         self.robot_endpoint = f"tcp://{robot_host}:{robot_port}"
         self.port = port
         self.debug = debug                  # serve GET /debug/state
+        # The robot's REQ socket (klein/robot_link.py); the tests pass a fake.
+        # REQUEST_TIMEOUT is read here, not at import: the UI tests lower it
+        # before the CLI builds the gateway.
+        self.link = link if link is not None else RobotLink(self.robot_endpoint,
+                                                            REQUEST_TIMEOUT)
 
         # Transition recording (docs/architecture.md, "Recording"). None is
         # --record-buffer 0: no r/t on the wire, and the pollers idle without clients.
@@ -143,14 +137,6 @@ class KleinGateway:
         # good status poll: if the robot turns out to have gone, the open
         # segment ends at the head, the last time klein heard from it.
         self._timed_out = False
-
-        self.ctx = zmq.asyncio.Context()
-        self.socket = None                  # created lazily / recreated on fault
-        # Both created lazily, inside the loop that uses them: constructing a
-        # gateway must not require a running event loop. On Python 3.9
-        # asyncio.Lock() reaches for get_event_loop() and raises without one,
-        # which would make the gateway unconstructible from plain sync code.
-        self._req_lock = None               # REQ/REP is strictly send→recv
 
         self._node_categories = {}          # registration name -> category, from <TreeNodesModel>
         self.tree_structure = None          # unrolled nested dict sent to clients
@@ -176,50 +162,6 @@ class KleinGateway:
 
         # request path -> (body_bytes, content_type); populated once in run().
         self._static = {}
-
-    # ------------------------------------------------------------------ #
-    # ZeroMQ request/reply
-    # ------------------------------------------------------------------ #
-    def _new_socket(self):
-        """(Re)create the REQ socket. A timed-out REQ socket is stuck in the
-        wrong half of its send/recv state machine and cannot be reused, so we
-        throw it away and start clean."""
-        if self.socket is not None:
-            self.socket.close(linger=0)
-        self.socket = self.ctx.socket(zmq.REQ)
-        self.socket.setsockopt(zmq.LINGER, 0)
-        self.socket.connect(self.robot_endpoint)
-
-    async def _request(self, request_type, payload=None):
-        """Send one request and return the multipart reply frames.
-
-        Some requests carry an argument frame after the header (BLACKBOARD wants
-        the list of boards to dump); pass it as ``payload``. Replies are 2-frame
-        multipart messages: frame 0 is a 22-byte reply header, frame 1 is the
-        payload (tree XML, status buffer, or msgpack blackboards). On any
-        timeout/fault the socket is recreated and ``RobotTimeout`` is raised.
-        """
-        if self._req_lock is None:
-            # No await between the check and the assignment, so concurrent
-            # callers on the one event loop cannot both make a lock.
-            self._req_lock = asyncio.Lock()
-        async with self._req_lock:
-            if self.socket is None:
-                self._new_socket()
-            unique_id = random.randint(1, 0xFFFFFFFF)
-            header = struct.pack(HEADER_FORMAT, PROTOCOL_ID, request_type, unique_id)
-            frames = [header] if payload is None else [header, payload]
-            try:
-                await self.socket.send_multipart(frames)
-                return await asyncio.wait_for(
-                    self.socket.recv_multipart(), timeout=REQUEST_TIMEOUT
-                )
-            except asyncio.TimeoutError as exc:
-                self._new_socket()
-                raise RobotTimeout(f"no reply within {REQUEST_TIMEOUT:.0f}s") from exc
-            except zmq.ZMQError as exc:
-                self._new_socket()
-                raise RobotTimeout(str(exc) or "socket error") from exc
 
     # ------------------------------------------------------------------ #
     # Layout: FULLTREE handshake + recursive subtree unrolling
@@ -290,14 +232,14 @@ class KleinGateway:
             return "off"
         return "unsupported" if self._cannot_record else "on"
 
-    def _tree_changed(self, header_frame):
-        """True when a reply came from a different tree than the loaded layout.
+    def _tree_changed(self, uuid):
+        """True when a reply's tree ``uuid`` differs from the loaded layout's.
+        ``None`` (a header too short to carry one) is never a change.
 
         Deliberately *pure*: ``fetch_layout`` is the only writer of
         ``_tree_uuid``, so a re-handshake that fails keeps mismatching instead of
         leaving the gateway believing a tree it never loaded.
         """
-        uuid = decode_tree_uuid(header_frame)
         return (uuid is not None
                 and self._tree_uuid is not None
                 and uuid != self._tree_uuid)
@@ -310,8 +252,8 @@ class KleinGateway:
     async def _reload_tree(self, why):
         """Re-run the handshake because the tree on the robot may have changed.
 
-        Only ``status_poller`` calls this, and only after its own ``_request``
-        has released the non-reentrant ``_req_lock``, so two handshakes can never
+        Only ``status_poller`` calls this, and only after its own request has
+        released the link's non-reentrant lock, so two handshakes can never
         overlap and this cannot deadlock. ``fetch_layout`` owns the retry and
         backoff; parking here while the robot is away is correct, since every
         status buffer would have to be discarded until the new layout lands.
@@ -363,12 +305,10 @@ class KleinGateway:
         while True:
             attempt += 1
             try:
-                reply = await self._request(REQ_FULLTREE)
-                if reply and reply[0] == b"error":
-                    raise ValueError("robot replied with an error frame")
-                if len(reply) < 2 or not reply[1]:
-                    raise ValueError("reply missing tree payload frame")
-                xml_str = reply[1].decode("utf-8", errors="ignore")
+                reply = await self.link.request(REQ_FULLTREE)
+                if not reply.body:
+                    raise ValueError("reply carries no tree XML")
+                xml_str = reply.body.decode("utf-8", errors="ignore")
                 # A restarted robot publishes a fresh UUID even when it is running
                 # the very same tree, and re-parsing then would retire every node
                 # id and rebuild the identical canvas — a flash reporting nothing.
@@ -379,7 +319,7 @@ class KleinGateway:
                 # status poller compares against are always one publisher's. After
                 # _parse_layout, so a parse failure leaves the previous UUID in
                 # place and the mismatch keeps driving the retry.
-                self._tree_uuid = decode_tree_uuid(reply[0])
+                self._tree_uuid = reply.tree_uuid
                 self._mark_connected()
                 await self._arm()           # every handshake, the unchanged-XML one too
                 if not changed:
@@ -399,7 +339,7 @@ class KleinGateway:
                     )
                 self._broadcast(self._layout_json)  # dashboards that connected while we waited
                 return True
-            except (RobotTimeout, ValueError, ET.ParseError) as exc:
+            except (RobotTimeout, RobotRefused, ValueError, ET.ParseError) as exc:
                 if isinstance(exc, RobotTimeout):
                     self._timed_out = True
                 wait = min(float(attempt), LAYOUT_RETRY_MAX)
@@ -434,9 +374,11 @@ class KleinGateway:
         self._armed = False
         self._cannot_record = False         # a new handshake may be a new publisher
         sent = time.monotonic()
-        reply = await self._request(REQ_TOGGLE_RECORDING, RECORDING_START.encode())
+        try:
+            reply = await self.link.request(REQ_TOGGLE_RECORDING, RECORDING_START.encode())
+        except RobotRefused:
+            self._cannot_record = True
         received = time.monotonic()
-        self._cannot_record = len(reply) < 2 or reply[0] == b"error"
         try:
             if self._cannot_record:
                 if self.recording.open_segment is not None:
@@ -444,13 +386,11 @@ class KleinGateway:
                 print("[klein] robot cannot record transitions (needs BehaviorTree.CPP "
                       ">= 4.3.3); not recording.", file=sys.stderr)
                 return
-            start_us = int(reply[1])
-            reply = await self._request(REQ_STATUS)
-            if not reply or len(reply) < 2 or reply[0] == b"error":
-                return
+            start_us = int(reply.body)
+            reply = await self.link.request(REQ_STATUS)
             tree = self._recorded_tree
             baseline = bytearray(tree.size)
-            for uid, status in iter_status(reply[1]):
+            for uid, status in iter_status(reply.body):
                 if uid < tree.size:
                     baseline[uid] = status
             if self._timed_out and self.recording.open_segment is not None:
@@ -466,6 +406,8 @@ class KleinGateway:
             self._clock.arm(start_us, sent, received)
             self.recording.begin_segment(tree, start_us, baseline)
             self._armed = True
+        except RobotRefused:
+            return                          # no baseline: unarmed until the next handshake
         finally:
             # The drawer says whether klein records. Last, so that a dashboard
             # told "on" already has the segment it records into, and one told
@@ -476,12 +418,13 @@ class KleinGateway:
         """One ``t`` drain into the open segment. A drain of exactly the
         publisher's cap means the oldest were dropped: record an overflow gap
         and re-arm, so the new segment starts from a fresh baseline."""
-        reply = await self._request(REQ_GET_TRANSITIONS)
-        if len(reply) < 2 or reply[0] == b"error":
+        try:
+            reply = await self.link.request(REQ_GET_TRANSITIONS)
+        except RobotRefused:
             return
         segment = self.recording.open_segment
         records = [(segment.t_begin + offset, uid, status)
-                   for offset, uid, status in decode_transitions(reply[1])]
+                   for offset, uid, status in decode_transitions(reply.body)]
         if len(records) == TRANSITION_BUFFER_MAX:
             self.recording.add_gap(segment.last_ts, records[0][0], "overflow")
             self.recording.append(records)
@@ -557,11 +500,10 @@ class KleinGateway:
                 # a list of dead boards that no later frame would ever clear.
                 names = self._blackboard_names
                 generation = self._layout_generation
-                reply = await self._request(REQ_BLACKBOARD, self._blackboard_request)
+                reply = await self.link.request(REQ_BLACKBOARD, self._blackboard_request)
                 received = time.monotonic()
-                if (self._layout_generation == generation
-                        and reply and len(reply) >= 2 and reply[0] != b"error"):
-                    boards = parse_blackboard(reply[1], names)
+                if self._layout_generation == generation:
+                    boards = parse_blackboard(reply.body, names)
                     # Broadcast even when empty, so the dashboard can say so.
                     # t (klein's clock, µs) times the changes without a recording.
                     self._blackboard_json = json.dumps(
@@ -574,6 +516,8 @@ class KleinGateway:
                         # At once, not at the next drain: a dashboard that
                         # connects in between gets sizes within the caps.
                         self.recording.evict(now)
+            except RobotRefused:
+                pass                        # an error reply: no values this time
             except RobotTimeout:
                 # status_poller reports the outage; values just stop updating.
                 self._timed_out = True
@@ -602,29 +546,30 @@ class KleinGateway:
                 await asyncio.sleep(POLL_INTERVAL)
                 continue
             try:
-                reply = await self._request(REQ_STATUS)
-                if reply and len(reply) >= 2 and reply[0] != b"error":
-                    # Either way the buffer is dropped rather than broadcast: its
-                    # UIDs index a tree the dashboard may not have been sent, so
-                    # they could land on the previous tree's cards.
-                    if self._tree_changed(reply[0]):
-                        await self._reload_tree("robot published a different tree")
-                    elif not self._robot_connected:
-                        # Telemetry resumed after an outage, which is what killing
-                        # a robot and starting another looks like from here. The
-                        # UUID check above should already have caught a swap, but
-                        # it trusts the robot to draw a fresh UUID per process;
-                        # an outage is evidence klein owns, so re-handshake on it
-                        # too rather than let one implementation detail decide
-                        # whether the dashboard is showing the right tree. Costs
-                        # one FULLTREE, and fetch_layout keeps the layout — no
-                        # re-render, no notice — when the XML comes back the same.
-                        await self._reload_tree("robot telemetry resumed")
-                    else:
-                        self._broadcast_status(reply[1])
-                        self._timed_out = False     # any timeout before this was a blip
-                        if self._armed:
-                            await self._drain_transitions()
+                reply = await self.link.request(REQ_STATUS)
+                # Either way the buffer is dropped rather than broadcast: its
+                # UIDs index a tree the dashboard may not have been sent, so
+                # they could land on the previous tree's cards.
+                if self._tree_changed(reply.tree_uuid):
+                    await self._reload_tree("robot published a different tree")
+                elif not self._robot_connected:
+                    # Telemetry resumed after an outage, which is what killing
+                    # a robot and starting another looks like from here. The
+                    # UUID check above should already have caught a swap, but
+                    # it trusts the robot to draw a fresh UUID per process;
+                    # an outage is evidence klein owns, so re-handshake on it
+                    # too rather than let one implementation detail decide
+                    # whether the dashboard is showing the right tree. Costs
+                    # one FULLTREE, and fetch_layout keeps the layout — no
+                    # re-render, no notice — when the XML comes back the same.
+                    await self._reload_tree("robot telemetry resumed")
+                else:
+                    self._broadcast_status(reply.body)
+                    self._timed_out = False     # any timeout before this was a blip
+                    if self._armed:
+                        await self._drain_transitions()
+            except RobotRefused:
+                pass                        # an error reply: neither a swap nor an outage
             except RobotTimeout:
                 self._timed_out = True
                 if self._robot_connected:
@@ -836,7 +781,7 @@ class KleinGateway:
             if self._file is not None:
                 await asyncio.Future()      # an opened file: nothing to poll
             await self.fetch_layout()      # retries until the robot answers
-            # Both pollers run forever, sharing the REQ socket via _req_lock.
+            # Both pollers run forever, sharing the one link to the robot.
             await asyncio.gather(self.status_poller(), self.blackboard_poller())
 
 

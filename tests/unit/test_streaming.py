@@ -313,15 +313,14 @@ class BackfillOrderTest(MirrorChecks, unittest.IsolatedAsyncioTestCase):
         """Dashboards connect at random moments of a busy run; each one's frames
         must start with a whole backfill and then continue without a gap or a
         repeat, which the mirror checks record by record."""
-        gw = new_gateway(self, recording=Recording())
+        robot = FakeRobot(limit=400)
+        robot.drains = [[(10 * i + j, 1 + (i + j) % 13, (i + j) % 4) for j in range(3)]
+                        for i in range(300)]
+        gw = new_gateway(self, recording=Recording(), link=robot)
         patch = mock.patch.object(gateway, "POLL_INTERVAL", 0)
         patch.start()
         self.addCleanup(patch.stop)
         gw.streamer.send = lambda clients, frame: [c.frames.append(frame) for c in clients]
-        robot = FakeRobot(limit=400)
-        robot.drains = [[(10 * i + j, 1 + (i + j) % 13, (i + j) % 4) for j in range(3)]
-                        for i in range(300)]
-        gw._request = robot
         rng = random.Random(3)
         sockets = []
 

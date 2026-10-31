@@ -22,8 +22,10 @@ The code:
 - [`klein/layout.py`](../klein/layout.py): a FULLTREE reply's XML unrolled into
   the dashboard's tree: subtrees stitched in, node uids, ports and categories,
   and the blackboard names to ask for.
+- [`klein/robot_link.py`](../klein/robot_link.py): `RobotLink`, the one
+  ZeroMQ REQ socket to the robot ([Robot side](#robot-side-one-socket-two-pollers)).
 - [`klein/gateway.py`](../klein/gateway.py): the asyncio process. It holds the
-  ZeroMQ client, the pollers and the HTTP + WebSocket server.
+  robot link, the pollers and the HTTP + WebSocket server.
 - [`klein/cli.py`](../klein/cli.py): the `klein-bt` command, which parses the
   flags and runs the gateway.
 - [`klein/recording.py`](../klein/recording.py): the recording model
@@ -43,10 +45,26 @@ The code:
 
 ## Robot side: one socket, two pollers
 
-The gateway keeps one ZeroMQ REQ socket to the robot. REQ/REP is strictly
-send-then-receive, so every request goes through one `asyncio.Lock`. If a
-request times out, the socket is stuck mid-exchange, so klein throws it away
-and opens a new one.
+The gateway keeps one ZeroMQ REQ socket to the robot, behind a `RobotLink`
+(`klein/robot_link.py`). REQ/REP is strictly send-then-receive, so every
+request goes through one `asyncio.Lock`. If a request times out, the socket
+is stuck mid-exchange, so the link throws it away and opens a new one.
+
+`await link.request(kind, payload)` returns a `Reply(tree_uuid, body)`: the
+tree UUID from the reply header (`None` if the header is too short to hold
+one) and frame 1. Everything else is one of two exceptions, and they mean
+different things to the gateway:
+
+- `RobotTimeout`: no reply within `REQUEST_TIMEOUT` (2 s), or a socket
+  fault. This is evidence of an outage ([Recording](#recording)); the status
+  poller reports the robot lost.
+- `RobotRefused`: the robot answered with an error frame, or without a
+  payload frame. The robot is there, so it is never an outage. A refused `r`
+  means the publisher can't record; any other refused request is skipped
+  (the handshake retries it).
+
+The gateway takes the link as `link=`, so the tests run it against a fake
+robot with no socket.
 
 At startup the gateway sends a FULLTREE request, retrying with backoff until the
 robot answers. It parses the XML into one unrolled tree and caches the result as

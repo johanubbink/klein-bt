@@ -1,7 +1,8 @@
 """Helpers shared by the test modules: reply headers built through the mock's
-encoder rather than restating the wire format, in-process gateways and a
-scripted robot link for them, test layouts and random records, and the
-``.bb.jsonl`` blackboard sidecar (the one for the t11 fixture included).
+encoder rather than restating the wire format, in-process gateways with a
+scripted robot link and a fake dashboard socket for them, test layouts and
+random records, and the ``.bb.jsonl`` blackboard sidecar (the one for the
+t11 fixture included).
 """
 import asyncio
 import inspect
@@ -190,6 +191,28 @@ class FakeRobot:
 
     def close(self):
         pass
+
+
+class FakeSocket:
+    """Just enough of a server connection for ``ws_handler``: ``sent`` holds
+    what the handler sends it, ``frames`` is for a test's stubbed
+    ``streamer.send``, and it stays open until ``closed`` is set."""
+
+    def __init__(self):
+        self.sent = []
+        self.frames = []
+        self.closed = asyncio.Event()
+
+    async def send(self, message):
+        self.sent.append(message)
+        await asyncio.sleep(0)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        await self.closed.wait()
+        raise StopAsyncIteration
 
 
 # --------------------------------------------------------------------------- #

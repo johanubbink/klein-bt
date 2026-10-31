@@ -145,8 +145,8 @@ class SidecarTest(ScratchDirTest):
 
     def test_the_stream_says_file_and_no_robot(self):
         gw = self.open_t11()
-        self.assertEqual(json.loads(gw._robot_state_json),
-                         {"type": "robot", "connected": False, "recording": "file",
+        self.assertEqual(gw.robot_state,
+                         {"connected": False, "recording": "file",
                           "detail": "No robot — viewing t11_filelogger2.btlog"})
         # The streamer's own backfill, as a dashboard gets it.
         sent = []

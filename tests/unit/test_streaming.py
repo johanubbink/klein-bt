@@ -20,7 +20,7 @@ from klein import gateway, recording
 from klein.recording import BlackboardTrack, Recording
 from klein.streaming import Streamer, encode_records
 from tests import make_vectors
-from tests.helpers import FakeRobot, layout, new_gateway
+from tests.helpers import FakeRobot, FakeSocket, layout, new_gateway
 
 
 # --------------------------------------------------------------------------- #
@@ -288,24 +288,6 @@ class MirrorTest(MirrorChecks, unittest.TestCase):
             self.assertGreater(len(segment.chunks), 1)
             for client in ("live", "mid", "late"):
                 self.assertMirrors(Mirror(frames[client]), rec)
-
-
-class FakeSocket:
-    """Just enough of a server connection for ``ws_handler``."""
-
-    def __init__(self):
-        self.frames = []
-        self.closed = asyncio.Event()
-
-    async def send(self, _message):        # layout/robot frames: not checked here
-        await asyncio.sleep(0)
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        await self.closed.wait()
-        raise StopAsyncIteration
 
 
 class BackfillOrderTest(MirrorChecks, unittest.IsolatedAsyncioTestCase):

@@ -51,22 +51,12 @@ import websockets
 from websockets.datastructures import Headers
 from websockets.http11 import Response
 
-from .groot2_protocol import (
-    RECORDING_START,
-    REQ_BLACKBOARD,
-    REQ_FULLTREE,
-    REQ_GET_TRANSITIONS,
-    REQ_STATUS,
-    REQ_TOGGLE_RECORDING,
-    TRANSITION_BUFFER_MAX,
-    decode_transitions,
-    iter_status,
-    parse_blackboard,
-    parse_status,
-)
+from .groot2_protocol import (REQ_BLACKBOARD, REQ_FULLTREE, REQ_STATUS, parse_blackboard,
+                              parse_status)
 from .btlog import BtlogError, export_blackboard, export_run, load_btlog, read_btlog
 from .layout import parse_layout
-from .recording import RobotClock, decode_state, snapshot_run
+from .recorder import Recorder
+from .recording import snapshot_run
 from .robot_link import REQUEST_TIMEOUT, RobotLink, RobotRefused, RobotTimeout
 from .streaming import Streamer
 
@@ -107,6 +97,18 @@ def _load_asset(name):
         return None
 
 
+def tree_changed(loaded, uuid):
+    """True when a reply's tree ``uuid`` differs from ``loaded``, the UUID the
+    loaded tree came from. ``None`` on either side (a header too short to
+    carry one, or no tree loaded yet) is never a change.
+
+    Deliberately *pure*: ``fetch_layout`` is the only writer of the loaded
+    UUID, so a re-handshake that fails keeps mismatching instead of leaving
+    the gateway believing a tree it never loaded.
+    """
+    return uuid is not None and loaded is not None and uuid != loaded
+
+
 class KleinGateway:
     """Bridges the robot's ZeroMQ REQ/REP channel to browser WebSockets, and
     serves the dashboard + telemetry from a single HTTP/WebSocket port."""
@@ -124,18 +126,12 @@ class KleinGateway:
         # Transition recording (docs/architecture.md, "Recording"). None is
         # --record-buffer 0: no r/t on the wire, and the pollers idle without clients.
         self.recording = recording
+        self.recorder = Recorder(recording, self.link)   # the session: arm, drain, outages
         # Mirrors the recording into every dashboard (docs/protocol.md,
         # "Streaming the recording"): backfill on connect, then each change.
         self.streamer = (None if recording is None else
                          Streamer(recording, websockets.broadcast, name=self.robot_endpoint))
-        self._clock = RobotClock()          # klein's monotonic clock -> robot µs
-        self._armed = False                 # an open segment is taking `t` drains
-        self._cannot_record = False         # this publisher answered `r` with an error
         self._file = None                   # the opened .btlog's name (--open): no robot
-        # A request (any poller's, or the handshake's) timed out since the last
-        # good status poll: if the robot turns out to have gone, the open
-        # segment ends at the head, the last time klein heard from it.
-        self._timed_out = False
 
         # The loaded tree (klein/layout.py), replaced only by a handshake that
         # brings a different XML. The segments recorded under it share it.
@@ -177,42 +173,25 @@ class KleinGateway:
         self._robot_detail = detail
         self._publish_robot_state()
 
+    @property
+    def robot_state(self):
+        """The ``robot`` frame's fields: reachability, and what the drawer says
+        about recording: the recorder's ``"on"``, ``"off"`` (--record-buffer
+        0) or ``"unsupported"``, or ``"file"`` (``--open``: no robot)."""
+        return {"connected": self._robot_connected, "detail": self._robot_detail,
+                "recording": "file" if self._file is not None else self.recorder.state}
+
     def _publish_robot_state(self):
-        """Push the ``robot`` frame (reachability and ``_recording_state()``)
-        to dashboards when it changed.
+        """Push the ``robot`` frame to dashboards when it changed.
 
         The latest frame is cached so a dashboard that connects later is told
         immediately whether the robot is reachable (see ``ws_handler``). Only
         real changes are broadcast, so this is safe to call on the 10 Hz path.
         """
-        frame = json.dumps({"type": "robot", "connected": self._robot_connected,
-                            "detail": self._robot_detail,
-                            "recording": self._recording_state()})
+        frame = json.dumps({"type": "robot", **self.robot_state})
         if frame != self._robot_state_json:
             self._robot_state_json = frame
             self._broadcast(frame)
-
-    def _recording_state(self):
-        """What the drawer says about recording: ``"off"`` (--record-buffer 0),
-        ``"unsupported"`` (the publisher answered ``r`` with an error), ``"on"``,
-        or ``"file"`` (``--open``: no robot)."""
-        if self._file is not None:
-            return "file"
-        if self.recording is None:
-            return "off"
-        return "unsupported" if self._cannot_record else "on"
-
-    def _tree_changed(self, uuid):
-        """True when a reply's tree ``uuid`` differs from the loaded layout's.
-        ``None`` (a header too short to carry one) is never a change.
-
-        Deliberately *pure*: ``fetch_layout`` is the only writer of
-        ``_tree_uuid``, so a re-handshake that fails keeps mismatching instead of
-        leaving the gateway believing a tree it never loaded.
-        """
-        return (uuid is not None
-                and self._tree_uuid is not None
-                and uuid != self._tree_uuid)
 
     def _broadcast_notice(self, text):
         """Push a one-off message to dashboards. Never cached, unlike every other
@@ -293,7 +272,11 @@ class KleinGateway:
                 # place and the mismatch keeps driving the retry.
                 self._tree_uuid = reply.tree_uuid
                 self._mark_connected()
-                await self._arm()           # every handshake, the unchanged-XML one too
+                await self.recorder.arm(self.tree)  # every handshake, the unchanged-XML one too
+                # The drawer says whether klein records. After the arm, so that a
+                # dashboard told "on" already has the segment it records into,
+                # and one told "unsupported" the end of the last one.
+                self._publish_robot_state()
                 if not changed:
                     print(f"[klein] robot restarted with the same tree "
                           f"({self.tree.node_count} nodes); layout kept.")
@@ -313,7 +296,7 @@ class KleinGateway:
                 return True
             except (RobotTimeout, RobotRefused, ValueError, ET.ParseError) as exc:
                 if isinstance(exc, RobotTimeout):
-                    self._timed_out = True
+                    self.recorder.note_timeout()
                 wait = min(float(attempt), LAYOUT_RETRY_MAX)
                 print(
                     f"[klein] waiting for robot at {self.robot_endpoint} "
@@ -325,127 +308,16 @@ class KleinGateway:
                 )
                 await asyncio.sleep(wait)
 
-    # ------------------------------------------------------------------ #
-    # Recording: arm (r start + S baseline), then one `t` drain per status poll
-    # ------------------------------------------------------------------ #
-    async def _arm(self):
-        """Begin a recording segment: ``r start``, then a STATUS baseline.
-
-        Run on every handshake and after an overflow. The ``r start`` reply is
-        the robot's wall-clock µs, the base every drained offset is added to.
-        In that order nothing is lost between the two: whatever ran after
-        ``r start`` is in the robot's buffer, and what ran before the ``S`` is
-        in the baseline too, so the first drain replays it on top of the
-        baseline (``apply_transition`` makes that replay end on the baseline).
-        A robot without recording (BT.CPP < 4.3.3) answers ``r`` with an error;
-        klein then records nothing from this publisher and behaves as with
-        ``--record-buffer 0``, until the next handshake tries again.
-        """
-        if self.recording is None:
-            return
-        self._armed = False
-        self._cannot_record = False         # a new handshake may be a new publisher
-        sent = time.monotonic()
-        try:
-            reply = await self.link.request(REQ_TOGGLE_RECORDING, RECORDING_START.encode())
-        except RobotRefused:
-            self._cannot_record = True
-        received = time.monotonic()
-        try:
-            if self._cannot_record:
-                if self.recording.open_segment is not None:
-                    self.recording.end_segment(self._clock.robot_us(received))
-                print("[klein] robot cannot record transitions (needs BehaviorTree.CPP "
-                      ">= 4.3.3); not recording.", file=sys.stderr)
-                return
-            start_us = int(reply.body)
-            reply = await self.link.request(REQ_STATUS)
-            tree = self.tree
-            baseline = bytearray(tree.size)
-            for uid, status in iter_status(reply.body):
-                if uid < tree.size:
-                    baseline[uid] = status
-            if self._timed_out and self.recording.open_segment is not None:
-                # A request timed out (a blackboard poll, say) and the robot came
-                # back as a new publisher before any status poll timed out: that
-                # was an outage too.
-                self._end_segment_at_head()
-            self._timed_out = False
-            previous = self.recording.segments[-1] if self.recording.segments else None
-            if previous is not None and previous.t_end is not None:
-                # Ended when the robot went away.
-                self.recording.add_gap(previous.t_end, start_us, "outage")
-            self._clock.arm(start_us, sent, received)
-            self.recording.begin_segment(tree, start_us, baseline)
-            self._armed = True
-        except RobotRefused:
-            return                          # no baseline: unarmed until the next handshake
-        finally:
-            # The drawer says whether klein records. Last, so that a dashboard
-            # told "on" already has the segment it records into, and one told
-            # "unsupported" the end of the last one.
-            self._publish_robot_state()
-
-    async def _drain_transitions(self):
-        """One ``t`` drain into the open segment. A drain of exactly the
-        publisher's cap means the oldest were dropped: record an overflow gap
-        and re-arm, so the new segment starts from a fresh baseline."""
-        try:
-            reply = await self.link.request(REQ_GET_TRANSITIONS)
-        except RobotRefused:
-            return
-        segment = self.recording.open_segment
-        records = [(segment.t_begin + offset, uid, status)
-                   for offset, uid, status in decode_transitions(reply.body)]
-        if len(records) == TRANSITION_BUFFER_MAX:
-            self.recording.add_gap(segment.last_ts, records[0][0], "overflow")
-            self.recording.append(records)
-            await self._arm()
-        else:
-            self.recording.append(records)
-        now = self._clock.robot_us(time.monotonic())
-        self.recording.evict(now)           # first, so the head frame has its sizes
-        self.recording.advance_head(now)
-
-    def _end_segment_at_head(self):
-        """End the open segment when the robot went away: at the head, the last
-        drain, which is the last time klein heard from it."""
-        segment = self.recording.open_segment
-        self.recording.end_segment(max(self.recording.head or segment.t_begin,
-                                       segment.t_begin))
-
     def debug_state(self):
         """The read-only dump behind ``GET /debug/state`` (``--debug`` only)."""
-        rec = self.recording
-        if rec is None:
-            return {"recording": False}
-        segment = rec.open_segment
-        return {
-            "recording": self._armed,
-            "head": rec.head,
-            "t_min": rec.t_min,
-            "segments": [{"id": s.id, "t_begin": s.t_begin, "t_end": s.t_end,
-                          "start_seq": s.start_seq, "head_seq": s.head_seq,
-                          "start_state": list(s.state_at_seq(s.start_seq)),
-                          "layout_id": s.layout.generation} for s in rec.segments],
-            "runs": [[s.id for s in run] for run in rec.runs()],
-            "gaps": [list(gap) for gap in rec.gaps],
-            "records": [[ts, uid, status] for s in rec.segments
-                        for _seq, ts, uid, status in s.iter_records(s.start_seq, s.head_seq)],
-            "state": (decode_state(segment.state, segment.layout.uids)
-                      if segment is not None else None),
-            "blackboard": [{"seg": s.id, "t_start": s.blackboard.t_start,
-                            "boards": dict(s.blackboard.boards),
-                            "changes": [list(c) for c in s.blackboard.changes()]}
-                           for s in rec.segments],
-            "bytes": list(rec.bytes_used()),
-        }
+        dump = {} if self.recording is None else self.recording.debug_dump()
+        return {"recording": self.recorder.armed, **dump}
 
     def _idle(self):
         """True when the pollers should wait: no dashboard is watching and there
         is nothing to record (recording off, or a publisher that can't). Not
         while an outage interrupts recording, so the robot's return is noticed."""
-        return not self.clients and (self.recording is None or self._cannot_record)
+        return not self.clients and self.recorder.state != "on"
 
     # ------------------------------------------------------------------ #
     # Telemetry: STATUS poll -> parse -> broadcast
@@ -481,17 +353,12 @@ class KleinGateway:
                         {"type": "blackboard", "t": int(received * 1e6), "data": boards}
                     )
                     self._broadcast(self._blackboard_json)
-                    if self._armed:
-                        now = self._clock.robot_us(received)
-                        self.recording.add_blackboard(now, boards)
-                        # At once, not at the next drain: a dashboard that
-                        # connects in between gets sizes within the caps.
-                        self.recording.evict(now)
+                    self.recorder.add_blackboard(received, boards)
             except RobotRefused:
                 pass                        # an error reply: no values this time
             except RobotTimeout:
                 # status_poller reports the outage; values just stop updating.
-                self._timed_out = True
+                self.recorder.note_timeout()
             except Exception as exc:  # never let the poller die
                 print(f"[klein] blackboard poller error: {exc}", file=sys.stderr)
             await asyncio.sleep(BLACKBOARD_POLL_INTERVAL)
@@ -521,7 +388,7 @@ class KleinGateway:
                 # Either way the buffer is dropped rather than broadcast: its
                 # UIDs index a tree the dashboard may not have been sent, so
                 # they could land on the previous tree's cards.
-                if self._tree_changed(reply.tree_uuid):
+                if tree_changed(self._tree_uuid, reply.tree_uuid):
                     await self._reload_tree("robot published a different tree")
                 elif not self._robot_connected:
                     # Telemetry resumed after an outage, which is what killing
@@ -536,20 +403,16 @@ class KleinGateway:
                     await self._reload_tree("robot telemetry resumed")
                 else:
                     self._broadcast_status(reply.body)
-                    self._timed_out = False     # any timeout before this was a blip
-                    if self._armed:
-                        await self._drain_transitions()
+                    await self.recorder.drain()
+                    # An overflow re-arms, which may find the robot can't record.
+                    self._publish_robot_state()
             except RobotRefused:
                 pass                        # an error reply: neither a swap nor an outage
             except RobotTimeout:
-                self._timed_out = True
                 if self._robot_connected:
                     print("[klein] robot status poll timed out; retrying...",
                           file=sys.stderr)
-                if self.recording is not None and self.recording.open_segment is not None:
-                    # The resume re-handshake opens the next segment and the gap.
-                    self._end_segment_at_head()
-                    self._armed = False
+                self.recorder.robot_lost()  # the resume re-handshake re-arms
                 self._set_robot_state(
                     False, f"Lost connection to robot at {self.robot_endpoint} — retrying…"
                 )

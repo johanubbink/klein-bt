@@ -1,8 +1,8 @@
 """klein.recording — the in-memory recording of a robot's transitions.
 
-Pure data model: no asyncio, no ZeroMQ. The gateway feeds it (arming, ``t``
-drains, blackboard polls); everything that shows a past moment reads it back.
-See docs/architecture.md, "Recording model".
+Pure data model: no asyncio, no ZeroMQ. The recorder (klein/recorder.py)
+feeds it from a robot, and ``load_btlog`` from a file; everything that shows
+a past moment reads it back. See docs/architecture.md, "Recording model".
 
 State is a ``bytearray`` indexed by uid, in the STATUS byte encoding: 0–4 is a
 live status, ``10 + X`` is "IDLE after X". Replaying transitions through
@@ -367,6 +367,11 @@ class Recording:
         """The earliest retained time, or None when nothing is recorded."""
         return self.segments[0].t_start if self.segments else None
 
+    @property
+    def ended_at(self):
+        """When the newest segment ended: None while it is open, or with none."""
+        return self.segments[-1].t_end if self.segments else None
+
     def extent(self):
         """What eviction can change: the earliest time, and per retained segment
         ``[seg, start_seq, t_start, blackboard t_start]``."""
@@ -387,12 +392,25 @@ class Recording:
         segment.t_end = t_end
         self._notify("segment_end", segment)
 
+    def end_at_head(self):
+        """End the open segment, if any, at the head (or at its begin, before
+        the head reaches it)."""
+        segment = self.open_segment
+        if segment is not None:
+            self.end_segment(max(self.head or segment.t_begin, segment.t_begin))
+
     def append(self, records):
         segment = self.open_segment
         first_seq = segment.head_seq
         segment.append(records)
         if segment.head_seq > first_seq:
             self._notify("append", segment, first_seq)
+
+    def append_after_overflow(self, records):
+        """Append records the robot dropped others before (its buffer
+        overflowed): an ``overflow`` gap from the newest record to their first."""
+        self.add_gap(self.open_segment.last_ts, records[0][0], "overflow")
+        self.append(records)
 
     def advance_head(self, t):
         self.head = t
@@ -416,6 +434,31 @@ class Recording:
         """``(transition_bytes, blackboard_bytes)``, an estimate of storage."""
         return (sum(s.transition_bytes for s in self.segments),
                 sum(s.blackboard.nbytes for s in self.segments))
+
+    def debug_dump(self):
+        """Everything retained, as JSON-able data, for ``GET /debug/state``:
+        the segments, runs, gaps, every record, the head state, the
+        blackboard history and the bytes used."""
+        segment = self.open_segment
+        return {
+            "head": self.head,
+            "t_min": self.t_min,
+            "segments": [{"id": s.id, "t_begin": s.t_begin, "t_end": s.t_end,
+                          "start_seq": s.start_seq, "head_seq": s.head_seq,
+                          "start_state": list(s.state_at_seq(s.start_seq)),
+                          "layout_id": s.layout.generation} for s in self.segments],
+            "runs": [[s.id for s in run] for run in self.runs()],
+            "gaps": [list(gap) for gap in self.gaps],
+            "records": [[ts, uid, status] for s in self.segments
+                        for _seq, ts, uid, status in s.iter_records(s.start_seq, s.head_seq)],
+            "state": (decode_state(segment.state, segment.layout.uids)
+                      if segment is not None else None),
+            "blackboard": [{"seg": s.id, "t_start": s.blackboard.t_start,
+                            "boards": dict(s.blackboard.boards),
+                            "changes": [list(c) for c in s.blackboard.changes()]}
+                           for s in self.segments],
+            "bytes": list(self.bytes_used()),
+        }
 
     def runs(self):
         """The retained segments grouped into tree runs: maximal consecutive
@@ -493,21 +536,3 @@ def snapshot_run(run):
     outside the event loop while the recording goes on."""
     return [segment.snapshot() for segment in run]
 
-
-# --------------------------------------------------------------------------- #
-# Clock
-# --------------------------------------------------------------------------- #
-class RobotClock:
-    """Maps klein's monotonic clock to robot µs, anchored by the ``r start``
-    reply: its timestamp is taken to be the midpoint of the round trip."""
-
-    def __init__(self):
-        self.start_us = None
-        self._mid = None
-
-    def arm(self, start_reply_us, sent_mono, recv_mono):
-        self.start_us = start_reply_us
-        self._mid = (sent_mono + recv_mono) / 2
-
-    def robot_us(self, mono):
-        return self.start_us + round((mono - self._mid) * 1e6)

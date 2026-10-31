@@ -14,7 +14,6 @@ from klein.recording import (
     CHUNK_SIZE,
     BlackboardTrack,
     Recording,
-    RobotClock,
     Segment,
     apply_transition,
     decode_state,
@@ -385,14 +384,6 @@ class SegmentsTest(unittest.TestCase):
         self.assertEqual(rec.runs(), [[a1, a2], [b], [a3]])
         rec.evict(3001 + 10_000)                            # a1 goes entirely
         self.assertEqual(rec.runs(), [[a2], [b], [a3]])
-
-
-class RobotClockTest(unittest.TestCase):
-    def test_maps_to_the_round_trip_midpoint(self):
-        clock = RobotClock()
-        clock.arm(1_000_000, 10.0, 10.002)
-        self.assertEqual(clock.robot_us(10.001), 1_000_000)
-        self.assertEqual(clock.robot_us(11.501), 2_500_000)
 
 
 class BoundsTest(unittest.TestCase):

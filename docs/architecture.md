@@ -25,8 +25,11 @@ The code:
   blackboard names to ask for.
 - [`klein/robot_link.py`](../klein/robot_link.py): `RobotLink`, the one
   ZeroMQ REQ socket to the robot ([Robot side](#robot-side-one-socket-two-pollers)).
+- [`klein/recorder.py`](../klein/recorder.py): `Recorder`, the recording
+  session: arming, `t` drains, overflow and outage gaps, and a publisher that
+  can't record ([Recording](#recording)).
 - [`klein/gateway.py`](../klein/gateway.py): the asyncio process. It holds the
-  robot link, the pollers and the HTTP + WebSocket server.
+  robot link, the recorder, the pollers and the HTTP + WebSocket server.
 - [`klein/cli.py`](../klein/cli.py): the `klein-bt` command, which parses the
   flags and runs the gateway.
 - [`klein/recording.py`](../klein/recording.py): the recording model
@@ -119,15 +122,21 @@ Rules that keep this safe:
 
 ## Recording
 
-The gateway owns one `Recording` (see [Recording model](#recording-model)) and
-feeds it from the robot's transition buffer. The request order on the wire,
+The gateway owns one `Recording` (see [Recording model](#recording-model)),
+and a `Recorder` (`klein/recorder.py`) feeds it from the robot's transition
+buffer. The gateway says when: `arm(tree)` after each handshake, `drain()`
+after each good status poll, `add_blackboard` with each blackboard sample,
+`note_timeout()` when any request times out and `robot_lost()` when a status
+poll does. The recorder keeps the session's state: whether it is `armed`,
+its `state` for the drawer (`"on"`, `"unsupported"`, or `"off"` with
+`--record-buffer 0`, when it sends and records nothing), and whether a
+request timed out since the last good poll. The request order on the wire,
 and why it loses nothing, is in [protocol.md](protocol.md#how-klein-records).
 
 - **Arming** runs at the end of every successful handshake, including one
   that found the XML unchanged: `r start` (its reply is the segment's
-  `t_begin` and anchors `RobotClock`), the baseline `S` (a uid-indexed state
-  of length max uid + 1), then `begin_segment`, which opens a new
-  **segment**.
+  `t_begin`), the baseline `S` (a uid-indexed state of length max uid + 1),
+  then `begin_segment`, which opens a new **segment**.
 - **The layout** a segment carries is the gateway's `TreeLayout`, one per
   parsed XML. A handshake that keeps the layout (a same-tree restart or an
   outage resume) reuses it, so `Recording.runs()` keeps those segments in one
@@ -138,21 +147,25 @@ and why it loses nothing, is in [protocol.md](protocol.md#how-klein-records).
   too, so a dashboard connecting between two drains is never told sizes
   over the caps.
 - **Overflow**: a drain of exactly 1000 adds an `overflow` gap from the
-  previous record to the drain's first, appends the drain and re-arms with the
-  same `TreeLayout`: a new segment, same run.
+  previous record to the drain's first, appends the drain
+  (`append_after_overflow`) and re-arms with the same `TreeLayout`: a new
+  segment, same run.
 - **Outage**: a request timeout from either poller or the handshake (`T`)
   marks that the robot may have gone; a good `S` clears the mark, so a lone
   timed-out `B` changes nothing. A timed-out `S` ends the open segment at the
-  head, the last drain and so the last time klein heard from the robot; the
-  re-handshake when telemetry resumes re-arms and adds an `outage` gap from
-  that end to the new `t_begin`. If only a `B` timed out and the robot is
-  back as a new publisher by the next `S`, the re-arm ends the segment the
-  same way and adds the same gap. A restart quick enough that nothing times
-  out arrives as a new UUID: a new segment in the same run, with no gap.
+  head (`end_at_head`), the last drain and so the last time klein heard from
+  the robot; the re-handshake when telemetry resumes re-arms and adds an
+  `outage` gap from that end (`ended_at`) to the new `t_begin`. If only a
+  `B` timed out and the robot is back as a new publisher by the next `S`,
+  the re-arm ends the segment the same way and adds the same gap. A restart
+  quick enough that nothing times out arrives as a new UUID: a new segment
+  in the same run, with no gap.
 - **Tree swap**: the re-handshake re-arms; `begin_segment` ends the old
   segment at the new one's `t_begin`.
-- **Blackboard**: each successful `B` is added to the open segment at
-  `RobotClock`'s robot time.
+- **Blackboard**: each successful `B` is added to the open segment at the
+  robot's time: the recorder maps klein's monotonic clock onto the robot's
+  µs, taking the `r start` reply's timestamp as the midpoint of its round
+  trip.
 - **No recording support** (`r` errors, BT.CPP < 4.3.3): the open segment
   ends, no new one begins and no `t` is sent to that publisher; the next
   handshake tries again.
@@ -330,9 +343,6 @@ seen, as a pure data model (no asyncio, no ZeroMQ). The gateway feeds it (see
   say that a size cap, not the keep window, decides how far back that
   history reaches: set when the cap evicts, cleared once the window's cutoff
   passes the cut. The drawer's recorder pill shows them.
-- **`RobotClock`** maps klein's monotonic clock to robot µs, taking the
-  `r start` reply's timestamp as the midpoint of its round trip. Blackboard
-  samples are timestamped with it.
 
 ## Browser side: one port
 

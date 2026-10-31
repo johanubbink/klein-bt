@@ -481,54 +481,68 @@ function timelineSections(tree, folded, needle = "") {
     const matches = (name, subtree) => !needle || name.toLowerCase().includes(needle)
                                                 || subtree.toLowerCase().includes(needle);
     function walk(node, depth, tint, subtree, shown) {
-        const section = depth === 0 || Boolean(node.is_subtree_root);
         if (node.is_subtree_root) {
             subtree = node.name;
             tint++;
         }
         const children = node.children || [];
         const isFolded = folded.has(node.id) && children.length > 0;
-        const kids = children.map((c) => walk(c, depth + 1, tint, subtree, shown && !isFolded));
-        const inner = [];
-        let count = 0;
-        for (const k of kids) {
-            count += 1 + k.count;
-            if (k.uid !== null && k.uid !== undefined) inner.push(k.uid);
-            inner.push(...k.inner);
-        }
+        const open = shown && !isFolded;        // the rows below it are shown
+        const kids = children.map((c) => walk(c, depth + 1, tint, subtree, open));
+        const { count, inner } = below(kids);
         const item = {
             id: node.id, uid: node.uid === undefined ? null : node.uid, name: node.name,
             type: node.type, category: node.category, depth,
-            tint: Math.min(tint, 3), section,
+            tint: Math.min(tint, 3), section: depth === 0 || Boolean(node.is_subtree_root),
             label: depth === 0 ? treeName(tree) : node.name,
             count, expandable: children.length > 0, folded: isFolded,
             hidden: isFolded ? count : 0, inner, context: false, items: [],
             keep: matches(node.name, subtree) && (shown || Boolean(needle)),
+            // What follows this node's row: the rows below it, unless a
+            // fold hides them (a filter lists them anyway).
+            flat: needle || open ? flatten(kids) : [],
         };
-        // What follows this node's row: the rows below it, flattened into its
-        // own section or, for a header, kept inside it.
-        item.flat = [];
-        for (const k of kids) {
-            if (!(needle || (shown && !isFolded))) break;
-            if (k.section) {
-                if (k.keep || k.items.length) item.flat.push(k);
-            } else {
-                if (k.keep) item.flat.push(k);
-                item.flat.push(...k.flat);
-            }
-        }
-        if (section) {
-            item.items = item.flat;
-            item.flat = [];
-            if (!item.keep && item.items.length) {
-                item.context = true;
-                item.keep = true;
-            }
-        }
-        return item;
+        return item.section ? closeSection(item) : item;
     }
     const root = walk(tree, 0, 0, treeName(tree), true);
     return root.keep ? strip(root) : null;
+}
+
+// What a node's children hold below it: count, the nodes; inner, their
+// uids, in tree order.
+function below(kids) {
+    const inner = [];
+    let count = 0;
+    for (const k of kids) {
+        count += 1 + k.count;
+        if (k.uid !== null) inner.push(k.uid);
+        inner.push(...k.inner);
+    }
+    return { count, inner };
+}
+
+// The rows below a node, flattened in tree order: each kept child's row,
+// then what follows it (a section's rows are inside it, closeSection).
+function flatten(kids) {
+    const out = [];
+    for (const k of kids) {
+        if (k.keep) out.push(k);
+        out.push(...k.flat);
+    }
+    return out;
+}
+
+// A section's header holds the rows below it as its items, so in its
+// parent's section nothing follows it. Kept only for what it holds, it is
+// context (and kept).
+function closeSection(item) {
+    item.items = item.flat;
+    item.flat = [];
+    if (!item.keep && item.items.length) {
+        item.context = true;
+        item.keep = true;
+    }
+    return item;
 }
 
 // Drop timelineSections' working fields.

@@ -11,6 +11,7 @@ import * as R from "./recording.js";
 import * as C from "./cursor.js";
 import * as W from "./window.js";
 import * as KleinDrawer from "./drawer.js";
+import { drag, setStyle, formatClock } from "./ui.js";
 
 const ZOOM = 8;                     // the strip is this many of the Timeline's windows
 const COLUMN = 2;                   // px: an activity column, about
@@ -54,10 +55,6 @@ function clamp(v, lo, hi) {
 
 function px(v) {
     return `${v.toFixed(2)}px`;
-}
-
-function setStyle(el, name, value) {
-    if (el.style[name] !== value) el.style[name] = value;
 }
 
 // False when part was last drawn for this key (nothing to redraw).
@@ -212,7 +209,7 @@ function hover(event) {
     const t = shown ? shown.m0 + (event.clientX - r.left) / shown.k : null;
     tip.hidden = !shown || event.clientY > r.bottom + 1 || t < shown.tMin || t > shown.head;
     if (tip.hidden) return;
-    tip.textContent = KleinDrawer.formatClock(Math.round(t), 1)
+    tip.textContent = formatClock(Math.round(t), 1)
         + (rec.source === "file" ? "" : ` · ${ago((shown.head - t) / 1e6)}`);
     const half = tip.offsetWidth / 2;
     tip.style.left = px(r.left - drawer.getBoundingClientRect().left
@@ -275,7 +272,7 @@ ov.addEventListener("pointerdown", (event) => {
     }
     ov.classList.add("dragging");
     ov.classList.toggle("panning", panning);
-    KleinDrawer.drag(ov, event, move, (e) => {
+    drag(ov, event, move, (e) => {
         end(e);
         ov.classList.remove("dragging", "panning");
     });

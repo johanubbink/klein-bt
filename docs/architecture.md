@@ -320,7 +320,7 @@ seen, as a pure data model (no asyncio, no ZeroMQ). The gateway feeds it (see
 
 One `websockets` server owns `--port`. It serves the static files over HTTP
 (`/`, `/styles.css`, `/app.js`, `/renderers.js`, `/recording.js`,
-`/cursor.js`, `/window.js`, `/view.js`, `/drawer.js`, `/timeline.js`, `/overview.js`,
+`/cursor.js`, `/window.js`, `/view.js`, `/ui.js`, `/drawer.js`, `/timeline.js`, `/overview.js`,
 `/d3.v7.min.js`) and upgrades `/ws` to a WebSocket. Because both come from
 the same origin, the page just opens `ws://<same host:port>/ws`.
 
@@ -586,9 +586,10 @@ full-height pane over the canvas's left edge, and behaves like the drawer
   so the tree stays centred; dragging leaves it be. A change of width also
   asks for a render, so the Timeline redraws its bars for the drawer's new
   width.
-- **Shared with the drawer:** `KleinDrawer.pane(...)`, the dragged-edge,
-  foldable, remembered panel both are, and the fold button's and the grip's
-  CSS. Each panel keeps its own state and storage.
+- **Shared with the drawer:** `pane(...)` in `ui.js` (the dashboard's
+  toolkit), the dragged-edge, foldable, remembered panel both are, and the
+  fold button's and the grip's CSS. Each panel keeps its own state and
+  storage.
 
 ## The drawer
 
@@ -636,7 +637,7 @@ sidebar's width (see [The sidebar](#the-sidebar)).
   Each has a key (its tooltip names it; see Keys below): ←/→ step, Space
   plays or pauses, End (and Esc) goes live; Home has no button and pauses at
   the oldest kept moment. The **clock** is the cursor's time to the µs
-  (`14:03:22.201 030`, `KleinDrawer.formatTime`); live, the head's or the
+  (`14:03:22.201 030`, `formatTime` in `ui.js`); live, the head's or the
   newest blackboard sample's, whichever is newer (`shownTime`). Without a
   recording the buttons are off, and Live and the clock are hidden.
 - **The overview** ([`klein/static/overview.js`](../klein/static/overview.js))

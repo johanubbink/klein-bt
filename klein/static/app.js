@@ -11,6 +11,8 @@ import * as KleinDrawer from "./drawer.js";
 import * as KleinTimeline from "./timeline.js";
 import * as KleinOverview from "./overview.js";
 import * as KleinView from "./view.js";
+import * as KleinUI from "./ui.js";
+import { pane, restartClass, syncKeyed, reducedMotion } from "./ui.js";
 
 let rootNodeSnapshot = null;
 
@@ -716,40 +718,6 @@ function fillBBDetail(dl, entries) {
     }
 }
 
-// Add cls to el, restarting its animation if one is in flight.
-function restartClass(el, cls) {
-    el.classList.remove(cls);
-    void el.getBoundingClientRect();
-    el.classList.add(cls);
-}
-
-// Reconcile `container`'s children with `keys`, in that order, through
-// `cache`: key -> its entry, whose `nodes` are its elements. A new key's
-// entry is create(key), its nodes appended; every key's entry is then
-// update(entry, key); a key gone has its nodes removed. Children are
-// reordered only when the order is actually wrong: re-appending a node
-// restarts its animation (a row's fade). Used for the boards and their rows.
-function syncKeyed(container, keys, cache, create, update) {
-    const wanted = new Set(keys);
-    for (const key of keys) {
-        let entry = cache[key];
-        if (!Object.hasOwn(cache, key)) {
-            entry = cache[key] = create(key);
-            container.append(...entry.nodes);
-        }
-        update(entry, key);
-    }
-    for (const key of Object.keys(cache)) {
-        if (wanted.has(key)) continue;
-        for (const node of cache[key].nodes) node.remove();
-        delete cache[key];
-    }
-    const ordered = keys.flatMap(key => cache[key].nodes);
-    const correct = ordered.length === container.children.length
-        && ordered.every((el, i) => container.children[i] === el);
-    if (!correct) container.append(...ordered);
-}
-
 // The boards to list, board name -> its info (collectBoards'), in layout
 // order first, so the panel reads like the canvas. A board the robot reports
 // that the layout never mentioned is still shown, flat at the bottom — cover
@@ -829,7 +797,7 @@ function paintGroup(group, entries, paint) {
 function renderBlackboards(boards, { track = frameTrack, t = track.tLast, mode = "live",
                                      empty = "This robot reports no blackboards." } = {}) {
     const painting = track === frameTrack ? "frames" : mode;
-    const rule = { t, mode, primed: painting === bbLastMode, reducedMotion: reducedMotion.matches };
+    const rule = { t, mode, primed: painting === bbLastMode, reducedMotion: reducedMotion() };
     bbLastMode = painting;
     const paint = { track, rule, marked: [], fired: [] };      // marked, fired: for the writer pulse
     const listed = listBoards(boards);
@@ -874,7 +842,7 @@ const SIDEBAR_STRIP = 49;                   // collapsed: 48 px plus the right b
 // Right is wider; dragging a collapsed sidebar opens it at the dragged width.
 // Resized or folded, the drawer under the canvas changed width with it, so
 // the Timeline's bars are redrawn for its new axis.
-const sidebarPane = KleinDrawer.pane({
+const sidebarPane = pane({
     el: sidebar, handle: document.getElementById("sidebar-handle"),
     button: document.getElementById("sidebar-collapse"),
     key: "klein.sidebar", sizeName: "width", cssVar: "--sidebar-width", axis: "x", grow: 1,
@@ -944,9 +912,8 @@ function cardBounds(nodes) {
 
 // How long R, F and a blackboard focus fly the camera: no flight at all for a
 // reader who asked the system for reduced motion.
-const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 function cameraMs() {
-    return reducedMotion.matches ? 0 : 500;
+    return reducedMotion() ? 0 : 500;
 }
 
 // The scale at which a box (plus framePad all round) just fits the view.
@@ -1199,7 +1166,7 @@ function setPulses(markedRefs, firedRefs, moving) {
         pulseMarked = marked;
         paintPulses();
     }
-    if (pulseFiring && (!moving || reducedMotion.matches)) {
+    if (pulseFiring && (!moving || reducedMotion())) {
         gContainer.selectAll(".node-pulse.fire").classed("fire", false);
         pulseFiring = false;
     }
@@ -1578,9 +1545,11 @@ window.addEventListener("DOMContentLoaded", () => {
 // here: the modules as app.js imports them, and app.js's own state and
 // functions. Variables are accessors, so a read is current. A test can set
 // recordingSupport and swap render, requestRender, showTree or paintStatus:
-// app.js's own calls use the new one from then on.
+// app.js's own calls use the new one from then on. KleinDrawer is the
+// drawer as the tests name it: drawer.js, plus the clock's words (ui.js).
 Object.assign(window, {
-    KleinRenderers, KleinRecording, KleinCursor, KleinWindow, KleinView, KleinDrawer,
+    KleinRenderers, KleinRecording, KleinCursor, KleinWindow, KleinView,
+    KleinDrawer: { ...KleinDrawer, formatTime: KleinUI.formatTime, formatClock: KleinUI.formatClock },
     KleinTimeline, KleinOverview, kleinDebug, recordingStore, shownRecording, seek, frameTrack, svg,
     zoomBehavior, bbGroupEls, bbGroupOpen, renderBlackboards, resetBlackboards, banners,
     showBanner, hideBanner, sidebarWidth, visibleViewport, runningFrontier,

@@ -17,6 +17,7 @@ import * as C from "./cursor.js";
 import * as W from "./window.js";
 import * as V from "./view.js";
 import * as KleinDrawer from "./drawer.js";
+import { drag, formatClock, formatWindow } from "./ui.js";
 
 const TICK_SPACING = 100;           // px between axis labels, about
 const MARK = 3;                     // px: an outcome cap or a single mark
@@ -71,21 +72,12 @@ function timeAt(clientX) {
     return w.t0 + (clientX - rulerTrack.getBoundingClientRect().left) * w.span / trackWidth();
 }
 
-// The window's length: "10 s", "500 ms", "1.25 s", "200 µs", "10 min".
-function formatWindow(us) {
-    const short = (v) => String(Number(v.toPrecision(3)));
-    if (us < 1e3) return `${Math.round(us)} µs`;
-    if (us < 1e6) return `${short(us / 1e3)} ms`;
-    if (us < 6e7) return `${short(us / 1e6)} s`;
-    return `${short(us / 6e7)} min`;
-}
-
 // An axis label at robot time t for ticks `step` µs apart: the time of day,
 // "14:03:22" for whole seconds, else "03:22.5" with as many decimals as the
 // step needs, the µs grouped as in the Log ("03:22.201 030").
 function formatTick(t, step) {
-    if (step >= 1e6) return KleinDrawer.formatClock(t, 0);
-    return KleinDrawer.formatClock(t, Math.min(6, Math.ceil(-Math.log10(step / 1e6) - 1e-9)), false);
+    if (step >= 1e6) return formatClock(t, 0);
+    return formatClock(t, Math.min(6, Math.ceil(-Math.log10(step / 1e6) - 1e-9)), false);
 }
 
 // The 1-2-5 step giving labels about TICK_SPACING px apart, for a window
@@ -381,7 +373,7 @@ ruler.addEventListener("pointerdown", (event) => {
     event.preventDefault();
     W.hold(true);                   // the window holds still under the playhead
     seekTime(timeAt(event.clientX));
-    KleinDrawer.drag(ruler, event, (e) => seekTime(timeAt(e.clientX)), () => W.hold(false));
+    drag(ruler, event, (e) => seekTime(timeAt(e.clientX)), () => W.hold(false));
 });
 
 // The lanes: drag to pan the time axis; a click without a drag puts the
@@ -391,7 +383,7 @@ lanes.addEventListener("pointerdown", (event) => {
     const startX = event.clientX;
     const startT1 = W.get().t1;
     let panned = false;
-    KleinDrawer.drag(lanes, event, (e) => {
+    drag(lanes, event, (e) => {
         if (!panned && Math.abs(e.clientX - startX) < 3) return;
         panned = true;
         W.set(startT1 - (e.clientX - startX) * W.get().span / trackWidth());

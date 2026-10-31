@@ -127,7 +127,7 @@ function create() {
         zoomTo(next, pos.live && follow ? t1 : inView ? pos.t : t1 - span / 2);
     }
 
-    // Zoom to fit (⤢, and \ in drawer.js): the window is everything kept,
+    // Zoom to fit (⤢, and \ in transport.js): the window is everything kept,
     // the oldest record to the head, within LADDER's limits; it follows the
     // head again while live.
     function fit() {

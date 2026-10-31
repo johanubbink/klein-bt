@@ -35,12 +35,15 @@ The code:
   the banners and the sidebar's pane. `tree.js` is the tree canvas (cards,
   folding, the camera); `blackboard.js` the sidebar's blackboard panel and
   its links to the cards; `ui.js` the toolkit the views share (drags,
-  panels, writes, words); `renderers.js` formats blackboard values; `recording.js` and `cursor.js` mirror the recording (see
+  panels, writes, words); `renderers.js` formats blackboard values;
+  `recording.js` and `cursor.js` mirror the recording (see
   [Browser model](#browser-model)); `window.js` is the Timeline's window,
   which the Timeline and the overview both show and move; `view.js` decides
-  what each render shows (see [Rendering](#rendering)); `drawer.js`,
-  `timeline.js` and `overview.js` are the drawer, its Timeline tab and its
-  overview. They are native ES modules with no build step: `index.html`
+  what each render shows (see [Rendering](#rendering)). `drawer.js` is the
+  drawer itself (its pane, tabs, recorder pill and Save), and its parts are
+  `transport.js` (the transport row's buttons, clock and keys), `log.js`
+  (the Log tab), `timeline.js` (the Timeline tab) and `overview.js` (the
+  overview). They are native ES modules with no build step: `index.html`
   loads D3 as a classic script (the modules use its global `d3`) and
   `app.js` as a module, which imports the rest; each module imports what it
   uses and exports its interface. D3 is vendored so it works without
@@ -323,7 +326,8 @@ seen, as a pure data model (no asyncio, no ZeroMQ). The gateway feeds it (see
 
 One `websockets` server owns `--port`. It serves the static files over HTTP
 (`/`, `/styles.css`, `/app.js`, `/renderers.js`, `/recording.js`,
-`/cursor.js`, `/window.js`, `/view.js`, `/ui.js`, `/drawer.js`, `/timeline.js`, `/overview.js`,
+`/cursor.js`, `/window.js`, `/view.js`, `/ui.js`, `/tree.js`, `/blackboard.js`,
+`/drawer.js`, `/transport.js`, `/log.js`, `/timeline.js`, `/overview.js`,
 `/d3.v7.min.js`) and upgrades `/ws` to a WebSocket. Because both come from
 the same origin, the page just opens `ws://<same host:port>/ws`.
 
@@ -527,13 +531,16 @@ board panel's input is `KleinView.panel`'s:
   the sidebar, above the drawer: `#past-edge`). Which moment is shown is the
   drawer's clock, beside its **Go live** (see
   [The drawer](#the-drawer)).
-- **The drawer** (see [The drawer](#the-drawer)): `KleinDrawer.showRecording`
-  and `KleinDrawer.update(rec, pos)` run on every render (the drawer reads
-  `pos.mode` and keeps no clock of its own), then, once the cursor's tree is
+- **The drawer** (see [The drawer](#the-drawer)): `KleinDrawer.showRecording`,
+  `KleinTransport.update(rec, pos)` and `KleinLog.update(rec, pos)` run on
+  every render (they read `pos.mode` and keep no clock of their own), then,
+  once the cursor's tree is
   on the canvas, `KleinWindow.sync(rec, pos)` (the Timeline's window),
   `KleinTimeline.update(rec, pos, hierarchy)` and
-  `KleinOverview.update(rec, pos)`, which both paint that window. They move the cursor through one `seek(clock)`
-  (`KleinDrawer.connect`, `KleinTimeline.connect`, `KleinOverview.onSeek`),
+  `KleinOverview.update(rec, pos)`, which both paint that window. They move
+  the cursor through one `seek(clock)` (`KleinTransport.connect`,
+  `KleinTimeline.connect`, `KleinOverview.onSeek`; the Log's row clicks go
+  through the transport's, `KleinLog.onPick`),
   which sets the clock and asks for a render, and the window through
   `KleinWindow`'s moves, which repaint both at once (`onMove`); the
   Timeline's chevrons fold the canvas through `toggleFold` / `foldOthers`, the
@@ -602,7 +609,15 @@ full-height pane over the canvas's left edge, and behaves like the drawer
 ## The drawer
 
 A bottom drawer ([`klein/static/drawer.js`](../klein/static/drawer.js)) holds
-the recording views in two 48 px rows over a scrollable body:
+the recording views in two 48 px rows over a scrollable body. drawer.js is
+the drawer itself: the pane, the tabs and which one is on screen
+(`shownTab`, `selectedTab`), the recorder pill and Save, and what is kept in
+words (`keptSpan`, `droppedNote`). Its parts ask it what is on screen, and
+it knows none of them: the transport row's buttons, clock and keys
+([`transport.js`](../klein/static/transport.js), which makes the shared
+cursor's moves), the overview (`overview.js`), the Log
+([`log.js`](../klein/static/log.js)) and the Timeline (`timeline.js`). A
+tab switch tells the Log (`KleinDrawer.onTab`) before it renders.
 
 - the **transport row**, shared by both tabs: the collapse button,
   **|◀ ▶ ▶|**, `● Live` (or, in the past, **Go live ⏭**),
@@ -888,8 +903,8 @@ sidebar's width (see [The sidebar](#the-sidebar)).
     the running frontier into view, under the axis and its section's header.
 - **Keys.** The camera keys ignore presses inside the drawer, as inside the
   sidebar (F scrolls the Timeline only when pressed outside it). The
-  cursor's keys are one window `keydown` handler in drawer.js, each doing
-  what its button does, in either tab and folded:
+  cursor's keys are a table in transport.js (`KEYS`) behind one guard
+  (`ignored`), each doing what its button does, in either tab and folded:
 
   | Key | Does | Button |
   |---|---|---|

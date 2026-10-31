@@ -13,6 +13,8 @@ import * as KleinWindow from "./window.js";
 import * as KleinView from "./view.js";
 import * as KleinUI from "./ui.js";
 import * as KleinDrawer from "./drawer.js";
+import * as KleinLog from "./log.js";
+import * as KleinTransport from "./transport.js";
 import * as KleinTimeline from "./timeline.js";
 import * as KleinOverview from "./overview.js";
 import * as KleinTree from "./tree.js";
@@ -171,7 +173,8 @@ function seek(next) {
     requestRender({ boards: true });
 }
 // Arrows, so a render or requestRender a test swaps in reaches the drawer too.
-KleinDrawer.connect({ seek, render: () => render(), requestRender: () => requestRender(), showBanner });
+KleinDrawer.connect({ render: () => render(), requestRender: () => requestRender(), showBanner });
+KleinTransport.connect({ seek });
 KleinOverview.onSeek(seek);
 KleinTimeline.connect({
     seek,
@@ -245,7 +248,8 @@ function render() {
     // The past: amber canvas edge and blackboard note (styles.css).
     document.body.classList.toggle("viewing-past", view.viewingPast);
     document.body.classList.toggle("no-blackboard", view.noBoards);
-    KleinDrawer.update(view.pos && rec, view.pos);
+    KleinTransport.update(view.pos && rec, view.pos);
+    KleinLog.update(view.pos && rec, view.pos);
 
     if (view.tree && view.tree.id !== drawnTreeId) showTree(view.tree);
     // What the Timeline's window and its views show.
@@ -370,11 +374,13 @@ window.addEventListener("DOMContentLoaded", connectGatewayPipeline);
 // app.js's own calls use the new one from then on. A few names the tests
 // knew from app.js are now the canvas's (tree.js) or the blackboard panel's
 // (blackboard.js), and KleinDrawer is the drawer as the tests name it:
-// drawer.js, plus the clock's words (ui.js).
+// drawer.js, plus its Log's rows and its transport's Go live, and the clock's
+// words (ui.js).
 Object.assign(window, {
     KleinRenderers, KleinRecording, KleinCursor, KleinWindow, KleinView, KleinUI, KleinTree,
-    KleinBlackboard, KleinTimeline, KleinOverview,
-    KleinDrawer: { ...KleinDrawer, formatTime: KleinUI.formatTime, formatClock: KleinUI.formatClock },
+    KleinBlackboard, KleinLog, KleinTransport, KleinTimeline, KleinOverview,
+    KleinDrawer: { ...KleinDrawer, debugRows: KleinLog.debugRows, goLive: KleinTransport.goLive,
+                   formatTime: KleinUI.formatTime, formatClock: KleinUI.formatClock },
     kleinDebug, recordingStore, shownRecording, seek, frameTrack, banners, showBanner, hideBanner,
     sidebarWidth,
     svg: KleinTree.svg, zoomBehavior: KleinTree.zoomBehavior,

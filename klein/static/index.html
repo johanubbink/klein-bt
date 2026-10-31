@@ -88,7 +88,8 @@
         </div>
     </aside>
 
-    <!-- Right of the sidebar (--sidebar-width). Sized and filled by drawer.js. -->
+    <!-- Right of the sidebar (--sidebar-width). Sized by drawer.js and filled
+         by its parts: transport.js, overview.js, log.js and timeline.js. -->
     <section id="drawer" aria-label="Log and timeline">
         <div id="drawer-handle" role="separator" aria-orientation="horizontal"
              aria-label="Resize the drawer" title="Drag to resize · double-click to collapse"></div>
@@ -168,7 +169,7 @@
             </div>
         </div>
         <div id="drawer-body">
-            <!-- Only the rows in view exist (drawer.js); #log-rows is as tall
+            <!-- Only the rows in view exist (log.js); #log-rows is as tall
                  as all of them, so the scrollbar is the whole log. -->
             <div id="drawer-log" role="tabpanel" aria-labelledby="drawer-tab-log" hidden>
                 <div class="log-head" aria-hidden="true">

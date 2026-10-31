@@ -3,9 +3,10 @@
 // after the render's rewrites, the tree, the status and the blackboard
 // panel's input (frame, panel); each blackboard row's change marks
 // (rowMarks); what the Timeline's window shows (timelineWindow); and which
-// row the Log keeps at its top (anchorAfter). app.js, timeline.js and
-// drawer.js compute them and then apply them: the painters, the body
-// classes, the banners, the rows' classes, the lanes, the scroll position.
+// row the Log keeps at its top (anchorAfter). app.js, blackboard.js,
+// timeline.js and log.js compute them and then apply them: the painters, the
+// body classes, the banners, the rows' classes, the lanes, the scroll
+// position.
 // Pure: no DOM, no d3.
 // See docs/architecture.md, "Rendering" and "The drawer".
 

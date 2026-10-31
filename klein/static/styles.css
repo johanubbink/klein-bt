@@ -1254,7 +1254,7 @@ body.viewing-past .status-pill.running { animation: none; }
 #drawer-transport, #drawer-toolbar { overflow: hidden; }
 
 #drawer-body {
-    position: relative;         /* the offsetParent drawer.js measures rows from */
+    position: relative;         /* the offsetParent log.js measures rows from */
     flex: 1;
     min-height: 0;
     overflow: auto;
@@ -1264,7 +1264,7 @@ body.viewing-past .status-pill.running { animation: none; }
 }
 
 /* ---- Log tab ------------------------------------------------------------
-   One row per transition, in fixed 20 px rows so drawer.js can place the few
+   One row per transition, in fixed 20 px rows so log.js can place the few
    in view by index; the head stays put while the body scrolls under it. */
 #drawer-log { --log-columns: 128px 64px 140px minmax(120px, 220px) minmax(0, 1fr); }
 .log-head {

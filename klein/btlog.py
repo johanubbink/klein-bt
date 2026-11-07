@@ -102,6 +102,51 @@ def export_run(run, xml):
     return bytes(out)
 
 
+class _Sidecar:
+    """The ``.bb.jsonl`` lines of one run, and the values they hold so far."""
+
+    def __init__(self, first, tree_id):
+        self.first = first
+        self.lines = [json.dumps({"klein_blackboard": 1, "first_timestamp": first,
+                                  "tree_id": tree_id})]
+        self.values = {}                    # (board, key) -> JSON text, as of the last line
+
+    def line(self, t, board, key, text):
+        """One change line; ``text`` None is a removal."""
+        entry = json.dumps({"t": t - self.first, "board": board, "key": key})[:-1]
+        if text is None:
+            del self.values[board, key]
+            self.lines.append(f'{entry}, "removed": true}}')
+        else:
+            self.values[board, key] = text  # the stored JSON text goes in as it is
+            self.lines.append(f'{entry}, "value": {text}}}')
+
+    def rebase(self, base, at_base):
+        """A segment's opening lines at ``base``: turn the values so far into
+        ``at_base`` (removals first, then the values that differ)."""
+        for name in [name for name in self.values if at_base.get(name) is None]:
+            self.line(base, *name, None)
+        for name, text in at_base.items():
+            if text is not None and self.values.get(name) != text:
+                self.line(base, *name, text)
+
+    def encode(self):
+        """The lines as ``.bb.jsonl`` bytes."""
+        return "".join(entry + "\n" for entry in self.lines).encode("utf-8")
+
+
+def _split_at(track, base):
+    """A blackboard track's changes as ``(at_base, later)``: the values as of
+    ``base`` by ``(board, key)``, and the changes after it in order."""
+    at_base, later = {}, []
+    for t, board, key, text in track.changes():
+        if t <= base:
+            at_base[board, key] = text
+        else:
+            later.append((t, board, key, text))
+    return at_base, later
+
+
 def export_blackboard(run, tree_id):
     """One tree run's blackboard history as ``.bb.jsonl`` bytes: a header line,
     then one line per change at its offset from the run's retained start.
@@ -111,37 +156,17 @@ def export_blackboard(run, tree_id):
     after eviction and across restarts.
     """
     first = run[0].t_start
-    lines = [json.dumps({"klein_blackboard": 1, "first_timestamp": first, "tree_id": tree_id})]
-    values = {}                             # (board, key) -> JSON text, as of the last line
-
-    def line(t, board, key, text):
-        entry = json.dumps({"t": t - first, "board": board, "key": key})[:-1]
-        if text is None:
-            del values[board, key]
-            lines.append(f'{entry}, "removed": true}}')
-        else:
-            values[board, key] = text       # the stored JSON text goes in as it is
-            lines.append(f'{entry}, "value": {text}}}')
-
+    sidecar = _Sidecar(first, tree_id)
     for segment in run:
         track = segment.blackboard
         if track.t_start is None:
             continue
         base = max(track.t_start, first)
-        at_base, later = {}, []
-        for t, board, key, text in track.changes():
-            if t <= base:
-                at_base[board, key] = text
-            else:
-                later.append((t, board, key, text))
-        for name in [name for name in values if at_base.get(name) is None]:
-            line(base, *name, None)
-        for name, text in at_base.items():
-            if text is not None and values.get(name) != text:
-                line(base, *name, text)
+        at_base, later = _split_at(track, base)
+        sidecar.rebase(base, at_base)
         for change in later:
-            line(*change)
-    return "".join(entry + "\n" for entry in lines).encode("utf-8")
+            sidecar.line(*change)
+    return sidecar.encode()
 
 
 def load_btlog(log, layout, sidecar=None):

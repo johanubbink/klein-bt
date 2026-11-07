@@ -17,8 +17,8 @@ left and the value tinted amber. While live or playing, the mark fades out
 over about two seconds; paused on a moment (a Log row, the Timeline's
 playhead), the keys that changed within the last sample (0.5 s) keep a steady
 mark. A key that changes at nearly every sample (4 or more changes in 3 s,
-such as a position) is streaming: it gets a steady dim edge and a `~` after
-its value instead, so the panel stays calm. This holds with recording off
+such as a position) is streaming: it gets a steady dim edge instead, so the
+panel stays calm. This holds with recording off
 (`--record-buffer 0`) too, where the dashboard counts the changes it sees.
 Right after a tree swap or a reconnect, such keys briefly (about 1.5 s) look
 freshly changed before they settle, since the count starts over. Going back

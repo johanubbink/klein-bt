@@ -203,7 +203,7 @@ class RenderTest(DashboardCase):
                     # bb-stream. Watch until two samples were painted that
                     # late; if the gateway's samples stalled (their own `t`
                     # > 1 s apart), watch once more.
-                    for attempt in range(2):
+                    for _attempt in range(2):
                         b.page.evaluate(_WATCH_MARKS)
                         b.page.wait_for_function(
                             "() => new Set(__bbMarks.filter(m => m[1] === 'tick'"

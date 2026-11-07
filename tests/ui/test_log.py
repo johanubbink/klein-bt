@@ -946,7 +946,7 @@ class HundredThousandRowsTraceTest(DashboardCase):
         page.evaluate("() => { const loop = () => requestAnimationFrame(loop); loop(); }")
         # A freeze is the page's own work. If its thread ran for under half of
         # a long task or frame gap, the machine stalled Chrome: trace again.
-        for attempt in range(2):
+        for _attempt in range(2):
             frames, tasks, wheeled = self.traced_scroll()
             a, b = max(zip(frames, frames[1:]), key=lambda g: g[1] - g[0])
             ran = sum(cpu * max(0, min(t + d, b) - max(t, a)) / d for t, d, cpu in tasks if d)

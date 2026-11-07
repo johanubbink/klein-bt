@@ -302,7 +302,7 @@ class PortsTest(unittest.TestCase):
                     value = node["ports"][b["port"]]
                     for start, end in b["at"]:
                         spans += 1
-                        with self.subTest(label, uid=node["uid"], binding=b):
+                        with self.subTest(label, uid=node["uid"], binding=b):  # noqa: B023 (walk runs in-loop)
                             self.assertTrue(0 <= start < end <= len(value))
                             name = value[start:end]
                             if name[:1] == "{" and name[-1:] == "}":

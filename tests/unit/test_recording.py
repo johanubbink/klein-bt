@@ -313,7 +313,7 @@ class EvictionTest(unittest.TestCase):
 
         rec = Recording(keep_us=1_000_000, bb_max_bytes=100_000)
         seg = rec.begin_segment(None, 0, bytes(4))
-        for t in range(0, 50):
+        for t in range(50):
             rec.add_blackboard(t, {"Main": {"path": "x" * 30_000 + str(t)}})
             rec.evict(t)
         self.assertTrue(rec.blackboard_capped)

@@ -239,7 +239,7 @@ class TransitionRecorderTest(unittest.TestCase):
     def test_the_buffer_drops_the_oldest_beyond_its_cap(self):
         self.recorder.start()
         before, after = {1: 1}, {1: 2}
-        for i in range(TRANSITION_BUFFER_MAX + 50):
+        for _ in range(TRANSITION_BUFFER_MAX + 50):
             self.clock.now += 0.001
             self.recorder.record(before, after, [1])
             before, after = after, before

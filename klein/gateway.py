@@ -203,9 +203,9 @@ class KleinGateway:
             text = sidecar.read_text(encoding="utf-8") if sidecar.is_file() else None
             self.recording = load_btlog(log, self.tree, text)
         except IndexError:                  # a record's uid past the state's end
-            raise BtlogError("a record names a node uid the file's tree doesn't have")
+            raise BtlogError("a record names a node uid the file's tree doesn't have") from None
         except (ValueError, KeyError, TypeError) as exc:     # the sidecar, not UTF-8 or not ours
-            raise ValueError(f"{sidecar.name} is not a klein blackboard sidecar ({exc!r})")
+            raise ValueError(f"{sidecar.name} is not a klein blackboard sidecar ({exc!r})") from exc
         self._file = path.name
         self.streamer = Streamer(self.recording, websockets.broadcast, source="file",
                                  name=path.name)

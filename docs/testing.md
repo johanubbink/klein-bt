@@ -124,8 +124,10 @@ Groot2 request on its own socket, for driving a target without klein.
   `transitions` or `payload`). `request_sequence(ignore="B")` gives e.g.
   `"TrSSt"`; `requests("r")` has each `arg`; `transitions()`, `wait_for()`.
 - **`GatewayProbe(robot_port, debug=False)`**: `python -m klein.cli` on a
-  free port. `fetch(path)`; `watch()` holds a dashboard WebSocket open and
-  collects frames; `debug_state()` reads `GET /debug/state`, which needs
+  free port; `restart()` gives a new gateway on the same port, and
+  `static_dir` (or `restart(static_dir=)`) serves a test's changed copy of
+  the dashboard. `fetch(path)`; `watch()` holds a dashboard WebSocket open
+  and collects frames; `debug_state()` reads `GET /debug/state`, which needs
   `debug=True` (it 404s without `--debug`, and then returns `None`);
   `require_debug_state()` skips instead. `poll_interval=0.01` launches the
   same CLI with a faster status poll; the mock steps once per poll, so its

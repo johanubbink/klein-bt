@@ -390,9 +390,32 @@ The server listens on `--host` (default `127.0.0.1`, this machine only;
 file needs no list: `index.html` loads the vendored D3 and `app.js`, a
 native ES module that imports the rest of the dashboard. A missing
 `index.html` is served as a stub page, and a missing `index.html`, D3 or
-`app.js` is warned about at startup. Anything else is a 404. The gateway
-hands `Routes` the recording and the `/debug/state` dump as providers, so
-the tests serve a bare `Recording` with no gateway.
+`app.js` is warned about at startup. `/ping` answers `klein <build>` (plain
+text): the build is the first 12 hex digits of a sha256 over the static
+files' names and bytes, which `Routes.load()` also fills into index.html's
+`<meta name="klein-build">`. It names the dashboard's files rather than the
+version, which an editable install keeps while its files change. With
+`--debug`, `/debug/state` is a JSON dump for the test harness. Anything
+else is a 404. The gateway hands `Routes` the recording and the
+`/debug/state` dump as providers, so the tests serve a bare `Recording`
+with no gateway.
+
+The page opens its WebSocket straight away on load, but when the WebSocket
+closes it reconnects only after `GET /ping` has answered `klein` and the
+build its page was served with (every 2 s until then; `reconnectWhenUp` in
+`app.js`). An answer of `klein` with another build is a klein serving a
+changed dashboard: the page reloads instead of running its old code against
+it. Any other answer (an error, a timeout, another app on the port, a 403)
+means: keep asking.
+
+Firefox delays a WebSocket to an endpoint (address, port and path) that
+recently failed: 200-400 ms, growing 1.5x per failure up to a minute,
+cleared only by a successful connect, and new tabs inherit it. Retrying the WebSocket itself
+while klein was down built that delay up, so a dashboard opened after a
+restart could wait up to a minute; failed HTTP requests don't count. Firefox
+also lets only one WebSocket per IP address be connecting at a time, which
+klein can't avoid: another app's dead WebSocket on `localhost` can still
+delay klein's by up to one of its backoffs.
 
 While recording, the same port serves the recording as downloads, per tree
 run or all in one `.zip` ([protocol.md](protocol.md#saving-a-recording) has

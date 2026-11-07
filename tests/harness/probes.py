@@ -250,6 +250,8 @@ class GatewayProbe(Process):
     without it the route 404s and this returns ``None`` (use
     ``require_debug_state()`` to skip instead). ``poll_interval`` (seconds)
     speeds up the status poll, and so the mock, which steps once per poll.
+    ``static_dir`` serves the dashboard from another directory (a test's
+    changed copy of ``klein/static``); ``restart(static_dir=)`` changes it.
     """
 
     # ``poll_interval`` runs the same CLI with the gateway's status poll
@@ -259,8 +261,10 @@ class GatewayProbe(Process):
 
     name = "gateway"
 
-    def __init__(self, robot_port, debug=False, extra_args=(), poll_interval=None):
+    def __init__(self, robot_port, debug=False, extra_args=(), poll_interval=None,
+                 static_dir=None):
         super().__init__()
+        self.static_dir = static_dir
         self.robot_port = robot_port
         self.args = (["--debug"] if debug else []) + list(extra_args)
         self.launcher = (["-m", "klein.cli"] if poll_interval is None
@@ -271,7 +275,30 @@ class GatewayProbe(Process):
         return f"http://127.0.0.1:{self.port}"
 
     def start(self, timeout=10.0):
-        argv = lambda port: [PYTHON, *self.launcher, "--robot-host", "127.0.0.1",
+        self._start(free_port, timeout)
+        return self
+
+    def restart(self, timeout=10.0, static_dir=None):
+        """A new gateway process on the *same* port (so no port retry),
+        serving ``static_dir`` if given, else the same dashboard as before."""
+        self.stop()
+        self.static_dir = static_dir or self.static_dir
+        self._start(None, timeout)
+        return self
+
+    def _launch_args(self):
+        """``self.launcher``, with ``gateway.STATIC_DIR`` set first when
+        ``static_dir`` is: a module setting, deliberately not a flag."""
+        if self.static_dir is None:
+            return self.launcher
+        code = (self.launcher[1] if self.launcher[0] == "-c"
+                else "from klein import cli; cli.main_cli()")
+        return ["-c", f"from klein import gateway; gateway.STATIC_DIR = {str(self.static_dir)!r}; "
+                + code, *self.launcher[2:]]
+
+    def _start(self, pick_port, timeout):
+        launcher = self._launch_args()
+        argv = lambda port: [PYTHON, *launcher, "--robot-host", "127.0.0.1",
                              "--robot-port", str(self.robot_port), "--port", str(port),
                              "--no-browser", *self.args]
 
@@ -290,8 +317,7 @@ class GatewayProbe(Process):
                 time.sleep(0.05)
             raise RuntimeError(f"gateway never served / on port {port}\n{self.log()[-2000:]}")
 
-        launch(self, argv, free_port, ready=ready)
-        return self
+        launch(self, argv, pick_port, ready=ready)
 
     def fetch(self, path, timeout=5.0):
         """``(status, headers, body_bytes)`` for a GET; HTTP errors are returned, not raised."""

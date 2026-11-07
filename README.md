@@ -15,7 +15,7 @@ klein isn't on PyPI yet, so install it from GitHub with
 uv tool install git+https://github.com/johanubbink/klein-bt.git
 ```
 
-uv fetches a newer Python by itself if yours is older than the 3.9 klein
+uv fetches a newer Python by itself if yours is older than the 3.10 klein
 needs. [pipx](https://pipx.pypa.io) works too:
 
 ```bash

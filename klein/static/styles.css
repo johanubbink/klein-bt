@@ -512,7 +512,7 @@ body.no-blackboard #bb-past-note { display: none; }     /* an opened file withou
    tinted --changed, the amber the tree uses for RUNNING. Live or playing, both
    fade out once (bb-fresh); paused on a moment, they hold while the change is
    under one sample old (bb-mark). A key that changes at nearly every sample
-   (bb-stream) is not news each time: a steady dim edge and a "~" instead. */
+   (bb-stream) is not news each time: a steady dim edge instead. */
 .bb-row::before {
     content: "";
     position: absolute;
@@ -525,15 +525,6 @@ body.no-blackboard #bb-past-note { display: none; }     /* an opened file withou
 .bb-row.bb-mark::before { opacity: 1; }
 .bb-row.bb-mark .bb-value { color: var(--changed); }
 .bb-row.bb-stream::before { opacity: 0.35; }
-/* The "~" column is kept on every row, so a key that starts streaming doesn't
-   truncate its value further, and it stays clear of a value filling its cell. */
-.bb-row::after {
-    content: "";
-    flex: 0 0 1ch;
-    margin-left: -4px;
-    color: var(--text-muted);
-}
-.bb-row.bb-stream::after { content: "~"; }
 @keyframes fade-out {
     from { opacity: 1; }
     to   { opacity: 0; }

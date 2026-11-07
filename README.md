@@ -66,7 +66,7 @@ you trust, or use an SSH tunnel instead
 - **Layout** switches between a vertical and a horizontal tree.
 - The **Blackboards** list shows every subtree's values. A value that just
   changed gets a thin amber edge that fades; a key that changes all the time
-  (a position, a counter) gets a steady dim edge and a `~` instead. Click a
+  (a position, a counter) gets a steady dim edge instead. Click a
   row to expand it, or hover a board to find its node in the tree. See
   [docs/blackboards.md](https://github.com/johanubbink/klein-bt/blob/main/docs/blackboards.md) for how values are shown.
 - Hover a key to see which nodes use it: writers outlined solid, readers

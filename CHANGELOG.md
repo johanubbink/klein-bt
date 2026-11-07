@@ -11,6 +11,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `klein-bt --version`.
 
 ### Changed
+- **No more `~` on streaming blackboard keys.** A key that changes all the
+  time keeps just its steady dim edge, and every row's value gets the width
+  the `~` column took.
 - **The dashboard receives only blackboard changes.** klein sends the full
   blackboard once (on connect, and for a new tree), then just the keys each
   poll changed or removed, instead of every value twice a second.

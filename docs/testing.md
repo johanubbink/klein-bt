@@ -64,6 +64,30 @@ The first run that needs t11 builds it (~4 s, cached in `tests/harness/.build/`)
   `btlog_ref.py` shares no code with `klein/btlog.py`.
 - No assertion depends on a screenshot.
 
+## Lint and complexity — `scripts/check.py`
+
+```bash
+python scripts/check.py               # ruff, then a list of complexity hotspots
+python scripts/check.py --diff main   # ruff, then the complexity ratchet vs main
+```
+
+- **ruff** lints `klein/`, `tests/` and `scripts/` with the rules in
+  `pyproject.toml` (bugs and dead weight, not style: there is no formatter).
+  It must be clean.
+- **Complexity**: cognitive complexity (complexipy) for klein's own Python,
+  cyclomatic complexity (lizard) for the dashboard's JS; both limits are 15,
+  set at the top of `check.py`. Tests aren't measured.
+- Without `--diff` the functions over a limit are listed as hotspots, not
+  failures. With `--diff REF` they are a ratchet: a changed file's function
+  over its limit fails if it is new or more complex than at the merge base.
+  So the existing hotspots don't block anything, but nothing gets worse; a
+  change that touches one is a good moment to split it.
+- CI runs the ratchet against a PR's base branch, and the plain check on
+  pushes to main.
+
+The tools are in the `dev` extras. Claude Code also runs ruff on every Python
+file it edits (`.claude/hooks/ruff_edited.py`).
+
 ## The harness — `tests/harness/`
 
 Every process a target or probe starts runs this checkout (`python -m

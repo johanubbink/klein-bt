@@ -8,6 +8,7 @@ tested in test_recorder.py.
 re-handshake and the recording live inside them, against a ``FakeRobot`` link
 rather than a socket.
 """
+import argparse
 import asyncio
 import contextlib
 import io
@@ -664,7 +665,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(cli._duration_us("30"), 30_000_000)
         self.assertEqual(cli._duration_us("0"), 0)          # recording off
         for bad in ("abc", "-5m", "", "inf", "nan", "infm"):
-            with self.subTest(bad), self.assertRaises(Exception):
+            with self.subTest(bad), self.assertRaises(argparse.ArgumentTypeError):
                 cli._duration_us(bad)
 
     def gateway_for(self, *argv):

@@ -497,7 +497,7 @@ class BrowserProbe:
         try:
             from playwright.sync_api import sync_playwright
         except ImportError:
-            raise unittest.SkipTest("Playwright not installed (pip install -e '.[dev]')")
+            raise unittest.SkipTest("Playwright not installed (pip install -e '.[dev]')") from None
         self._pw = sync_playwright().start()
         errors = []
         for kwargs in ({"channel": "chrome"}, {}):

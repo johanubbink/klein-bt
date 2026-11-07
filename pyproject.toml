@@ -47,7 +47,8 @@ klein-bt-mock = "klein.mock_robot:main"
 
 [project.optional-dependencies]
 # playwright: the browser checks in tests/ (they skip without it).
-dev = ["build", "twine", "playwright"]
+# ruff, complexipy, lizard: scripts/check.py (lint + complexity).
+dev = ["build", "twine", "playwright", "ruff", "complexipy", "lizard"]
 
 [tool.setuptools]
 # Only ship the klein package; the sibling test suite stays out of the wheel.
@@ -61,3 +62,20 @@ version = { attr = "klein.__version__" }
 [tool.setuptools.package-data]
 # Bundle the dashboard web assets (and the vendored D3) so they ship on pip install.
 klein = ["static/*"]
+
+[tool.ruff]
+target-version = "py310"
+extend-exclude = ["tests/harness/.build"]
+
+[tool.ruff.lint]
+# Bugs and dead weight, not style: there is no formatter, so no line length.
+select = ["E", "F", "W", "B", "SIM", "PIE"]
+ignore = [
+    "E501",    # line length: no formatter
+    "E731",    # `f = lambda`: used on purpose for small local helpers
+    "E741",    # `l` / `I` names
+    "B905",    # zip() without strict=: lengths are equal by construction
+    "SIM105",  # try/except/pass with a comment reads better than contextlib.suppress
+    "SIM115",  # long-lived file handles (truth log, spawned process logs)
+    "SIM117",  # nested `with`: kept where it mirrors the setup's structure
+]

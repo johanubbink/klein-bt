@@ -54,6 +54,22 @@ _LOG_TYPES = {".btlog": "application/octet-stream", ".bb.jsonl": "application/x-
 _LOG_ROUTES = ("/log/runs", "/log.zip", *(f"/log{suffix}" for suffix in _LOG_SUFFIXES))
 
 
+def same_origin(headers):
+    """Whether a ``/ws`` upgrade comes from the dashboard's own page. A
+    browser sends ``Origin`` with every WebSocket, and any page may open one
+    to any host, so without this check a site in another tab could read the
+    robot's telemetry from ``localhost``. The origin must name the host and
+    port the request was sent to. No ``Origin`` is a client that isn't a
+    browser (a script, the tests), which no web page can impersonate."""
+    origin = headers.get("Origin")
+    if origin is None:
+        return True
+    host = headers.get("Host")
+    url = urlsplit(origin)
+    return (host is not None and url.scheme in ("http", "https")
+            and url.netloc.lower() == host.lower())
+
+
 def http_response(status, body, content_type, attachment=None):
     """A whole HTTP response, never cached. ``attachment`` is a filename: the
     browser saves the body under it."""
@@ -187,14 +203,16 @@ class Routes:
                       file=sys.stderr)
         self._static.setdefault("/index.html", (INDEX_FALLBACK, CONTENT_TYPES[".html"]))
 
-    def handle(self, target):
+    def handle(self, target, headers=None):
         """The answer to ``GET target`` (a path, with any query): a
         ``Response``, an awaitable of one (a download, which exports off the
         event loop), or None for ``/ws``, which websockets then upgrades to a
-        WebSocket."""
+        WebSocket, unless ``headers`` show another site's page asking (403)."""
         url = urlsplit(target)
         path = url.path
         if path == "/ws":
+            if headers is not None and not same_origin(headers):
+                return http_response(403, b"cross-origin WebSocket refused", _TEXT)
             return None
         if path == "/debug/state" and self._debug_state is not None:
             return http_response(200, json.dumps(self._debug_state()).encode(),

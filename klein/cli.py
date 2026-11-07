@@ -31,14 +31,19 @@ def _duration_us(text):
     return round(value * (scale or 1) * 1_000_000)
 
 
-def _port_available(port):
-    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+def _port_available(host, port):
+    try:
+        family, kind, _proto, _name, address = socket.getaddrinfo(
+            host, port, type=socket.SOCK_STREAM)[0]
+    except socket.gaierror:
+        return True             # an unknown --host: let the server's bind report it
+    probe = socket.socket(family, kind)
     # Match the asyncio server's bind semantics (SO_REUSEADDR): reject a port
     # only when a live listener holds it, not when harmless TIME_WAIT sockets
     # linger from a just-closed session (which would block an immediate restart).
     probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
-        probe.bind(("0.0.0.0", port))
+        probe.bind(address)
         return True
     except OSError:
         return False
@@ -55,6 +60,10 @@ def main_cli():
                         help="IP address of the C++ robot node (default: 127.0.0.1)")
     parser.add_argument("--robot-port", type=int, default=1667,
                         help="ZeroMQ REQ/REP port on the robot (default: 1667)")
+    parser.add_argument("--host", default="127.0.0.1",
+                        help="interface to serve the dashboard on; 0.0.0.0 lets other "
+                             "machines open it, with no password (default: 127.0.0.1, "
+                             "this machine only)")
     parser.add_argument("--port", type=int, default=8080,
                         help="port for the klein dashboard + telemetry server (default: 8080)")
     parser.add_argument("--no-browser", action="store_true",
@@ -76,7 +85,7 @@ def main_cli():
         # Size caps are Recording's defaults: 200 MiB in all, 64 MiB of it blackboard.
         recording = Recording(keep_us=args.record_buffer)
     gateway = KleinGateway(args.robot_host, args.robot_port, args.port,
-                           recording=recording, debug=args.debug)
+                           recording=recording, debug=args.debug, host=args.host)
     if args.open is not None:
         try:
             trailing = gateway.open_file(args.open)
@@ -87,7 +96,7 @@ def main_cli():
             print(f"[klein] {args.open}: ignored a partial last record "
                   f"({trailing} byte{'s' if trailing > 1 else ''}).")
 
-    if not _port_available(args.port):
+    if not _port_available(args.host, args.port):
         print(f"[klein] port {args.port} is already in use — try a different --port.",
               file=sys.stderr)
         sys.exit(1)
@@ -98,7 +107,9 @@ def main_cli():
         print(f"  file      : {args.open} (no robot)")
     else:
         print(f"  robot     : tcp://{args.robot_host}:{args.robot_port}")
-    print(f"  dashboard : http://localhost:{args.port}")
+    print(f"  dashboard : {gateway.url}")
+    if args.host not in ("127.0.0.1", "localhost", "::1"):
+        print(f"  listening : {args.host}:{args.port}, open to other machines, no password")
     print()
 
     try:

@@ -276,6 +276,15 @@ class ExportBlackboardTest(unittest.TestCase):
         self.assertIn({"t": b.t_begin + 100 - T0, "board": "Main", "key": "only_before",
                        "removed": True}, lines)
 
+    def test_a_segment_without_samples_does_not_end_the_sidecar(self):
+        tree = tree_layout("Main", 3)
+        rec = Recording()
+        rec.begin_segment(tree, T0, bytes(4))               # no blackboard sample
+        b = rec.begin_segment(tree, T0 + 1_000_000, bytes(4))
+        rec.add_blackboard(b.t_begin + 100, {"Main": {"n": 7}})
+        _, lines = read_sidecar(export_blackboard(rec.runs()[0], "Main"))
+        self.assertEqual(sidecar_at(lines, b.t_begin + 100 - T0), {"Main": {"n": 7}})
+
 
 def serving(rec):
     """The routes of a gateway recording into ``rec`` (None: recording off)."""

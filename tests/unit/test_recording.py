@@ -137,6 +137,20 @@ class DiffTest(unittest.TestCase):
             with self.subTest(label):
                 self.assertEqual(diff_to_transitions(bytes(current), bytes(target)), expected)
 
+    def test_equivalent_matches_a_plain_0_to_any_idle_value_only(self):
+        cases = [
+            ("same bytes", [1, 13, 0], [1, 13, 0], True),
+            ("plain 0 vs idle", [0], [12], True),
+            ("idle vs plain 0", [11], [0], True),
+            ("plain 0 vs was idle, either side", [0, 10], [10, 0], True),
+            ("different idle values", [11], [12], False),
+            ("live vs idle after it", [1], [11], False),
+            ("different lengths", [0, 0], [0], False),
+        ]
+        for label, a, b, expected in cases:
+            with self.subTest(label):
+                self.assertIs(equivalent(bytes(a), bytes(b)), expected)
+
 
 class SegmentTest(unittest.TestCase):
     def setUp(self):
@@ -170,9 +184,14 @@ class SegmentTest(unittest.TestCase):
             self.assertEqual(got, [(seq,) + self.records[seq] for seq in range(1000, 1100)])
             self.assertEqual(len(list(self.seg.iter_records(0, 5000))), 5000)
 
-    def test_state_at_seq_after_evicting_the_first_chunks(self):
+    def test_evicting_the_first_chunks_keeps_lookups_and_the_byte_count(self):
+        def chunk_bytes():
+            return sum(c.nbytes for c in self.seg.chunks)
+
+        self.assertEqual(self.seg.transition_bytes, chunk_bytes())
         now = self.seg.chunks[1].ts[-1] + 1 + self.rec.keep_us
         self.rec.evict(now)
+        self.assertEqual(self.seg.transition_bytes, chunk_bytes())
         self.assertEqual(self.seg.start_seq, 2 * CHUNK_SIZE)
         for seq in range(5001):
             expected = self.brute[seq] if seq >= 2 * CHUNK_SIZE else None
@@ -182,6 +201,25 @@ class SegmentTest(unittest.TestCase):
         for t in range(self.seg.t_start, self.records[-1][0] + 2, 97):
             self.assertEqual(self.seg.state_at(t),
                              brute_state_at(self.baseline, self.records, t), t)
+
+    def test_a_snapshot_is_unchanged_by_later_appends_samples_and_evictions(self):
+        self.rec.add_blackboard(self.records[100][0], {"Main": {"k": 1}})
+        snap = self.seg.snapshot()
+        times = [self.records[i][0] for i in (0, 2000, 4500, 4999)] + [self.records[-1][0] + 10**6]
+
+        def observed(seg):
+            return (seg.head_seq, list(seg.iter_records(seg.start_seq, seg.head_seq)),
+                    [seg.state_at(t) for t in times], [seg.state_at_seq(s) for s in (0, 4500)],
+                    seg.blackboard.changes())
+
+        before = observed(snap)
+        t = self.records[-1][0]
+        self.rec.append([(t + i, i % 20, 1 + i % 4) for i in range(1, CHUNK_SIZE)])
+        self.rec.add_blackboard(t + CHUNK_SIZE, {"Main": {"k": 2}})
+        self.rec.evict(self.seg.chunks[1].ts[-1] + 1 + self.rec.keep_us)
+        self.assertEqual(self.seg.start_seq, 2 * CHUNK_SIZE)
+        self.assertEqual(observed(snap), before)
+        self.assertEqual(before[0], 5000)
 
     def test_seq_at_time_ties_and_bounds(self):
         seg = Segment(0, None, 0, bytes(3))
@@ -261,6 +299,19 @@ class EvictionTest(unittest.TestCase):
             self.assertEqual(seg.start_seq, seg.chunks[0].seq0)
             self.assertEqual(seg.state_at_seq(seg.start_seq), seg.chunks[0].keyframe)
             self.assertIsNone(seg.state_at_seq(seg.start_seq - 1))
+
+    def test_the_open_segments_growing_chunk_is_evicted_only_once_it_ends(self):
+        for label, kwargs in (("over the total cap", {"max_bytes": 100}),
+                              ("before the window", {"keep_us": 1000})):
+            with self.subTest(label):
+                rec = Recording(**kwargs)
+                seg = rec.begin_segment(None, 0, bytes(2))
+                rec.append([(i, i % 2, 1 + i % 4) for i in range(100)])
+                rec.evict(10**6)
+                self.assertEqual((seg.start_seq, len(seg.chunks)), (0, 1))
+                rec.end_segment(10**6)
+                rec.evict(10**6)
+                self.assertEqual(seg.chunks, [])
 
     def test_a_big_blackboard_cannot_push_out_transitions(self):
         with self.subTest("blackboard sub-cap"):

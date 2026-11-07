@@ -54,6 +54,12 @@ class DamagedFileTest(unittest.TestCase):
         with self.subTest("xml length past the end"):
             with self.assertRaises(BtlogError):
                 read_btlog(GROOT2[:19] + len(GROOT2).to_bytes(4, "little") + GROOT2[23:])
+        header = write_btlog("<root/>", 123, [])        # the XML, then the 8-byte timestamp
+        with self.subTest("cut off inside the first timestamp"):
+            with self.assertRaises(BtlogError):
+                read_btlog(header[:-3])
+        with self.subTest("no records: the xml and timestamp end the file"):
+            self.assertEqual(read_btlog(header), ("<root/>", 123, [], 0))
 
 
 class RoundTripTest(unittest.TestCase):

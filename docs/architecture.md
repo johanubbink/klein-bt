@@ -360,7 +360,9 @@ seen, as a pure data model (no asyncio, no ZeroMQ). The gateway feeds it (see
   applied before the total cap, so the blackboard can't push out transitions
   that fit beside it. Eviction drops the oldest changes but keeps each key's
   latest change at or before the new start, so `at(t)` stays correct for
-  every retained time.
+  every retained time. Each sub-cap step drops at least one change (an ended
+  segment's bases too) or stops, once the oldest segment with a blackboard is
+  open and holds only bases, so samples that share a timestamp can't stall it.
 - **Capped flags**: `Recording.transitions_capped` and `blackboard_capped`
   say that a size cap, not the keep window, decides how far back that
   history reaches: set when the cap evicts, cleared once the window's cutoff

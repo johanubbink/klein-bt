@@ -170,7 +170,7 @@ class BlackboardTrack {
     // Python's evict_before: drop changes older than t, keeping per key the
     // latest one at or before t.
     evictBefore(t) {
-        if (this.tStart === null || t <= this.tStart) return;
+        if (this.tStart === null || t < this.tStart) return;
         this.tStart = t;
         for (const [name, entry] of this.keys) {
             let i = bisectRight(entry.ts.length, t, (j) => entry.ts[j]) - 1;

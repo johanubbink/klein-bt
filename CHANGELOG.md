@@ -26,6 +26,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   poll changed or removed, instead of every value twice a second.
 
 ### Fixed
+- **The blackboard size cap can't stall klein.** Two blackboard samples at
+  the same microsecond could make eviction loop forever; it now always makes
+  progress.
 - **Reduced motion now stops the canvas's animations**: a running card's
   pulse, the writer pulse and the focus flash kept animating when the
   system asked for reduced motion.

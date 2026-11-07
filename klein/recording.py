@@ -308,10 +308,11 @@ class BlackboardTrack:
 
     def evict_before(self, t):
         """Drop changes older than ``t``, keeping per key the latest one at or
-        before ``t`` so ``at`` stays correct from ``t`` on."""
-        if self.t_start is None or t <= self.t_start:
-            return
+        before ``t`` so ``at`` stays correct from ``t`` on. True if any went."""
+        if self.t_start is None or t < self.t_start:
+            return False
         self.t_start = t
+        dropped = False
         for name in list(self._ts):
             times, values = self._ts[name], self._values[name]
             i = bisect.bisect_right(times, t) - 1
@@ -320,16 +321,16 @@ class BlackboardTrack:
             if i > 0:
                 self.nbytes -= sum(len(text or "") for text in values[:i])
                 del times[:i], values[:i]
+                dropped = True
             if not times:
                 del self._ts[name], self._values[name]
+        return dropped
 
     def evict_oldest(self):
-        """Drop the oldest change that isn't some key's base. False if none is left."""
+        """Drop the oldest change that isn't some key's base. False if none
+        went (none is left), so a caller looping on it always ends."""
         nexts = [times[1] for times in self._ts.values() if len(times) > 1]
-        if not nexts:
-            return False
-        self.evict_before(min(nexts))
-        return True
+        return bool(nexts) and self.evict_before(min(nexts))
 
     def snapshot(self):
         """A copy that later samples and evictions leave as it is."""

@@ -368,19 +368,32 @@ function seekTime(t) {
     hooks.seek(C.pauseAt(rec, t));
 }
 
+// A scrub, from a press on the ruler or on the playhead in the lanes: the
+// cursor pauses at the time under the pointer and follows it while the
+// window holds still. el keeps the pointer (the playhead moves, and hides
+// once outside the window).
+function scrub(el, event) {
+    event.preventDefault();
+    W.hold(true);
+    seekTime(timeAt(event.clientX));
+    drag(el, event, (e) => seekTime(timeAt(e.clientX)), () => W.hold(false));
+}
+
 // The ruler: press to put the playhead there, drag to scrub.
 ruler.addEventListener("pointerdown", (event) => {
     if (event.button !== 0 || !pos) return;
-    event.preventDefault();
-    W.hold(true);                   // the window holds still under the playhead
-    seekTime(timeAt(event.clientX));
-    drag(ruler, event, (e) => seekTime(timeAt(e.clientX)), () => W.hold(false));
+    scrub(ruler, event);
 });
 
-// The lanes: drag to pan the time axis; a click without a drag puts the
-// playhead there. The name column only folds (its chevrons).
+// The lanes: grab the playhead to scrub; elsewhere, drag to pan the time
+// axis, and a click without a drag puts the playhead there. The name column
+// only folds (its chevrons).
 lanes.addEventListener("pointerdown", (event) => {
     if (event.button !== 0 || !pos || event.target.closest(".tl-label")) return;
+    if (event.target === playhead) {
+        scrub(lanes, event);
+        return;
+    }
     const startX = event.clientX;
     const startT1 = W.get().t1;
     let panned = false;

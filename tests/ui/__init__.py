@@ -253,17 +253,19 @@ class DashboardCase(unittest.TestCase):
         self.assertAlmostEqual(v["thumb"]["left"], left, delta=1, msg=what)
         self.assertAlmostEqual(v["thumb"]["width"], w, delta=1, msg=what)
 
-    def assert_timeline_starts(self, note, what=""):
+    def assert_timeline_starts(self, note, what="", at_head=True):
         """The Timeline, its window longer than the recording, as drawn
-        (``TIMELINE_START``): the window ends at the newest moment and starts
-        before the oldest, the start edge sits at the oldest (±1 px) with
-        ``note`` as its title and its note's (``⇤ note``), live the playhead
-        is the axis's right end (±1 px), and nothing (an axis label, the
-        edge) widens the drawer. Returns the view."""
+        (``TIMELINE_START``): the window ends at the newest moment (unless
+        not ``at_head``: paused, it holds still) and starts before the
+        oldest, the start edge sits at the oldest (±1 px) with ``note`` as
+        its title and its note's (``⇤ note``), live the playhead is the
+        axis's right end (±1 px), and nothing (an axis label, the edge)
+        widens the drawer. Returns the view."""
         v = self.page.wait_for_function(TIMELINE_START, polling="raf", timeout=10000).json_value()
         tl = v["tl"]
         self.assertEqual(v["overflow"], 0, f"the drawer scrolls sideways: {what}")
-        self.assertEqual(tl["t1"], v["head"], what)
+        if at_head:
+            self.assertEqual(tl["t1"], v["head"], what)
         self.assertLess(tl["t0"], v["tMin"], what)
         self.assertIsNotNone(v["edge"], what)
         self.assertAlmostEqual(v["edge"], tl["left"] + (v["tMin"] - tl["t0"]) * tl["width"] / tl["span"],

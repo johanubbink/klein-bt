@@ -853,7 +853,7 @@ sidebar's width (see [The sidebar](#the-sidebar)).
   rows sit one line lower. While nothing was dropped the Log has no such
   line. The Timeline marks where the recording starts whenever that is in
   its window (panned back to the oldest record, or a window longer than the
-  recording, which ends at the head): a dashed edge over the rows at
+  recording): a dashed edge over the rows at
   `rec.tMin`, nothing drawn left of it, and a note in the name column
   beside the axis, `⇤ Recording starts` (an opened file too), or once
   eviction dropped some, the Log's note (`⇤ Transitions older…`, cut to
@@ -952,23 +952,29 @@ sidebar's width (see [The sidebar](#the-sidebar)).
     [`window.js`](../klein/static/window.js)'s (`KleinWindow`), whose rules
     run on every render, whichever tab is shown. It never runs past the
     head, nor before the oldest record once the recording is longer than
-    it. One longer than the recording ends at the head, live or paused, so
-    now is at the axis's right end from a session's first second; the time
-    before the oldest record is empty, its start edge marked (see Dropped
-    history). While live it follows the head, until you pan or zoom it off
-    the head (back onto the head, or back to live, follows again); paused,
-    a window longer than the recording still moves on with the head, except
-    while the playhead is dragged. **⤢** (or `\`) zooms to fit: the window
+    it. Live, one longer than the recording ends at the head, so now is at
+    the axis's right end from a session's first second; the time before the
+    oldest record is empty, its start edge marked (see Dropped history).
+    While live it follows the head, until you pan or zoom it off the head
+    (back onto the head, or back to live, follows again). Paused, it holds
+    still: the window remembers where its right end was at the pause (the
+    head it followed, else the head then), and a window longer than the
+    recording ends no earlier than that, so new records arrive off its right
+    edge; it pans and zooms right up to the head and left down to that pause
+    point (or to the oldest record, for a window shorter than the recording
+    at the pause). **⤢** (or `\`) zooms to fit: the window
     becomes everything kept, `rec.tMin` to the head, its length kept within
     the ladder's 200 µs and 1 h; while live it then follows the head at
     that length, so the oldest moment drifts off its left edge.
-  - **The playhead** is the shared cursor. Pressing the axis pauses there,
-    and dragging scrubs: the cursor is paused at that time to the µs,
-    `pause(seg, seqAtTime(seg, t), t)` in the segment holding it, so the
-    tree shows `state_at(t)` and the clock that time, and the playhead stays
-    under the pointer between transitions: the window holds still while it
-    is dragged (one longer than the recording catches up with the head after
-    the release). A click on the lanes without a drag does the same.
+  - **The playhead** is the shared cursor. Pressing the axis, or grabbing
+    the playhead's line anywhere in the lanes (an invisible 8 px hit area,
+    the `ew-resize` cursor), pauses there, and dragging scrubs: the cursor
+    is paused at that time to the µs, `pause(seg, seqAtTime(seg, t), t)` in
+    the segment holding it, so the tree shows `state_at(t)` and the clock
+    that time, and the playhead stays under the pointer between
+    transitions: the window holds still while it is dragged, and after the
+    release, as any paused window does. A click on the lanes without a drag
+    does the same; a drag starting off the line pans.
     Stepping and playing are the transport row's (see
     The transport, above). A cursor moved elsewhere (a Log row, a step,
     playing) that leaves the window re-centres the window on it.

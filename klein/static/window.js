@@ -24,6 +24,7 @@ function create() {
     let follow = true;              // while live, the window's right edge is the head
     let lastPos = null;             // the cursor's position at the last sync
     let held = false;               // a scrub: the window holds still
+    let pauseEnd = null;            // paused: the window's right end at the pause
     const listeners = [];           // onMove's
 
     // The window's right end live (KleinCursor.headTime).
@@ -38,29 +39,43 @@ function create() {
 
     // Keep the window on the recording: never past the head, and never
     // before the oldest record once there is more than a window of it. A
-    // window longer than everything kept ends at the head, so now is at the
-    // right edge from the first second; the time before the oldest record is
-    // empty, its start edge marked (timeline.js).
+    // window longer than everything kept ends no earlier than the head live,
+    // so now is at the right edge from the first second, and no earlier than
+    // where the pause left it while paused, so it holds still as records
+    // arrive off its right edge; the time before the oldest record is empty,
+    // its start edge marked (timeline.js).
     function clamp() {
         const end = head();
         span = onLadder(span);
-        t1 = Math.max(Math.min(t1, end), Math.min(end, rec.tMin + span));
+        const least = Math.min(end, rec.tMin + span, pauseEnd ?? Infinity);
+        t1 = Math.max(Math.min(t1, end), least);
     }
 
     // The rules of every sync: back to live, the window follows the head
-    // again; live and following, it ends at the head; a cursor moved
+    // again; live and following, it ends at the head; paused, it remembers
+    // where its right end was (the head it followed, else the head) as the
+    // least a window longer than the recording ends at; a cursor moved
     // elsewhere (a Log row, a step, playing) is brought into view, centred.
-    // A scrub holds the window still, even one longer than the recording
-    // (which ends at the head, so moves on with it): the first sync after it
-    // catches up.
+    // A scrub holds the window still.
     function rules() {
         if (pos.live && lastPos && !lastPos.live) follow = true;
         if (t1 === null || (pos.live && follow)) t1 = head();
-        const moved = !lastPos || lastPos.seg !== pos.seg || lastPos.seq !== pos.seq
-            || lastPos.t !== pos.t;
+        notePause();
+        const moved = cursorMoved();
         lastPos = pos;
         if (moved && !pos.live && !held && (pos.t < t1 - span || pos.t > t1)) t1 = pos.t + span / 2;
         if (!held) clamp();
+    }
+
+    // Paused, remember the window's right end at the pause; live, forget it.
+    function notePause() {
+        if (pos.live) pauseEnd = null;
+        else if (pauseEnd === null) pauseEnd = follow ? t1 : head();
+    }
+
+    // Whether the cursor moved since the last sync.
+    function cursorMoved() {
+        return !lastPos || lastPos.seg !== pos.seg || lastPos.seq !== pos.seq || lastPos.t !== pos.t;
     }
 
     // {t0, t1, span, follow}, or null without a recording to show.

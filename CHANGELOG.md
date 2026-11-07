@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-11-07
+
 ### Added
 - **A folded card says what it hides**: a `+N` pill hangs off it, N being
   every node folded away, with a strip of their statuses and a ring in the
@@ -292,7 +294,8 @@ Initial release.
   and the WebSocket.
 - `klein-bt-mock`: a fake Groot2 publisher for running without a robot.
 
-[Unreleased]: https://github.com/johanubbink/klein-bt/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/johanubbink/klein-bt/compare/v0.8.2...HEAD
+[0.8.2]: https://github.com/johanubbink/klein-bt/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/johanubbink/klein-bt/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/johanubbink/klein-bt/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/johanubbink/klein-bt/compare/v0.6.0...v0.7.0

@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **klein shows its version**: in the startup banner, and with
+  `klein-bt --version`.
+
 ## [0.8.1] - 2026-11-07
 
 ### Added

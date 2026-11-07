@@ -153,7 +153,7 @@ function paintRule(mode, primed, reducedMotion) {
 // whether the row is `shown` (its board open, the sidebar expanded), and
 // `seen`, the change the row was last painted for (undefined until its first
 // paint, which is not a change: the key is just being seen). Returns
-//   streaming   the steady streaming mark (bb-stream, a `~`)
+//   streaming   the steady streaming mark (bb-stream, a dim edge)
 //   marked      the static mark (bb-mark); its writers hold the pulse
 //   fire        a change seen as it passes: its writers' pulse fades once,
 //               shown or not

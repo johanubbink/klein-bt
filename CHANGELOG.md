@@ -14,6 +14,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **The Timeline's playhead can be grabbed anywhere along its line**, not
   only on the axis: drag it in the lanes to scrub. A drag elsewhere in the
   lanes still pans, and a click still moves the playhead.
+- **No more `~` on streaming blackboard keys.** A key that changes all the
+  time keeps just its steady dim edge, and every row's value gets the width
+  the `~` column took.
 - **The dashboard receives only blackboard changes.** klein sends the full
   blackboard once (on connect, and for a new tree), then just the keys each
   poll changed or removed, instead of every value twice a second.

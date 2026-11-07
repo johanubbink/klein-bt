@@ -547,7 +547,7 @@ board panel's input is `KleinView.panel`'s:
   before the blackboard's start is not a change) and the count of changes in
   `(t − KleinRecording.BB_RECENT, t]` (3 s). A key is *fresh* when it changed
   within 0.5 s (one sample) and *streaming* with 4+ changes in 3 s; streaming
-  wins (`bb-stream`: a steady dim edge and a `~`). A fresh key fades once
+  wins (`bb-stream`: a steady dim edge). A fresh key fades once
   (`bb-fresh`, `--fade` in `styles.css`, 1.8 s) live or playing, and is
   marked statically (`bb-mark`) when paused or with reduced motion.
   Switching mode only primes the rows, so a jump never animates; closed or

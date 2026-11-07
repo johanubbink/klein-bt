@@ -37,6 +37,7 @@ translator between the robot's REQ/REP world and the browser's push world.
 import asyncio
 import json
 import logging
+import socket
 import sys
 import time
 import webbrowser
@@ -51,7 +52,7 @@ from .btlog import BtlogError, load_btlog, read_btlog
 from .layout import parse_layout
 from .recorder import Recorder
 from .robot_link import REQUEST_TIMEOUT, RobotLink, RobotRefused, RobotTimeout
-from .routes import STATIC_DIR, Routes
+from .routes import STATIC_DIR, Routes, is_loopback
 from .streaming import Streamer
 
 # Timeouts / cadence
@@ -78,8 +79,10 @@ class KleinGateway:
     """Bridges the robot's ZeroMQ REQ/REP channel to browser WebSockets, and
     serves the dashboard + telemetry from a single HTTP/WebSocket port."""
 
-    def __init__(self, robot_host, robot_port, port, recording=None, debug=False, link=None):
+    def __init__(self, robot_host, robot_port, port, recording=None, debug=False, link=None,
+                 host="127.0.0.1"):
         self.robot_endpoint = f"tcp://{robot_host}:{robot_port}"
+        self.host = host        # the dashboard's interface: loopback unless --host says so
         self.port = port
         # The robot's REQ socket (klein/robot_link.py); the tests pass a fake.
         # REQUEST_TIMEOUT is read here, not at import: the UI tests lower it
@@ -113,8 +116,12 @@ class KleinGateway:
 
         # The HTTP side of the port (klein/routes.py): the static files, the
         # recording's downloads and, with --debug, GET /debug/state.
+        # Host names it answers to besides localhost and IPs: --host itself,
+        # and this machine's names (robot.local) for a dashboard opened by name.
+        machine = socket.gethostname()
         self.routes = Routes(STATIC_DIR, recording=lambda: self.recording,
-                             debug_state=self.debug_state if debug else None)
+                             debug_state=self.debug_state if debug else None,
+                             names=(host, machine, f"{machine}.local", socket.getfqdn()))
 
     # ------------------------------------------------------------------ #
     # Layout: the FULLTREE handshake (the unrolling is klein/layout.py)
@@ -414,6 +421,19 @@ class KleinGateway:
                 self.streamer.unsubscribe(websocket)
             print(f"[klein] dashboard disconnected ({len(self.clients)} active).")
 
+    @property
+    def exposed(self):
+        """Whether other machines can reach the dashboard (``--host``)."""
+        return not is_loopback(self.host)
+
+    @property
+    def url(self):
+        """Where a browser on this machine opens the dashboard: localhost
+        for loopback and every-interface binds, else the one address bound."""
+        local = not self.exposed or self.host in ("0.0.0.0", "::", "")
+        name = "localhost" if local else (f"[{self.host}]" if ":" in self.host else self.host)
+        return f"http://{name}:{self.port}"
+
     async def run(self, open_browser=False):
         """Serve HTTP+WebSocket on one port; load the layout and poll forever."""
         # Stray non-WebSocket TCP connections to the port (health checks, port
@@ -426,20 +446,20 @@ class KleinGateway:
         # The server starts accepting connections here, so the dashboard page
         # loads (and shows "connecting…") even while we wait for the robot.
         async with websockets.serve(
-            self.ws_handler, "0.0.0.0", self.port,
+            self.ws_handler, self.host, self.port,
             # Plain HTTP, before any handshake: a Response, or None for /ws.
-            process_request=lambda _connection, request: self.routes.handle(request.path),
+            process_request=lambda _connection, request: self.routes.handle(
+                request.path, request.headers),
             # An HTTP answer is part of the opening handshake, which this
             # bounds (default 10 s): a Save of a full 200 MiB recording takes
             # ~15 s to export and compress, and would be cut off unanswered.
             open_timeout=60,
         ):
-            print(f"[klein] dashboard + telemetry live on http://localhost:{self.port}")
+            print(f"[klein] dashboard + telemetry live on {self.url}")
             # The server is now listening, so it's safe to open the browser — do
             # it off-thread so a slow launcher can't stall the event loop.
             if open_browser:
-                url = f"http://localhost:{self.port}"
-                asyncio.get_running_loop().run_in_executor(None, _open_browser, url)
+                asyncio.get_running_loop().run_in_executor(None, _open_browser, self.url)
             if self._file is not None:
                 await asyncio.Future()      # an opened file: nothing to poll
             await self.fetch_layout()      # retries until the robot answers

@@ -22,6 +22,7 @@ from pathlib import Path
 from unittest import mock
 
 import msgpack
+from websockets.datastructures import Headers
 
 from klein import cli, gateway, routes
 from klein.cli import _port_available
@@ -109,6 +110,34 @@ class StaticAssetsTest(unittest.TestCase):
                 self.assertEqual(r.status_code, status)
                 self.assertEqual(r.body, body)
         self.assertEqual(self.request("/").headers["Content-Type"], "text/html; charset=utf-8")
+
+    def test_only_the_dashboards_own_page_is_answered(self):
+        # Any page in the browser may open a WebSocket to localhost; only the
+        # dashboard's own (Origin names the host:port asked) may read it. And
+        # a DNS-rebound name (Origin and Host both the attacker's) is refused
+        # on every path, the downloads too.
+        self.routes = Routes(gateway.STATIC_DIR, names=("robot.local",))
+        self.routes.load()
+        rebound = {"Host": "rebind.evil:8080", "Origin": "http://rebind.evil:8080"}
+        for path in ("/ws", "/", "/log.zip"):
+            with self.subTest("rebound", path=path):
+                self.assertEqual(self.routes.handle(path, Headers(rebound)).status_code, 403)
+        cases = [
+            ("by machine name", {"Host": "robot.local:8080",
+                                 "Origin": "http://robot.local:8080"}, None),
+            ("by IPv6", {"Host": "[::1]:8080", "Origin": "http://[::1]:8080"}, None),
+            ("own page", {"Host": "localhost:8080", "Origin": "http://localhost:8080"}, None),
+            ("own page, by LAN address", {"Host": "10.0.0.5:8080",
+                                          "Origin": "http://10.0.0.5:8080"}, None),
+            ("not a browser", {"Host": "localhost:8080"}, None),
+            ("another site", {"Host": "localhost:8080", "Origin": "https://evil.example"}, 403),
+            ("another port", {"Host": "localhost:8080", "Origin": "http://localhost:3000"}, 403),
+            ("sandboxed page", {"Host": "localhost:8080", "Origin": "null"}, 403),
+        ]
+        for label, headers, status in cases:
+            with self.subTest(label):
+                r = self.routes.handle("/ws", Headers(headers))
+                self.assertEqual(None if r is None else r.status_code, status)
 
     def test_missing_files_fall_back(self):
         # A package where none of the static assets are bundled.
@@ -227,10 +256,21 @@ class PortAvailableTest(unittest.TestCase):
         port = listener.getsockname()[1]
         listener.listen(1)
         try:
-            self.assertFalse(_port_available(port))   # a live listener holds it
+            self.assertFalse(_port_available("0.0.0.0", port))   # a live listener holds it
+            self.assertFalse(_port_available("127.0.0.1", port))  # ... on every interface
         finally:
             listener.close()
-        self.assertTrue(_port_available(port))        # freed (never connected -> no TIME_WAIT)
+        self.assertTrue(_port_available("127.0.0.1", port))   # freed (no TIME_WAIT)
+
+
+class DashboardUrlTest(unittest.TestCase):
+    def test_url_follows_host(self):
+        cases = [("127.0.0.1", "http://localhost:8080"), ("0.0.0.0", "http://localhost:8080"),
+                 ("::", "http://localhost:8080"), ("10.0.0.5", "http://10.0.0.5:8080"),
+                 ("fe80::1", "http://[fe80::1]:8080")]
+        for host, url in cases:
+            with self.subTest(host):
+                self.assertEqual(new_gateway(self, host=host).url, url)
 
 
 class ConstructionTest(unittest.TestCase):

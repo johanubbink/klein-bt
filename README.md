@@ -31,6 +31,7 @@ This gives you two commands: `klein-bt` (the dashboard) and `klein-bt-mock`
 klein-bt                                          # robot on 127.0.0.1:1667
 klein-bt --robot-host 10.0.0.5 --robot-port 1667  # robot somewhere else
 klein-bt --port 8080 --no-browser                 # don't open a browser
+klein-bt --host 0.0.0.0                           # let other machines open it
 klein-bt --open run.btlog                         # a saved recording, no robot
 ```
 
@@ -38,6 +39,7 @@ klein-bt --open run.btlog                         # a saved recording, no robot
 | ----------------- | ----------- | ------------------------------------ |
 | `--robot-host`    | `127.0.0.1` | IP address of the robot              |
 | `--robot-port`    | `1667`      | Groot2 publisher port on the robot   |
+| `--host`          | `127.0.0.1` | interface the dashboard is served on; `0.0.0.0` opens it to the network |
 | `--port`          | `8080`      | port the dashboard is served on      |
 | `--no-browser`    | off         | don't open the browser automatically |
 | `--record-buffer` | `10m`       | how much recent history to record (`90s`, `30m`, `1h`); `0` turns recording off |
@@ -45,6 +47,14 @@ klein-bt --open run.btlog                         # a saved recording, no robot
 
 klein opens `http://localhost:8080` for you. You can start it before the robot
 is up; it keeps retrying until the robot appears.
+
+By default only this machine can open the dashboard. To watch from another
+computer (klein on the robot, the browser on your laptop), pass
+`--host 0.0.0.0` and open `http://<this machine's address>:8080` there.
+There is no password: anyone who can reach that port sees the live tree and
+blackboard values and can download the recording. Do this only on a network
+you trust, or use an SSH tunnel instead
+(`ssh -L 8080:localhost:8080 robot`, then `http://localhost:8080`).
 
 ## Using the dashboard
 

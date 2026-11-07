@@ -18,6 +18,7 @@ providers the gateway passes in, so the tests serve a bare ``Recording``.
 
 import asyncio
 import io
+import ipaddress
 import json
 import sys
 import time
@@ -52,6 +53,60 @@ _LOG_SUFFIXES = (".btlog", ".bb.jsonl")
 _LOG_TYPES = {".btlog": "application/octet-stream", ".bb.jsonl": "application/x-ndjson",
               None: "application/zip"}
 _LOG_ROUTES = ("/log/runs", "/log.zip", *(f"/log{suffix}" for suffix in _LOG_SUFFIXES))
+
+
+def is_loopback(host):
+    """Whether ``host`` (a ``--host`` value) only reaches this machine."""
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _host_name(host_header):
+    """``Host: name[:port]`` (or ``[v6]:port``) -> the bare, lower-case name."""
+    name = host_header.strip().lower()
+    if name.startswith("["):
+        return name[1:name.find("]")]
+    return name.rsplit(":", 1)[0] if name.count(":") == 1 else name
+
+
+def known_host(headers, names):
+    """Whether the request's ``Host`` is a name klein answers to: localhost,
+    an IP address, or one of ``names`` (the ``--host`` value and this
+    machine's own names). This stops DNS rebinding, where a site points its
+    own domain at 127.0.0.1 so the browser treats klein as that site and
+    lets it read every answer (the Origin check below can't tell, since
+    Origin and Host then carry the same name). No ``Host`` isn't a browser."""
+    host = headers.get("Host")
+    if host is None:
+        return True
+    name = _host_name(host).rstrip(".")
+    if name == "localhost" or name.endswith(".localhost") or name in names:
+        return True
+    try:
+        ipaddress.ip_address(name)
+        return True
+    except ValueError:
+        return False
+
+
+def same_origin(headers):
+    """Whether a ``/ws`` upgrade comes from the dashboard's own page. A
+    browser sends ``Origin`` with every WebSocket, and any page may open one
+    to any host, so without this check a site in another tab could read the
+    robot's telemetry from ``localhost``. The origin must name the host and
+    port the request was sent to. No ``Origin`` is a client that isn't a
+    browser (a script, the tests), which no web page can impersonate."""
+    origin = headers.get("Origin")
+    if origin is None:
+        return True
+    host = headers.get("Host")
+    url = urlsplit(origin)
+    return (host is not None and url.scheme in ("http", "https")
+            and url.netloc.lower() == host.lower())
 
 
 def http_response(status, body, content_type, attachment=None):
@@ -159,8 +214,9 @@ class Routes:
     returns the ``/debug/state`` dump; None (no ``--debug``) makes it a 404.
     """
 
-    def __init__(self, static_dir, recording=lambda: None, debug_state=None):
+    def __init__(self, static_dir, recording=lambda: None, debug_state=None, names=()):
         self.static_dir = Path(static_dir)
+        self._names = {name.lower() for name in names}   # Host names besides localhost/IPs
         self._recording = recording
         self._debug_state = debug_state
         self._static = {}                   # request path -> (body, content type), by load()
@@ -187,14 +243,20 @@ class Routes:
                       file=sys.stderr)
         self._static.setdefault("/index.html", (INDEX_FALLBACK, CONTENT_TYPES[".html"]))
 
-    def handle(self, target):
+    def handle(self, target, headers=None):
         """The answer to ``GET target`` (a path, with any query): a
         ``Response``, an awaitable of one (a download, which exports off the
         event loop), or None for ``/ws``, which websockets then upgrades to a
-        WebSocket."""
+        WebSocket. A 403 when the request's ``headers`` name a host klein
+        isn't, or (``/ws``) come from another site's page. The server always
+        passes ``headers``; the tests leave them out to ask for a path alone."""
         url = urlsplit(target)
         path = url.path
+        if headers is not None and not known_host(headers, self._names):
+            return http_response(403, b"unknown Host refused", _TEXT)
         if path == "/ws":
+            if headers is not None and not same_origin(headers):
+                return http_response(403, b"cross-origin WebSocket refused", _TEXT)
             return None
         if path == "/debug/state" and self._debug_state is not None:
             return http_response(200, json.dumps(self._debug_state()).encode(),

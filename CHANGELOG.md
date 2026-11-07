@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+- **The dashboard is for this machine only, by default.** klein used to
+  listen on every interface, so anyone on the network could open the
+  dashboard and download the recording. It now listens on `127.0.0.1`.
+  **If you open klein from another machine, pass `--host 0.0.0.0`**: the
+  new flag opens it to the network on purpose, with no password.
+- **Other sites can't read the telemetry.** klein answers only requests for
+  `localhost`, an IP address or this machine's own name, which stops DNS
+  rebinding. The WebSocket also refuses a page served elsewhere (its
+  `Origin` must match), so a site in another tab can't stream the robot's
+  tree from `localhost`.
+
 ## [0.8.0] - 2026-11-07
 
 ### Added

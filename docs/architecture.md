@@ -369,6 +369,14 @@ exports it) or, for `/ws`, returns None so the request upgrades to a
 WebSocket. Because both come from the same origin, the page just opens
 `ws://<same host:port>/ws`.
 
+The server listens on `--host` (default `127.0.0.1`, this machine only;
+`0.0.0.0` for every interface). Every request whose `Host` isn't
+`localhost`, an IP address, `--host` or this machine's own name is a 403
+(`routes.known_host`, against DNS rebinding). `/ws` also needs no `Origin`
+(not a browser) or one naming the `Host` it was sent to
+(`routes.same_origin`), so another site's page can't read the telemetry over
+`localhost`.
+
 `Routes` serves every `.html`, `.css` and `.js` file in `static/` at
 `/<name>` (`/` is `/index.html`), read into memory once at startup, so a new
 file needs no list: `index.html` loads the vendored D3 and `app.js`, a

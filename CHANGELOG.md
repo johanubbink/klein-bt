@@ -7,6 +7,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **A folded card says what it hides**: a `+N` pill hangs off it, N being
+  every node folded away, with a strip of their statuses and a ring in the
+  most urgent one (pulsing while one runs). Hover it for what is running and
+  what failed in there; click it to unfold.
 - **klein shows its version**: in the startup banner, and with
   `klein-bt --version`.
 
@@ -22,6 +26,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   poll changed or removed, instead of every value twice a second.
 
 ### Fixed
+- **Reduced motion now stops the canvas's animations**: a running card's
+  pulse, the writer pulse and the focus flash kept animating when the
+  system asked for reduced motion.
 - **A paused Timeline holds still.** Paused with a window longer than the
   recording, the Timeline kept sliding sideways as new records arrived; it
   now stays where the pause left it (pan right to see the newest records),

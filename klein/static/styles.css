@@ -5,6 +5,7 @@
     --text-main: #f1f5f9;
     --text-muted: #94a3b8;
     --accent: #38bdf8;
+    --link-color: #334155;          /* the tree's edges, and a fold marker's stub */
 
     /* Behavior Tree Status Colors */
     --color-IDLE: #64748b;
@@ -298,6 +299,19 @@ h1 {
 .legend-pill.st-FAILURE    { background: var(--color-FAILURE); }
 .legend-pill.st-SKIPPED    { background: var(--color-SKIPPED); }
 .legend-pill.st-TRANSITION { background: var(--color-TRANSITION); }
+/* The fold marker's pill in miniature: ringed, its count inside. */
+.legend-fold {
+    flex-shrink: 0;
+    width: 16px;
+    height: 11px;
+    box-sizing: border-box;
+    border: 1px solid var(--text-muted);
+    border-radius: 6px;
+    background: var(--panel-bg);
+    font: bold 7px/9px monospace;
+    text-align: center;
+    color: var(--text-main);
+}
 
 /* ------------------------------------------------------------------ */
 /* Blackboards — a heading, then every subtree's board beneath it       */
@@ -535,17 +549,6 @@ body.no-blackboard #bb-past-note { display: none; }     /* an opened file withou
 .bb-row.bb-fresh::before { animation: fade-out var(--fade) ease-in; }
 .bb-row.bb-fresh .bb-value { animation: bb-fresh-text var(--fade) ease-in; }
 
-@media (prefers-reduced-motion: reduce) {
-    .bb-row.bb-fresh::before, .bb-row.bb-fresh .bb-value { animation: none; }
-    .node-pulse.fire { animation: none; }
-    .bb-chevron, .segmented span { transition: none; }
-    .fold-chevron { transition: none; }
-    .node-rect { transition: none; }
-    .node-rect.focused { animation: none; stroke: var(--accent) !important; }
-    .banner { animation: none; }
-    .banner.leaving { transition: none; }
-}
-
 /* Banners — one stack of pills along the top of the canvas.
    ------------------------------------------------------------------
    One stack, one look, addressed from app.js by key rather than by id, so a new
@@ -664,7 +667,9 @@ body.telemetry-stale .node-rect.running,
 body.telemetry-stale .status-pill.running,
 /* The same for a moment in the past: what ran then is not running now. */
 body.viewing-past .node-rect.running,
-body.viewing-past .status-pill.running { animation: none; }
+body.viewing-past .status-pill.running,
+body.telemetry-stale .fold-pill.running,
+body.viewing-past .fold-pill.running { animation: none; }
 
 /* Picked from the blackboard panel: say which card the camera just flew to,
    without permanently recoloring a node whose status stroke means something. */
@@ -694,6 +699,21 @@ body.viewing-past .status-pill.running { animation: none; }
 .node-pulse { fill: var(--changed); opacity: 0; pointer-events: none; }
 .node-pulse.mark { opacity: 1; }
 .node-pulse.fire { animation: fade-out var(--fade) ease-in; }
+
+/* A folded card's marker (tree.js, paintFold): a dashed stub off the card's
+   out-edge to a pill saying how many nodes the fold hides, its ring the most
+   urgent status among them (pulsing like a card while one runs), and a strip
+   of their statuses along its lower inside edge. */
+.fold-stub { fill: none; stroke: var(--link-color); stroke-width: 2px; stroke-dasharray: 3 4; }
+.fold-pill { fill: var(--panel-bg); stroke: var(--text-muted); stroke-width: 1.75px; }
+.fold-pill.running { animation: klein-pulse 1.1s ease-in-out infinite; }
+.fold-count {
+    font-size: 11px;
+    font-weight: bold;
+    font-family: monospace;
+    text-anchor: middle;
+    fill: var(--text-main);
+}
 
 /* Node Text Elements */
 .node-name { font-size: 13px; font-weight: 500; fill: #ffffff; }
@@ -754,7 +774,7 @@ body.viewing-past .status-pill.running { animation: none; }
 /* Links/Edges connecting nodes */
 .link {
     fill: none;
-    stroke: #334155;
+    stroke: var(--link-color);
     stroke-width: 2px;
     transition: stroke 0.2s ease;
 }
@@ -1599,4 +1619,18 @@ span.tl-chevron { cursor: default; }
     font-size: 0.78rem;
     font-style: italic;
     color: var(--text-muted);
+}
+
+/* Reduced motion: last in the file, so it overrides every animation and
+   transition above at equal specificity. */
+@media (prefers-reduced-motion: reduce) {
+    .bb-row.bb-fresh::before, .bb-row.bb-fresh .bb-value { animation: none; }
+    .node-pulse.fire { animation: none; }
+    .bb-chevron, .segmented span { transition: none; }
+    .fold-chevron { transition: none; }
+    .node-rect { transition: none; }
+    .node-rect.running, .status-pill.running, .fold-pill.running { animation: none; }
+    .node-rect.focused { animation: none; stroke: var(--accent) !important; }
+    .banner { animation: none; }
+    .banner.leaving { transition: none; }
 }

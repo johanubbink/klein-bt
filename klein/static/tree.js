@@ -1,8 +1,9 @@
 // tree.js — the tree canvas: a card per node of the tree shown (its
-// geometry, labels, glyph and port line) and the links between them, folding,
-// the displayed state on the cards (paintStatus), and the camera (R, F, a
-// board's locate, the sidebar's nudge) aimed at the part of the window the
-// canvas can be seen in. app.js shows a tree (show, then draw once the
+// geometry, labels, glyph and port line) and the links between them, folding
+// and the marker on a folded card summing up what it hides, the displayed
+// state on the cards (paintStatus), and the camera (R, F, a board's locate,
+// the sidebar's nudge) aimed at the part of the window the canvas can be seen
+// in. app.js shows a tree (show, then draw once the
 // blackboard panel has its hierarchy), paints each render's state, and
 // connects the hooks below (KleinTree.connect). The blackboard panel
 // (blackboard.js) paints its key outlines and writer pulses onto the cards
@@ -71,6 +72,23 @@ const pillWidth = 80;
 const pillX = nodeWidth / 2 - 10 - pillWidth;
 const maxLabelChars = Math.floor((pillX - labelX - 8) / (13 * 0.51));
 
+// The fold marker: a dashed stub off a folded card's out-edge (bottom centre
+// vertical, right centre horizontal) to a pill saying +N hidden nodes, with a
+// strip of their statuses along its lower inside edge and a ring of the most
+// urgent one. It has to fit the gap between depths (layoutConfig): 130 - 56 =
+// 74px vertical, 280 - 220 = 60px horizontal, where a cousin's card can sit
+// straight beyond the folded one. A 40px pill holds "+999" (11px bold
+// monospace, ~27px) with the rounded ends to spare, so the horizontal stub
+// is short: 8 + 40 leaves 12px of the 60.
+const foldPillW = 40;
+const foldPillH = 20;
+const foldRing = 1.75;          // the pill's stroke (.fold-pill)
+const foldStripH = 3;
+const foldStub = { vertical: 16, horizontal: 8 };
+// The strip's order, and the ring's precedence: most urgent first.
+const FOLD_ORDER = ["FAILURE", "RUNNING", "SUCCESS", "IDLE"];
+const foldNamesShown = 4;       // names per list in the marker's tooltip
+
 // "vertical" is the standard BT convention: root at the top, children below,
 // siblings ticked left-to-right. "horizontal" grows the tree rightward.
 let orientation = "vertical";
@@ -100,6 +118,11 @@ function hasOwnName(node) {
 
 function primaryLabel(node) {
     return truncate(hasOwnName(node) ? node.name : node.type, maxLabelChars);
+}
+
+// The card's primary label in full, for a tooltip.
+function cardName(node) {
+    return hasOwnName(node) ? node.name : node.type;
 }
 
 function typeCaption(node) {
@@ -206,6 +229,17 @@ function nodeTitle(node) {
 const svg = d3.select("#canvas");
 const gContainer = svg.append("g").attr("class", "draw-group");
 
+// The inside of a fold marker's pill (inside its ring), which its status
+// strip is clipped to. Every pill is drawn at the same place in its own
+// group, so one clip serves them all.
+svg.append("defs").append("clipPath").attr("id", "fold-pill-clip")
+    .append("rect")
+    .attr("x", -foldPillW / 2 + foldRing / 2)
+    .attr("y", -foldPillH / 2 + foldRing / 2)
+    .attr("width", foldPillW - foldRing)
+    .attr("height", foldPillH - foldRing)
+    .attr("rx", (foldPillH - foldRing) / 2);
+
 // Attach infinite Pan & Zoom behaviors to the canvas
 const zoomBehavior = d3.zoom()
     .scaleExtent([0.1, 3])
@@ -287,8 +321,9 @@ function updateNodes(nodesList, sourceNode) {
         .data(nodesList, d => d.data.id);
 
     const nodeEnter = nodeSelection.enter().append("g")
-        // (Re)appeared: force the status repaint (paintCards).
-        .each(d => { d._statusKey = null; })
+        // (Re)appeared: force the status repaint (paintCards); its fold
+        // marker starts hidden (paintFolds).
+        .each(d => { d._statusKey = null; d._foldKey = null; })
         .attr("transform", nodeTransform(sourceNode.x0 || 0, sourceNode.y0 || 0))
         .on("click", (event, d) => {
             if (event.defaultPrevented) return;
@@ -313,6 +348,7 @@ function updateNodes(nodesList, sourceNode) {
     // re-labelling every visible card would be pure waste.
     const nodeUpdate = nodeEnter.merge(nodeSelection);
     nodeUpdate.attr("class", nodeClasses);
+    placeFoldMarkers(nodeUpdate);
 
     nodeUpdate.transition().duration(250)
         .attr("transform", d => nodeTransform(d.x, d.y));
@@ -439,6 +475,48 @@ function appendCards(nodeEnter) {
         .attr("cy", -nodeHeight / 2 + 4)
         .attr("r", 3.5)
         .on("animationend", function() { this.classList.remove("fire"); });
+
+    appendFoldMarkers(nodeEnter);
+}
+
+// The fold marker's parts, hidden until the card is folded (paintFolds). Its
+// place depends on the orientation (placeFoldMarkers); its pill is drawn
+// round its group's origin, as the clip is (fold-pill-clip). Inside g.node,
+// so a click on it is the card's: it unfolds.
+function appendFoldMarkers(nodeEnter) {
+    const marker = nodeEnter.append("g")
+        .attr("class", "fold-marker")
+        .attr("display", "none");
+    marker.append("title");
+    marker.append("path").attr("class", "fold-stub");
+    const pill = marker.append("g").attr("class", "fold-pill-group");
+    pill.append("rect")
+        .attr("class", "fold-pill")
+        .attr("x", -foldPillW / 2)
+        .attr("y", -foldPillH / 2)
+        .attr("width", foldPillW)
+        .attr("height", foldPillH)
+        .attr("rx", foldPillH / 2);
+    pill.append("g")
+        .attr("class", "fold-strip")
+        .attr("clip-path", "url(#fold-pill-clip)");
+    pill.append("text")
+        .attr("class", "fold-count")
+        .attr("y", 2.5);       // centred above the strip
+}
+
+// The stub off the card's out-edge and the pill at its end, for the
+// orientation: on every relayout, since the layout selector moves the same
+// cards.
+function placeFoldMarkers(cards) {
+    const vertical = orientation === "vertical";
+    const stub = foldStub[orientation];
+    const [x0, y0] = vertical ? [0, nodeHeight / 2] : [nodeWidth / 2, 0];
+    const [x1, y1] = vertical ? [0, y0 + stub] : [x0 + stub, 0];
+    const [cx, cy] = vertical ? [0, y1 + foldPillH / 2] : [x1 + foldPillW / 2, 0];
+    const marker = cards.select(".fold-marker");
+    marker.select(".fold-stub").attr("d", `M ${x0} ${y0} L ${x1} ${y1}`);
+    marker.select(".fold-pill-group").attr("transform", `translate(${cx}, ${cy})`);
 }
 
 // Fold or unfold one node: its card's click, and its Timeline row's chevron.
@@ -579,9 +657,94 @@ function displayed() {
     return lastStatusMap;
 }
 
+// What a folded node hides, by statusMap: every node under it (nested folds
+// included), their count by status, the most urgent one, the running
+// frontier among them (runningFrontier's rule) and the failed ones, by name
+// in tree order. A "was X" entry counts by its status (IDLE), as does a node
+// with no entry and a status the strip has no segment for (SKIPPED).
+function foldSummary(d, statusMap) {
+    const counts = Object.fromEntries(FOLD_ORDER.map(s => [s, 0]));
+    const summary = { count: 0, counts, worst: "IDLE", running: [], failed: [] };
+    // Whether node, or a node under it, is RUNNING.
+    function walk(node) {
+        const entry = statusMap[node.data.uid];
+        const status = entry && counts[entry.status] !== undefined ? entry.status : "IDLE";
+        summary.count++;
+        counts[status]++;
+        if (status === "FAILURE") summary.failed.push(cardName(node.data));
+        let below = false;
+        for (const child of node.children || node._children || []) below = walk(child) || below;
+        if (status === "RUNNING" && !below) summary.running.push(cardName(node.data));
+        return below || status === "RUNNING";
+    }
+    for (const child of d._children || []) walk(child);
+    summary.worst = FOLD_ORDER.find(s => counts[s] > 0) || "IDLE";
+    return summary;
+}
+
+// The marker's tooltip: how many, what runs and what failed in there.
+function foldTitle(summary) {
+    const names = (list) => list.slice(0, foldNamesShown).join(", ")
+        + (list.length > foldNamesShown ? ` +${list.length - foldNamesShown} more` : "");
+    const parts = [`${summary.count} hidden node${summary.count === 1 ? "" : "s"}`];
+    if (summary.running.length) parts.push(`running: ${names(summary.running)}`);
+    if (summary.failed.length) parts.push(`failed: ${names(summary.failed)}`);
+    parts.push("click to unfold");
+    return parts.join(" \u00b7 ");
+}
+
+// The fold markers for a state: shown on the folded cards, hidden on the
+// rest. Like the status, a card's marker is rewritten only when what it says
+// changed (_foldKey; null while hidden, and on a card that (re)appears).
+function paintFolds(statusMap) {
+    gContainer.selectAll("g.node").each(function(d) {
+        if (d._children) {
+            paintFold(d3.select(this), d, statusMap);
+        } else if (d._foldKey !== null) {
+            d._foldKey = null;
+            d3.select(this).select(".fold-marker").attr("display", "none");
+        }
+    });
+}
+
+// One folded card's marker: count, ring, strip and tooltip.
+function paintFold(card, d, statusMap) {
+    const summary = foldSummary(d, statusMap);
+    const title = foldTitle(summary);
+    const key = FOLD_ORDER.map(s => summary.counts[s]).join() + "|" + title;
+    if (d._foldKey === key) return;
+    d._foldKey = key;
+
+    const { worst, counts, count } = summary;
+    const marker = card.select(".fold-marker").attr("display", null);
+    marker.select("title").text(title);
+    marker.select(".fold-count").text(`+${count}`);
+    marker.select(".fold-pill")
+        .style("stroke", worst === "IDLE" ? "var(--text-muted)" : `var(--color-${worst})`)
+        .classed("running", worst === "RUNNING");
+
+    // A segment per status, as wide as its share of the pill's inside.
+    const inner = foldPillW - foldRing;
+    let x = -inner / 2;
+    const segments = FOLD_ORDER.filter(s => counts[s]).map(status => {
+        const width = inner * counts[status] / count;
+        x += width;
+        return { status, x: x - width, width };
+    });
+    marker.select(".fold-strip").selectAll("rect")
+        .data(segments)
+        .join("rect")
+        .attr("x", seg => seg.x)
+        .attr("y", foldPillH / 2 - foldRing / 2 - foldStripH)
+        .attr("width", seg => seg.width)
+        .attr("height", foldStripH)
+        .style("fill", seg => `var(--color-${seg.status})`);
+}
+
 // A state onto the cards there are, skipping the cards whose status is
-// unchanged.
+// unchanged, and onto the fold markers.
 function paintCards(telemetryMap) {
+    paintFolds(telemetryMap);
     gContainer.selectAll("g.node").each(function(d) {
         if (d.data.uid == null) return;             // node has no UID to match
         const entry = telemetryMap[d.data.uid];     // { status, from }

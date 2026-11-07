@@ -17,10 +17,11 @@ every blackboard value, and `/log.zip` downloads the whole recording.
   authentication.** Anyone who can reach the port can read everything above.
   Use it only on a trusted network, or reach a remote klein through an SSH
   tunnel instead.
-- **The WebSocket refuses other sites' pages.** A browser lets any page open a
-  WebSocket to `localhost`, so `/ws` only upgrades when the request's
-  `Origin` names the host and port it was sent to. Clients that aren't
-  browsers send no `Origin` and are let through.
-- **The plain-HTTP side (the page and the `/log*` downloads) has no origin
-  check.** A browser stops other sites from reading those responses, but a
-  DNS-rebinding page could get around that. Klein doesn't defend against it.
+- **Only the dashboard's own page can read it.** A browser lets any page
+  send requests to `localhost`, so klein answers only requests whose `Host`
+  is `localhost`, an IP address, the `--host` value or this machine's own
+  name. That stops DNS rebinding, where a site points its own domain at
+  127.0.0.1. On top of that, `/ws` only upgrades when the request's `Origin`
+  names the host and port it was sent to, so a page from another site can't
+  stream the telemetry. Clients that aren't browsers send no `Origin` and
+  are let through.

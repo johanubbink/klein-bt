@@ -37,6 +37,7 @@ translator between the robot's REQ/REP world and the browser's push world.
 import asyncio
 import json
 import logging
+import socket
 import sys
 import time
 import webbrowser
@@ -51,7 +52,7 @@ from .btlog import BtlogError, load_btlog, read_btlog
 from .layout import parse_layout
 from .recorder import Recorder
 from .robot_link import REQUEST_TIMEOUT, RobotLink, RobotRefused, RobotTimeout
-from .routes import STATIC_DIR, Routes
+from .routes import STATIC_DIR, Routes, is_loopback
 from .streaming import Streamer
 
 # Timeouts / cadence
@@ -115,8 +116,12 @@ class KleinGateway:
 
         # The HTTP side of the port (klein/routes.py): the static files, the
         # recording's downloads and, with --debug, GET /debug/state.
+        # Host names it answers to besides localhost and IPs: --host itself,
+        # and this machine's names (robot.local) for a dashboard opened by name.
+        machine = socket.gethostname()
         self.routes = Routes(STATIC_DIR, recording=lambda: self.recording,
-                             debug_state=self.debug_state if debug else None)
+                             debug_state=self.debug_state if debug else None,
+                             names=(host, machine, f"{machine}.local", socket.getfqdn()))
 
     # ------------------------------------------------------------------ #
     # Layout: the FULLTREE handshake (the unrolling is klein/layout.py)
@@ -417,10 +422,15 @@ class KleinGateway:
             print(f"[klein] dashboard disconnected ({len(self.clients)} active).")
 
     @property
+    def exposed(self):
+        """Whether other machines can reach the dashboard (``--host``)."""
+        return not is_loopback(self.host)
+
+    @property
     def url(self):
         """Where a browser on this machine opens the dashboard: localhost
         for loopback and every-interface binds, else the one address bound."""
-        local = self.host in ("127.0.0.1", "localhost", "::1", "0.0.0.0", "::", "")
+        local = not self.exposed or self.host in ("0.0.0.0", "::", "")
         name = "localhost" if local else (f"[{self.host}]" if ":" in self.host else self.host)
         return f"http://{name}:{self.port}"
 

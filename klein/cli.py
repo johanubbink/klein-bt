@@ -32,11 +32,17 @@ def _duration_us(text):
 
 
 def _port_available(host, port):
+    """Whether the server can bind ``port`` on every address ``host`` names
+    (``localhost`` is both 127.0.0.1 and ::1, like the server's bind)."""
     try:
-        family, kind, _proto, _name, address = socket.getaddrinfo(
-            host, port, type=socket.SOCK_STREAM)[0]
+        addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except socket.gaierror:
         return True             # an unknown --host: let the server's bind report it
+    return all(_bindable(family, kind, address)
+               for family, kind, _proto, _name, address in addresses)
+
+
+def _bindable(family, kind, address):
     probe = socket.socket(family, kind)
     # Match the asyncio server's bind semantics (SO_REUSEADDR): reject a port
     # only when a live listener holds it, not when harmless TIME_WAIT sockets
@@ -108,7 +114,7 @@ def main_cli():
     else:
         print(f"  robot     : tcp://{args.robot_host}:{args.robot_port}")
     print(f"  dashboard : {gateway.url}")
-    if args.host not in ("127.0.0.1", "localhost", "::1"):
+    if gateway.exposed:
         print(f"  listening : {args.host}:{args.port}, open to other machines, no password")
     print()
 

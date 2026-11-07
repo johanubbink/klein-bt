@@ -111,10 +111,21 @@ class StaticAssetsTest(unittest.TestCase):
                 self.assertEqual(r.body, body)
         self.assertEqual(self.request("/").headers["Content-Type"], "text/html; charset=utf-8")
 
-    def test_ws_only_from_the_dashboards_own_origin(self):
+    def test_only_the_dashboards_own_page_is_answered(self):
         # Any page in the browser may open a WebSocket to localhost; only the
-        # dashboard's own (Origin names the host:port asked) may read it.
+        # dashboard's own (Origin names the host:port asked) may read it. And
+        # a DNS-rebound name (Origin and Host both the attacker's) is refused
+        # on every path, the downloads too.
+        self.routes = Routes(gateway.STATIC_DIR, names=("robot.local",))
+        self.routes.load()
+        rebound = {"Host": "rebind.evil:8080", "Origin": "http://rebind.evil:8080"}
+        for path in ("/ws", "/", "/log.zip"):
+            with self.subTest("rebound", path=path):
+                self.assertEqual(self.routes.handle(path, Headers(rebound)).status_code, 403)
         cases = [
+            ("by machine name", {"Host": "robot.local:8080",
+                                 "Origin": "http://robot.local:8080"}, None),
+            ("by IPv6", {"Host": "[::1]:8080", "Origin": "http://[::1]:8080"}, None),
             ("own page", {"Host": "localhost:8080", "Origin": "http://localhost:8080"}, None),
             ("own page, by LAN address", {"Host": "10.0.0.5:8080",
                                           "Origin": "http://10.0.0.5:8080"}, None),

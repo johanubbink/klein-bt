@@ -94,8 +94,13 @@ Two pollers then share the socket:
 - **status** at 10 Hz: the packed status records, sent on as `{uid: {status, from}}`.
   While recording, each STATUS is followed by a `t` drain of the transitions.
 - **blackboard** at 2 Hz: a dump of every subtree's board. Values change more
-  slowly than status, and the payload is bigger. While recording, each dump is
-  also added to the recording.
+  slowly than status, and the payload is bigger. Dashboards get the first dump
+  of a tree as a full `blackboard` snapshot (even when empty), then only a
+  `blackboard_changes` frame per dump: what it changed, or an empty one, whose
+  `t` still moves the panel on so a mark ages out without a recording. `LiveBlackboard` diffs each dump with the recording's
+  own comparison (`BlackboardDiff` in `klein/recording.py`) and keeps the
+  current values for dashboards that connect later. While recording, each
+  dump is also added to the recording.
 
 While recording (the default), both pollers run whether or not a dashboard is
 connected, so the recording has no holes. With `--record-buffer 0`, or a robot
@@ -183,7 +188,8 @@ and why it loses nothing, is in [protocol.md](protocol.md#how-klein-records).
   ends, no new one begins and no `t` is sent to that publisher; the next
   handshake tries again.
 
-Beside the `layout`, `status`, `blackboard`, `robot` and `notice` frames, a
+Beside the `layout`, `status`, `blackboard`, `blackboard_changes`, `robot`
+and `notice` frames, a
 `Streamer(recording, send, source, name)` (`klein/streaming.py`) sends each
 dashboard the recording itself. It is the `Recording`'s listener: each
 change (a segment beginning or ending, records appended, the head moving, a
@@ -410,21 +416,23 @@ a worker thread (`asyncio.to_thread`), so polling and streaming go on. The
 single-file routes export only their own file.
 
 Dashboards only receive. On connect, a dashboard gets the recording's
-backfill (while recording), the layout, the last blackboard frame and
-the robot's reachability, then the live stream.
+backfill (while recording), the layout, a `blackboard` snapshot of the
+current values and the robot's reachability, then the live stream.
 
 | type | when | content |
 | --- | --- | --- |
 | `layout` | on connect / re-handshake | the unrolled tree |
 | `status` | 10 Hz | `{uid: {status, from}}` |
-| `blackboard` | 2 Hz | `data`: `{board: {key: value}}`, tree order; `t`: klein's monotonic clock (µs, not robot time) when the reply arrived, to time changes without a recording |
+| `blackboard` | on connect, the first 2 Hz poll of each tree, and after each `layout` broadcast (which clears the dashboard's values) | the full snapshot. `data`: `{board: {key: value}}`, tree order (a board first seen in a later poll goes last); `t`: klein's monotonic clock (µs, not robot time) when the reply arrived, to time changes without a recording |
+| `blackboard_changes` | every later 2 Hz poll (empty when it changed nothing) | `t` as above; `changes` (`[[board, key, value]]`, the value as the robot sent it), `removed` (`[[board, key]]`), `boards` (boards first seen at `t`): the `bb` frame's fields without `seg`. A key is compared with sorted object keys; a board missing from a poll keeps its keys. The browser ignores one that comes before its tree's snapshot (which holds it) |
 | `robot` | on change | `{connected, detail, recording}`; `recording` is `"on"`, `"off"` (`--record-buffer 0`), `"unsupported"` (the robot answered `r` with an error) or `"file"` (`--open`: no robot) |
 | `notice` | on a tree swap | `{text}` |
 | `rec`, `segment`, `segment_end`, `gap`, `bb`, `head`, `evict`, `backfill_done`, binary records | backfill on connect, then as the recording changes | the recording; see [protocol.md](protocol.md#streaming-the-recording-klein--dashboard) |
 
 Every frame type except `notice` is cached for new clients (the layout by
-being rebuilt from the kept `TreeLayout`, the recording's frames from the
-recording as a backfill). A notice is about
+being rebuilt from the kept `TreeLayout`, the blackboard as one snapshot of
+the current values, the recording's frames from the recording as a
+backfill). A notice is about
 something that just happened, so a late client doesn't get it.
 
 ## Browser model
@@ -500,7 +508,8 @@ here as app.js imports it (`import * as KleinRecording from
 ### Rendering
 
 There is one render path. A WebSocket message only stores what it carries
-(into the store, or as "the latest `layout`/`status`/`blackboard` frame") and
+(into the store, or as "the latest `layout`/`status` frame" and the current
+blackboard, a snapshot with the changes since applied) and
 asks for a frame; `render()` runs on the next `requestAnimationFrame`.
 `KleinView.frame` decides what is displayed, by the rules below, and
 `render()` applies it (the painters, the body classes, the banners); the
@@ -549,9 +558,10 @@ board panel's input is `KleinView.panel`'s:
   reconciles the boards and rows with the DOM (`syncKeyed` in ui.js, which
   reorders rows only when the order is wrong, since re-appending one
   restarts its fade) and applies the marks. Without a recording, the same rule runs
-  on a local track of the `blackboard` frames (`addBoards`, at their newest
-  `t`, kept to the last 3 s): timed by the gateway, so a busy browser
-  doesn't change the answer. The board panel is re-rendered only when a
+  on a local track of the `blackboard` snapshots (`addBoards`) and
+  `blackboard_changes` frames (`add`), at their newest `t`, kept to the
+  last 3 s: timed by the gateway, so a busy browser doesn't change the
+  answer. The board panel is re-rendered only when a
   blackboard input changed or the cursor moved, not on every `head`.
 - **Keys and nodes.** `KleinBlackboard.show` indexes a new tree's
   `bindings` once: `(board, key)` to its writers (`out`, `inout`) and readers (`in`), a node

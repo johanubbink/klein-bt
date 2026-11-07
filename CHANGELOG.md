@@ -10,6 +10,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **klein shows its version**: in the startup banner, and with
   `klein-bt --version`.
 
+### Changed
+- **The dashboard receives only blackboard changes.** klein sends the full
+  blackboard once (on connect, and for a new tree), then just the keys each
+  poll changed or removed, instead of every value twice a second.
+
 ## [0.8.1] - 2026-11-07
 
 ### Added

@@ -38,8 +38,8 @@ const bbEmpty = document.getElementById("bb-empty");
 const sidebar = document.getElementById("sidebar");
 
 // The blackboard frames' changes over the last KleinRecording.BB_RECENT, for
-// when there is no recording to show: app.js adds each frame's boards, timed
-// by the gateway (`t`), and the panel marks changes from it as from a
+// when there is no recording to show: app.js adds each snapshot's boards and
+// each changes frame, timed by the gateway (`t`), and the panel marks changes from it as from a
 // segment's track.
 const frameTrack = KleinRecording.createTrack();
 

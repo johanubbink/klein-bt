@@ -51,8 +51,8 @@ function fromRecording(pos, seg, support) {
 // `support` the robot frame's `recording` ("on", "off", "unsupported",
 // "file", or null before it), and `frames` the latest frames, for when there
 // is no recording to show: {tree, status, boards, track}, the `layout`,
-// `status` and `blackboard` frames' data (boards null before the first) and
-// the blackboard frames' track. Returns
+// `status` frames' data, the blackboard (null before this tree's snapshot)
+// and the blackboard frames' track. Returns
 //   clock         the clock from now on (see cursor())
 //   evicted       it was moved off an evicted moment: say so
 //   playing       still playing: render again on the next frame

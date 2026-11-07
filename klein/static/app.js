@@ -190,9 +190,10 @@ KleinTree.connect({
     cardsMoved: KleinBlackboard.cardsMoved, cardHovered: KleinBlackboard.linkCardRows,
 });
 
-// The latest frames, for when there is no recording to show: the layout,
-// status and blackboard frames' data, and their blackboard changes over the
-// last BB_RECENT, timed by the gateway (`t`): the blackboard panel's track.
+// The latest frames, for when there is no recording to show: the layout and
+// status frames' data, the blackboard (a snapshot, changes applied), and its
+// changes over the last BB_RECENT, timed by the gateway (`t`): the blackboard
+// panel's track.
 const frameTrack = KleinBlackboard.frameTrack;
 const frames = { tree: null, status: {}, boards: null, track: frameTrack };
 
@@ -320,44 +321,65 @@ function connectGatewayPipeline() {
             requestRender();
             return;
         }
-        const message = JSON.parse(event.data);
-        if (recordingStore.ingest(message)) {
-            requestRender({ boards: changesBoards(message.type) });
-            return;
-        }
-
-        if (message.type === "layout") {
-            if (!message.data) return;
-            frames.tree = message.data;
-            frames.status = {};      // its uids indexed the previous tree
-            frames.boards = null;
-            requestRender({ boards: true });
-        }
-
-        else if (message.type === "status") {
-            frames.status = message.data;
-            requestRender();
-        }
-
-        else if (message.type === "blackboard") {
-            frames.boards = message.data || {};
-            frameTrack.addBoards(message.t, frames.boards);
-            frameTrack.evictBefore(message.t - KleinRecording.BB_RECENT);
-            requestRender({ boards: true });
-        }
-
-        else if (message.type === "notice") {
-            showBanner("notice", message.text, { kind: "info", timeout: 4000 });
-        }
-
-        else if (message.type === "robot") {
-            robotConnected = message.connected;
-            robotDetail = message.detail;
-            recordingSupport = message.recording;
-            updateConnectionUI();
-            requestRender();        // the drawer's chip
-        }
+        onGatewayMessage(JSON.parse(event.data));
     };
+}
+
+// The live blackboard: a full snapshot (on connect, and first for each tree)...
+function takeBoards(message) {
+    frames.boards = message.data || {};
+    frameTrack.addBoards(message.t, frames.boards);
+    frameTrack.evictBefore(message.t - KleinRecording.BB_RECENT);
+    requestRender({ boards: true });
+}
+
+// ...then only what a poll changed. Changes before this tree's snapshot have
+// nothing to apply to (it is on its way, and holds them): ignored.
+function takeBoardChanges({ t, changes, removed, boards }) {
+    if (!frames.boards) return;
+    for (const board of boards) frames.boards[board] ??= {};
+    for (const [board, key, value] of changes) frames.boards[board][key] = value;
+    for (const [board, key] of removed) delete frames.boards[board]?.[key];
+    frameTrack.add(t, changes, removed, boards);
+    frameTrack.evictBefore(t - KleinRecording.BB_RECENT);
+    requestRender({ boards: true });
+}
+
+// One JSON frame from klein (docs/protocol.md lists them).
+function onGatewayMessage(message) {
+    if (recordingStore.ingest(message)) {
+        requestRender({ boards: changesBoards(message.type) });
+        return;
+    }
+
+    if (message.type === "layout") {
+        if (!message.data) return;
+        frames.tree = message.data;
+        frames.status = {};      // its uids indexed the previous tree
+        frames.boards = null;
+        requestRender({ boards: true });
+    }
+
+    else if (message.type === "status") {
+        frames.status = message.data;
+        requestRender();
+    }
+
+    else if (message.type === "blackboard") takeBoards(message);
+
+    else if (message.type === "blackboard_changes") takeBoardChanges(message);
+
+    else if (message.type === "notice") {
+        showBanner("notice", message.text, { kind: "info", timeout: 4000 });
+    }
+
+    else if (message.type === "robot") {
+        robotConnected = message.connected;
+        robotDetail = message.detail;
+        recordingSupport = message.recording;
+        updateConnectionUI();
+        requestRender();        // the drawer's chip
+    }
 }
 
 window.addEventListener("DOMContentLoaded", connectGatewayPipeline);
@@ -381,7 +403,8 @@ Object.assign(window, {
     KleinBlackboard, KleinLog, KleinTransport, KleinTimeline, KleinOverview,
     KleinDrawer: { ...KleinDrawer, debugRows: KleinLog.debugRows, goLive: KleinTransport.goLive,
                    formatTime: KleinUI.formatTime, formatClock: KleinUI.formatClock },
-    kleinDebug, recordingStore, shownRecording, seek, frameTrack, banners, showBanner, hideBanner,
+    kleinDebug, recordingStore, shownRecording, seek, frames, frameTrack, onGatewayMessage,
+    banners, showBanner, hideBanner,
     sidebarWidth,
     svg: KleinTree.svg, zoomBehavior: KleinTree.zoomBehavior,
     visibleViewport: KleinTree.visibleViewport, runningFrontier: KleinTree.runningFrontier,

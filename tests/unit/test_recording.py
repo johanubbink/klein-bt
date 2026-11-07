@@ -6,6 +6,7 @@ replays, and the publisher rule against the harness's independent reference
 """
 import os
 import random
+import threading
 import time
 import tracemalloc
 import unittest
@@ -38,6 +39,15 @@ def brute_states(baseline, records):
 
 def brute_state_at(baseline, records, t):
     return brute_states(baseline, [r for r in records if r[0] <= t])[-1]
+
+
+def evict_or_fail(test, rec, now):
+    """``rec.evict(now)`` in a daemon thread: fail ``test``, not hang the
+    suite, if eviction never returns."""
+    worker = threading.Thread(target=rec.evict, args=(now,), daemon=True)
+    worker.start()
+    worker.join(timeout=5)
+    test.assertFalse(worker.is_alive(), "evict() did not return")
 
 
 class StateEncodingTest(unittest.TestCase):
@@ -214,12 +224,14 @@ class BlackboardTrackTest(unittest.TestCase):
     def test_eviction_keeps_each_keys_base(self):
         track = BlackboardTrack()
         for t in range(10):
-            track.add(t, {"Main": {"fixed": "f", "moving": t, "gone": 1} if t < 3 else
+            track.add(t, {"Main": {"fixed": "f", "moving": t, "gone": t} if t < 3 else
                           {"fixed": "f", "moving": t}})
         track.evict_before(6)
         self.assertIsNone(track.at(5))
         self.assertEqual(track.at(6), {"Main": {"fixed": "f", "moving": 6}})
         self.assertEqual(track.at(9), {"Main": {"fixed": "f", "moving": 9}})
+        # "gone" was removed before the cutoff: none of its changes is left
+        self.assertNotIn("gone", {key for _, _, key, _ in track.changes()})
         self.assertEqual(track.nbytes, len('"f"') + 4)     # "f" and 6, 7, 8, 9
         self.assertTrue(track.evict_oldest())
         self.assertEqual(track.at(7), {"Main": {"fixed": "f", "moving": 7}})
@@ -295,6 +307,37 @@ class EvictionTest(unittest.TestCase):
                 self.assertLessEqual(blackboard, mib)
                 self.assertLessEqual(transitions + blackboard, 3 * mib)
                 self.assertEqual((seg.start_seq, len(seg.chunks)), (0, 192))
+        with self.subTest("two samples at the same time"):
+            rec = Recording(bb_max_bytes=10)
+            seg = rec.begin_segment(None, 100, b"")
+            rec.add_blackboard(100, {"bb": {"k": "x" * 20}})
+            rec.add_blackboard(100, {"bb": {"k": "y" * 20}})
+            evict_or_fail(self, rec, 100)
+            self.assertEqual(seg.blackboard.changes(), [(100, "bb", "k", '"' + "y" * 20 + '"')])
+            self.assertEqual(seg.blackboard.nbytes, 22)    # a lone base stays, over the cap
+        with self.subTest("an ended segment's bases go"):
+            rec = Recording(bb_max_bytes=10)
+            old = rec.begin_segment(None, 0, b"")
+            rec.add_blackboard(0, {"bb": {"k": "x" * 20}})
+            rec.end_segment(5)
+            rec.begin_segment(None, 10, b"")
+            evict_or_fail(self, rec, 10)
+            self.assertEqual((old.blackboard.nbytes, rec.blackboard_capped), (0, True))
+        with self.subTest("an open segment keeps its bases"):
+            rec = Recording(bb_max_bytes=10)
+            seg = rec.begin_segment(None, 0, b"")
+            rec.add_blackboard(0, {"bb": {"k": "x" * 20}})
+            evict_or_fail(self, rec, 0)
+            self.assertEqual(seg.blackboard.nbytes, 22)
+        with self.subTest("a segment without a blackboard is skipped"):
+            rec = Recording(bb_max_bytes=10)
+            rec.begin_segment(None, 0, b"")
+            rec.end_segment(5)
+            seg = rec.begin_segment(None, 10, b"")
+            rec.add_blackboard(10, {"bb": {"k": "x" * 20}})
+            rec.add_blackboard(20, {"bb": {"k": "y" * 20}})
+            evict_or_fail(self, rec, 20)
+            self.assertEqual((seg.blackboard.t_start, seg.blackboard.nbytes), (20, 22))
 
     def test_capped_says_which_limit_decides_the_history(self):
         """``*_capped``: a size cap cut that history short, until the time
@@ -318,7 +361,10 @@ class EvictionTest(unittest.TestCase):
             rec.evict(t)
         self.assertTrue(rec.blackboard_capped)
         self.assertFalse(rec.transitions_capped)
-        rec.evict(seg.blackboard.t_start + rec.keep_us + 1)
+        cut = seg.blackboard.t_start
+        rec.evict(cut + rec.keep_us - 1)            # nothing cut, the cutoff short of the cut
+        self.assertTrue(rec.blackboard_capped)
+        rec.evict(cut + rec.keep_us)
         self.assertFalse(rec.blackboard_capped)
 
         rec = Recording(keep_us=1_000)              # only the window ever binds

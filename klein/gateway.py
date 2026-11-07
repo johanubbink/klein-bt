@@ -51,6 +51,7 @@ from .groot2_protocol import (REQ_BLACKBOARD, REQ_FULLTREE, REQ_STATUS, parse_bl
 from .btlog import BtlogError, load_btlog, read_btlog
 from .layout import parse_layout
 from .recorder import Recorder
+from .recording import BlackboardDiff
 from .robot_link import REQUEST_TIMEOUT, RobotLink, RobotRefused, RobotTimeout
 from .routes import STATIC_DIR, Routes, is_loopback
 from .streaming import Streamer
@@ -73,6 +74,45 @@ def tree_changed(loaded, uuid):
     the gateway believing a tree it never loaded.
     """
     return uuid is not None and loaded is not None and uuid != loaded
+
+
+class LiveBlackboard:
+    """One tree's live blackboard, as dashboards are sent it: a full snapshot
+    first (and to each dashboard that connects), then each poll's changes."""
+
+    def __init__(self):
+        self._diff = BlackboardDiff()
+        self.values = {}            # board -> {key: value}, each value as received
+        self.t = None               # the newest sample, klein's clock in µs
+
+    def update(self, t, boards):
+        """Take one ``{board: {key: value}}`` sample. Returns the frame to
+        broadcast: the snapshot for the first, else a ``blackboard_changes``
+        frame, sent even when empty: its ``t`` moves the dashboard's panel on,
+        so a mark ages out while no value changes (without a recording)."""
+        first = self.t is None
+        self.t = t
+        new_boards = [board for board in boards if board not in self.values]
+        for board in new_boards:
+            self.values[board] = {}
+        changes, removed = [], []
+        for board, key, text in self._diff.update(boards):
+            if text is None:
+                del self.values[board][key]
+                removed.append([board, key])
+            else:
+                self.values[board][key] = boards[board][key]
+                changes.append([board, key, boards[board][key]])
+        if first:
+            return self.snapshot()
+        return json.dumps({"type": "blackboard_changes", "t": t, "changes": changes,
+                           "removed": removed, "boards": new_boards})
+
+    def snapshot(self):
+        """Every current value as one ``blackboard`` frame, or None before the first sample."""
+        if self.t is None:
+            return None
+        return json.dumps({"type": "blackboard", "t": self.t, "data": self.values})
 
 
 class KleinGateway:
@@ -104,7 +144,7 @@ class KleinGateway:
         # brings a different XML. The segments recorded under it share it.
         self.tree = None
         self._tree_uuid = None              # publisher UUID the loaded tree came from
-        self._blackboard_json = None        # the last blackboard frame, for late-joining clients
+        self._blackboard = LiveBlackboard()  # the loaded tree's values, for broadcasts and joiners
         self.clients = set()
 
         # Robot reachability, mirrored to dashboards so a blank canvas is never
@@ -129,6 +169,16 @@ class KleinGateway:
     def _layout_frame(self):
         """The ``layout`` frame: the loaded tree, unrolled."""
         return json.dumps({"type": "layout", "data": self.tree.tree})
+
+    def _broadcast_layout(self):
+        """Push the loaded tree's layout, then its blackboard snapshot if a
+        poll already took one. That poll may have broadcast it during the
+        handshake's arm, before this layout, which clears a dashboard's values:
+        the changes that follow would then have nothing to apply to."""
+        self._broadcast(self._layout_frame())
+        snapshot = self._blackboard.snapshot()
+        if snapshot is not None:
+            self._broadcast(snapshot)
 
     def _broadcast(self, frame):
         """Send one pre-serialized frame to every dashboard, if any is watching."""
@@ -238,7 +288,7 @@ class KleinGateway:
                 if changed:
                     generation = self.tree.generation + 1 if self.tree else 1
                     self.tree = parse_layout(xml_str, generation)
-                    self._blackboard_json = None    # the previous tree's values are stale
+                    self._blackboard = LiveBlackboard()  # the previous tree's values are stale
                 # Read from this same reply, so the loaded tree and the UUID the
                 # status poller compares against are always one publisher's. After
                 # parse_layout, so a parse failure leaves the previous UUID in
@@ -265,7 +315,7 @@ class KleinGateway:
                         "fall back to the BehaviorTree.CPP builtin table.",
                         file=sys.stderr,
                     )
-                self._broadcast(self._layout_frame())   # dashboards that connected while we waited
+                self._broadcast_layout()    # dashboards that connected while we waited
                 return True
             except (RobotTimeout, RobotRefused, ValueError, ET.ParseError) as exc:
                 if isinstance(exc, RobotTimeout):
@@ -312,21 +362,15 @@ class KleinGateway:
             try:
                 # Captured before the await: a swap can land while this request
                 # is in flight, and a reply for the retired tree must be dropped —
-                # caching it would undo the _blackboard_json = None that
-                # fetch_layout just wrote, leaving the next dashboard to connect
+                # adding it would fill the fresh LiveBlackboard that
+                # fetch_layout just made, leaving the next dashboard to connect
                 # a list of dead boards that no later frame would ever clear.
                 tree = self.tree
                 reply = await self.link.request(REQ_BLACKBOARD, tree.blackboard_request)
                 received = time.monotonic()
                 if self.tree is tree:
-                    boards = parse_blackboard(reply.body, tree.blackboard_names)
-                    # Broadcast even when empty, so the dashboard can say so.
-                    # t (klein's clock, µs) times the changes without a recording.
-                    self._blackboard_json = json.dumps(
-                        {"type": "blackboard", "t": int(received * 1e6), "data": boards}
-                    )
-                    self._broadcast(self._blackboard_json)
-                    self.recorder.add_blackboard(received, boards)
+                    self._take_blackboard(parse_blackboard(reply.body, tree.blackboard_names),
+                                          received)
             except RobotRefused:
                 pass                        # an error reply: no values this time
             except RobotTimeout:
@@ -335,6 +379,16 @@ class KleinGateway:
             except Exception as exc:  # never let the poller die
                 print(f"[klein] blackboard poller error: {exc}", file=sys.stderr)
             await asyncio.sleep(BLACKBOARD_POLL_INTERVAL)
+
+    def _take_blackboard(self, boards, received):
+        """One poll's ``{board: {key: value}}``, received at klein's clock
+        ``received``: to the dashboards (the first a snapshot even when
+        empty, so the dashboard can say so; then only changes, timed in µs
+        of klein's clock) and to the recording."""
+        frame = self._blackboard.update(int(received * 1e6), boards)
+        if frame is not None:
+            self._broadcast(frame)
+        self.recorder.add_blackboard(received, boards)
 
     def _broadcast_status(self, buffer):
         """Decode one status buffer and push it to dashboards."""
@@ -407,9 +461,11 @@ class KleinGateway:
             if self.tree is not None:
                 await websocket.send(self._layout_frame())
             # else: fetch_layout() will broadcast the layout to us once it loads.
-            if self._blackboard_json is not None:
-                # Don't make a new dashboard wait half a second for its first values.
-                await websocket.send(self._blackboard_json)
+            snapshot = self._blackboard.snapshot()
+            if snapshot is not None:
+                # Don't make a new dashboard wait for its first values: later
+                # polls send it only their changes.
+                await websocket.send(snapshot)
             await websocket.send(self._robot_state_json)  # tell it the robot's reachability now
             async for _message in websocket:
                 pass  # clients are receive-only

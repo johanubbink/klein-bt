@@ -148,6 +148,7 @@ class FakeRobot:
         self.status = b"".join(status_record(uid, 0) for uid in range(1, 14))
         self.supports_recording = True
         self.drains = []                # one [(offset_us, uid, status)] per `t`
+        self.blackboard = None          # B's {board: {key: value}}; None: a fresh value each B
         self.timeouts = set()
         self.refusals = set()
         self.on_request = {}
@@ -179,7 +180,8 @@ class FakeRobot:
         if request_type == REQ_STATUS:
             return self.status
         if request_type == REQ_BLACKBOARD:
-            return msgpack.packb({"MainTree": {"n": n}})
+            return msgpack.packb({"MainTree": {"n": n}} if self.blackboard is None
+                                 else self.blackboard)
         if request_type == REQ_TOGGLE_RECORDING:
             assert payload == b"start", payload
             if not self.supports_recording:

@@ -394,6 +394,10 @@ class TreeSwapTest(unittest.IsolatedAsyncioTestCase):
         # tree's values (stale), nor the notice: unlike every other frame it
         # is never cached, since it reports something the client didn't see.
         self.assertEqual(await self.connect(), ["layout", "robot"])
+        # The new tree's first values are a full snapshot again, not changes
+        # against the old tree's.
+        await self.run_poller(limit=1, poller=self.gw.blackboard_poller)
+        self.assertEqual(self.types(), ["blackboard"])
 
     async def test_the_same_tree_again_is_absorbed_quietly(self):
         # A robot restart yields a fresh publisher UUID even when the tree is
@@ -433,6 +437,44 @@ class TreeSwapTest(unittest.IsolatedAsyncioTestCase):
         await self.run_poller(limit=1)
         self.assertEqual(self.seq(), "S")               # and then the next S, not a T
         self.assertEqual(self.frames, [])
+
+    async def test_blackboard_is_sent_as_a_snapshot_then_only_its_changes(self):
+        # A fresh dashboard needs every value; after that only what a poll
+        # changed goes out, and a poll that changed nothing sends an empty
+        # changes frame: its t still moves the panel on, so marks age out.
+        # Values are compared field order aside, and sent as the robot sent them.
+        door = "DoorClosed::7"
+        no_change = {"type": "blackboard_changes", "boards": [], "removed": [], "changes": []}
+        polls = [
+            ("first poll, empty: a snapshot", {},
+             {"type": "blackboard", "data": {}}),
+            ("unchanged: an empty changes frame", {}, no_change),
+            ("a new board and keys", {"MainTree": {"a": 1, "b": {"y": 1, "x": 2}}},
+             {"type": "blackboard_changes", "boards": ["MainTree"], "removed": [],
+              "changes": [["MainTree", "a", 1], ["MainTree", "b", {"y": 1, "x": 2}]]}),
+            ("same values, fields reordered: no change",
+             {"MainTree": {"b": {"x": 2, "y": 1}, "a": 1}}, no_change),
+            ("a value changed, a key removed, an empty board",
+             {"MainTree": {"a": 2}, door: {}},
+             {"type": "blackboard_changes", "boards": [door], "removed": [["MainTree", "b"]],
+              "changes": [["MainTree", "a", 2]]}),
+            ("a board missing from the sample keeps its keys", {door: {}}, no_change),
+        ]
+        for label, sample, frame in polls:
+            with self.subTest(label):
+                self.robot.blackboard = sample
+                await self.run_poller(limit=1, poller=self.gw.blackboard_poller)
+                self.assertEqual(len(self.frames), 1, self.frames)
+                self.assertIsInstance(self.frames[0].pop("t"), int)
+                self.assertEqual(self.frames[0], frame)
+        # A dashboard connecting now gets every current value at once.
+        socket = FakeSocket()
+        socket.closed.set()
+        with contextlib.redirect_stdout(io.StringIO()):
+            await self.gw.ws_handler(socket)
+        snapshot = json.loads(socket.sent[1])
+        self.assertEqual(snapshot["type"], "blackboard")
+        self.assertEqual(snapshot["data"], {"MainTree": {"a": 2}, door: {}})
 
     async def test_blackboard_values_from_a_retired_tree_are_dropped(self):
         # The blackboard poller does not detect swaps, so one can land while its
@@ -498,8 +540,12 @@ class RecordingGatewayTest(unittest.IsolatedAsyncioTestCase):
         track = gw.recording.segments[0].blackboard
         self.assertIsNotNone(track.t_start)
         self.assertEqual(set(track.at(gw.recording.head + 10**6)), {"MainTree"})
-        # Each frame is stamped with klein's clock when its reply arrived.
-        ts = [f["t"] for f in frames if f["type"] == "blackboard"]
+        # A snapshot, then a changes frame per poll (the value changes every
+        # time), each stamped with klein's clock when its reply arrived.
+        bb = [f for f in frames if f["type"].startswith("blackboard")]
+        self.assertEqual({f["type"] for f in bb[1:]}, {"blackboard_changes"})
+        self.assertEqual(bb[0]["type"], "blackboard")
+        ts = [f["t"] for f in bb]
         self.assertGreater(len(ts), 1)
         self.assertEqual(ts, sorted(ts))
         self.assertLess(ts[0], ts[-1])
@@ -512,6 +558,10 @@ class RecordingGatewayTest(unittest.IsolatedAsyncioTestCase):
         def swap(r):
             r.uuid, r.xml = UUID_B, MODEL_LESS_XML
             r.status = b"".join(status_record(uid, 0) for uid in range(1, 6))
+            # The blackboard poller's first reply for the new tree lands while
+            # the handshake arms, before the layout goes out.
+            r.on_letter["r"] = lambda _r: gw._take_blackboard({"MainTree": {"x": 1}},
+                                                              time.monotonic())
         robot.on_request[6] = swap
         robot.drains = [[(5, 1, 1)], [(7, 3, 1)]]
         gw.clients = {object()}
@@ -524,7 +574,12 @@ class RecordingGatewayTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rec.gaps, [])
         self.assertEqual(second.head_seq, 1)            # drained after the swap
         # Recording adds no frame types for the browser.
-        self.assertEqual({f["type"] for f in frames}, {"robot", "status", "layout", "notice"})
+        types = [f["type"] for f in frames]
+        self.assertEqual(set(types), {"robot", "status", "layout", "notice", "blackboard"})
+        # The layout clears a dashboard's values, so the snapshot sent before
+        # it is sent again after: else later changes have nothing to apply to.
+        swapped = len(types) - 1 - types[::-1].index("layout")
+        self.assertEqual(types[swapped - 1:swapped + 2], ["blackboard", "layout", "blackboard"])
 
     async def test_an_outage_ends_the_segment_and_the_resume_reuses_the_layout(self):
         robot = FakeRobot(limit=12)

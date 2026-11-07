@@ -85,6 +85,11 @@ _PAUSED_MARKS = """() => {
            fading: document.querySelectorAll('#bb-panel .bb-fresh').length };
 }"""
 
+# Hand the page a blackboard_changes frame as if klein sent it, just after the
+# newest sample.
+_CHANGES = """(f) => onGatewayMessage({type: 'blackboard_changes', t: frameTrack.tLast + 1,
+                                     changes: [], removed: [], boards: [], ...f})"""
+
 # Click a card through d3's handler and read the cards back in the same task, so
 # no status frame or animation frame can repaint in between.
 _CLICK = ("const g = [...document.querySelectorAll('#canvas g.node')]"
@@ -132,6 +137,19 @@ class RenderTest(DashboardCase):
             self.assertTrue(any(state_matches(snap["displayed"], f, allow_was_vs_idle=False)
                                 for f in frames), (snap["displayed"], frames))
             time.sleep(random.uniform(0.02, 0.1))
+
+    def _changes_frames_patch_the_panel(self, b):
+        """Live values come as a snapshot, then only changes: a changes frame
+        sets a key and removes it again; one that reaches the page before
+        this tree's snapshot (none yet after a layout) is ignored."""
+        row = "() => bbGroupEls.MainTree.rows.probe?.value.textContent"
+        b.page.evaluate(_CHANGES, {"changes": [["MainTree", "probe", "set by a change"]]})
+        b.page.wait_for_function(f"({row})()?.includes('set by a change')", timeout=5000)
+        b.page.evaluate(_CHANGES, {"removed": [["MainTree", "probe"]]})
+        b.page.wait_for_function(f"({row})() === undefined", timeout=5000)
+        self.assertIsNone(b.page.evaluate(
+            "(f) => { frames.boards = null; (" + _CHANGES + ")(f); return frames.boards; }",
+            {"changes": [["MainTree", "probe", 1]], "boards": ["MainTree"]}))
 
     # -- live parity ---------------------------------------------------- #
     def test_live_parity_with_recording(self):
@@ -217,6 +235,8 @@ class RenderTest(DashboardCase):
                             if key in ("tick", "robot_position") and ms > log[0][0] + 3000]
                     self.assertTrue(late and all("bb-stream" in cls and "bb-fresh" not in cls
                                                  for cls in late), late)
+                    if robot_cls is MockTarget:
+                        self._changes_frames_patch_the_panel(b)
                 if robot_cls is NoRecordingMock:
                     self.assertIn("cannot record", gw.log())
 

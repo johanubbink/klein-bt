@@ -348,7 +348,8 @@ browser over the dashboard's WebSocket (`/ws`), so the browser can keep a full
 mirror of it (see [architecture.md](architecture.md#browser-model)).
 Encoders are in [`klein/streaming.py`](../klein/streaming.py), the decoder in
 [`klein/static/recording.js`](../klein/static/recording.js). These frames go
-alongside `layout`/`status`/`blackboard`/`robot`/`notice` (the frame table in
+alongside `layout`/`status`/`blackboard`/`blackboard_changes`/`robot`/`notice`
+(the frame table in
 [architecture.md](architecture.md#browser-side-one-port)); with
 `--record-buffer 0` none are sent. Dashboards send nothing.
 

@@ -223,6 +223,38 @@ class Segment:
 # --------------------------------------------------------------------------- #
 # Blackboard history
 # --------------------------------------------------------------------------- #
+class BlackboardDiff:
+    """The newest value of every key, to diff whole ``{board: {key: value}}``
+    samples against: the recording's track and the gateway's live frames."""
+
+    def __init__(self):
+        self.current = {}           # board -> {key: json with sorted keys}
+
+    def update(self, boards):
+        """Take one sample. Returns its changes as ``[(board, key, json_or_None)]``:
+        keys set or changed, and (None) keys gone from a board in the sample.
+        A board missing from the sample keeps its keys."""
+        changes = []
+        for board, entries in boards.items():
+            current = self.current.setdefault(board, {})
+            for key, value in entries.items():
+                # Compared with sorted keys, stored as sent: the panel shows
+                # an object's fields in the robot's order.
+                same = json.dumps(value, sort_keys=True)
+                if current.get(key) != same:
+                    current[key] = same
+                    changes.append((board, key, json.dumps(value)))
+            for key in [key for key in current if key not in entries]:
+                del current[key]
+                changes.append((board, key, None))
+        return changes
+
+    def copy(self):
+        copy = BlackboardDiff()
+        copy.current = {board: dict(entries) for board, entries in self.current.items()}
+        return copy
+
+
 class BlackboardTrack:
     """Per-key blackboard changes of one segment.
 
@@ -234,7 +266,7 @@ class BlackboardTrack:
         self.t_start = None         # the first sample, moved up by eviction
         self.nbytes = 0
         self._boards = {}           # board -> time first seen, in tree order
-        self._current = {}          # board -> {key: json} as of the newest sample
+        self._current = BlackboardDiff()    # the values as of the newest sample
         self._ts = {}               # (board, key) -> [ts]
         self._values = {}           # (board, key) -> [json or None]
 
@@ -248,20 +280,9 @@ class BlackboardTrack:
         ``[(board, key, json_or_None)]``."""
         if self.t_start is None:
             self.t_start = t
-        changes = []
-        for board, entries in boards.items():
+        for board in boards:
             self._boards.setdefault(board, t)
-            current = self._current.setdefault(board, {})
-            for key, value in entries.items():
-                # Compared with sorted keys, stored as sent: the panel shows
-                # an object's fields in the robot's order.
-                same = json.dumps(value, sort_keys=True)
-                if current.get(key) != same:
-                    current[key] = same
-                    changes.append((board, key, json.dumps(value)))
-            for key in [key for key in current if key not in entries]:
-                del current[key]
-                changes.append((board, key, None))
+        changes = self._current.update(boards)
         for board, key, text in changes:
             self._ts.setdefault((board, key), []).append(t)
             self._values.setdefault((board, key), []).append(text)
@@ -315,7 +336,7 @@ class BlackboardTrack:
         copy = BlackboardTrack()
         copy.t_start, copy.nbytes = self.t_start, self.nbytes
         copy._boards = dict(self._boards)
-        copy._current = {board: dict(entries) for board, entries in self._current.items()}
+        copy._current = self._current.copy()
         copy._ts = {name: list(times) for name, times in self._ts.items()}
         copy._values = {name: list(values) for name, values in self._values.items()}
         return copy

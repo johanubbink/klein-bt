@@ -725,9 +725,11 @@ def _growing_cases(d=50):
     """``busiestColumn`` (at one column length, as the overview asks it) and
     two windows, asked again as the recording grows: a drain adding to the
     column the last one ended in, then a new segment after a gap. Live, a
-    200 µs window follows the head. Paused, a 30 s one (longer than the
-    recording, so at the head) holds still while a scrub lasts and catches
-    up with the head after the release."""
+    200 µs window follows the head; made 30 s (longer than the recording)
+    and paused, it holds still where the pause left it, pans right up to the
+    head and left down to that pause point, and follows the head again live.
+    Paused from the start, a 30 s one holds still through a scrub, its
+    release and the head moving on."""
     rec, frames, ref = Recording(), [], {"$ref": "grow_rec"}
     Streamer(rec, lambda clients, f: frames.append(f)).subscribe("grow")
     a, b = _layout(1, [1, 2, 3]), _layout(2, [1, 2, 3, 4])
@@ -747,9 +749,18 @@ def _growing_cases(d=50):
                               ("held", "sync", [ref, paused], wide(T0 + 20)),
                               ("held", "hold", [True], wide(T0 + 20))],
         lambda live, paused: [("following", "sync", [ref, live], _window(T0 + 200, 200, True)),
+                              ("following", "set", [T0 + 200, 30_000_000], wide(T0 + 200)),
                               ("held", "sync", [ref, paused], wide(T0 + 20)),
                               ("held", "hold", [False], wide(T0 + 20))],
-        lambda live, paused: [("held", "sync", [ref, paused], wide(T0 + 449))]]
+        lambda live, paused: [("following", "sync", [ref, paused], wide(T0 + 200)),
+                              ("following", "set", [T0 + 300],
+                               _window(T0 + 300, 30_000_000, False)),
+                              ("following", "set", [T0 + 10_000],
+                               _window(T0 + 449, 30_000_000, False)),
+                              ("following", "set", [T0],
+                               _window(T0 + 200, 30_000_000, False)),
+                              ("following", "sync", [ref, live], wide(T0 + 449)),
+                              ("held", "sync", [ref, paused], wide(T0 + 20))]]
     cases = store_cases("grow", frames)
     cases += [{"name": f"grow: a {w} window", "call": "KleinWindow.create", "save": f"grow_{w}"}
               for w in ("following", "held")]

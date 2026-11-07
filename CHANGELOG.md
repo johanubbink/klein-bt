@@ -11,6 +11,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `klein-bt --version`.
 
 ### Changed
+- **The Timeline's playhead can be grabbed anywhere along its line**, not
+  only on the axis: drag it in the lanes to scrub. A drag elsewhere in the
+  lanes still pans, and a click still moves the playhead.
 - **No more `~` on streaming blackboard keys.** A key that changes all the
   time keeps just its steady dim edge, and every row's value gets the width
   the `~` column took.
@@ -19,6 +22,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   poll changed or removed, instead of every value twice a second.
 
 ### Fixed
+- **A paused Timeline holds still.** Paused with a window longer than the
+  recording, the Timeline kept sliding sideways as new records arrived; it
+  now stays where the pause left it (pan right to see the newest records),
+  and follows the head again once you go live.
 - **Blackboard marks clear once a key stops changing.** While recording, a
   key's streaming mark (`~`) stayed until some other key changed; it now
   clears within a few seconds of the blackboard going quiet. An idle panel

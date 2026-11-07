@@ -1413,7 +1413,16 @@ body.viewing-past .status-pill.running { animation: none; }
     margin-left: calc(var(--tl-label) - 1px);
     z-index: 3;
     background: var(--tl-playhead);
-    pointer-events: none;
+    cursor: ew-resize;
+}
+/* The playhead is grabbed anywhere along it: an invisible 8px-wide hit area. */
+#tl-playhead::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: -3px;
+    width: 8px;
 }
 #tl-playhead.live { opacity: 0.6; }
 

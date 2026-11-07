@@ -15,6 +15,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   blackboard once (on connect, and for a new tree), then just the keys each
   poll changed or removed, instead of every value twice a second.
 
+### Fixed
+- **Blackboard marks clear once a key stops changing.** While recording, a
+  key's streaming mark (`~`) stayed until some other key changed; it now
+  clears within a few seconds of the blackboard going quiet. An idle panel
+  no longer redraws twice a second.
+
 ## [0.8.1] - 2026-11-07
 
 ### Added

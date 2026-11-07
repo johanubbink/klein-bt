@@ -604,6 +604,22 @@ def _row_mark_cases():
             for what, args, want in table]
 
 
+def _marks_age_out_cases():
+    """``marksAgeOut``: a tick repaints the panel only while its last paint
+    left a mark that can age out, at most once per sample of time shown."""
+    t = 10 * SEC
+    marked = {"t": t, "marked": True}
+    table = [
+        ("a mark, a sample later: repaint", marked, t + 500_000, True),
+        ("a mark, under a sample later: wait", marked, t + 499_999, False),
+        ("a mark, the time shown still (paused): never", marked, t, False),
+        ("no mark: an idle panel never repaints", {**marked, "marked": False}, t + 5 * SEC, False),
+        ("no paint yet", None, t, False),
+    ]
+    return [{"name": f"marksAgeOut: {what}", "call": "KleinView.marksAgeOut",
+             "args": [painted, at], "expect": want} for what, painted, at, want in table]
+
+
 # The status frames' samples without a recording: BB_SAMPLES (a change, a
 # removal, a key streaming at 2 Hz), then a new board and a gap of 2.5 s.
 BB_FRAMES = BB_SAMPLES + [
@@ -655,9 +671,10 @@ def bb_change_vectors():
     """Whole and after an eviction that cuts between Main/k's removal and
     its return and keeps Sub/goal's set value as the base (not a change);
     each row's marks (``KleinView.rowMarks``) at every time, against the
-    Model, and behaviour by behaviour."""
+    Model, and behaviour by behaviour; and when a tick repaints them
+    (``KleinView.marksAgeOut``)."""
     cases = (_bb_change_cases("bb") + _bb_change_cases("bb_evicted", evict_before=5.2)
-             + bb_frame_vectors() + _row_mark_cases())
+             + bb_frame_vectors() + _row_mark_cases() + _marks_age_out_cases())
     return {"modules": {"KleinRecording": str(STATIC / "recording.js"),
                         "KleinView": str(STATIC / "view.js")}, "cases": cases}
 

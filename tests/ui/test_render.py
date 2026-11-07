@@ -41,6 +41,27 @@ class NoRecordingMock(MockTarget):
         self.xml = launch(self, argv, pick_port, ready=_ready_robot(self))
 
 
+class QuietBoardMock(MockTarget):
+    """The mock, whose blackboard holds still from ``quiet()`` on (the tree
+    runs on)."""
+
+    def _start(self, pick_port):
+        self.quiet_path = self.workdir / "quiet"
+        code = ("import os; from klein import mock_robot as m\n"
+                "def blackboard(self, frames):\n"
+                f"    if os.path.exists({str(self.quiet_path)!r}):\n"
+                "        self.held = getattr(self, 'held', self.tick)\n"
+                "    return m.build_blackboard_reply(frames, getattr(self, 'held', self.tick),"
+                " self.tree)\n"
+                "m.ScriptedPublisher.blackboard = blackboard; m.main()")
+        argv = lambda port: [PYTHON, "-c", code, "--host", "127.0.0.1", "--port", str(port),
+                             "--truth-log", str(self.truth_path), *self.args]
+        self.xml = launch(self, argv, pick_port, ready=_ready_robot(self))
+
+    def quiet(self):
+        self.quiet_path.touch()
+
+
 # Every card's running animation, and whether the body is frozen.
 _PULSE = """() => ({
   animations: [...document.querySelectorAll('#canvas .node-rect.running')]
@@ -403,6 +424,26 @@ class RenderTest(DashboardCase):
                     "bbGroupEls.MainTree.rows.mission_phase.row.classList.contains('bb-fresh')",
                     timeout=15000)
                 b.screenshot("blackboard", "fresh_live")
+
+    def test_marks_age_out_once_the_blackboard_goes_quiet(self):
+        """Recording or not: once the blackboard stops changing, a key that
+        streamed loses its streaming mark within BB_RECENT and a sample,
+        with no further change to repaint for; then the panel, holding no
+        mark, is not repainted at all."""
+        for source, args in (("recording", []), ("frames", ["--record-buffer", "0"])):
+            with self.subTest(source), QuietBoardMock() as robot, \
+                    GatewayProbe(robot.port, extra_args=args, poll_interval=0.05) as gw:
+                page = self._open(gw, source).page
+                page.wait_for_function(
+                    "bbGroupEls.MainTree?.rows.tick?.row.classList.contains('bb-stream')",
+                    timeout=15000)
+                robot.quiet()
+                page.wait_for_function(
+                    "!document.querySelector('#bb-panel .bb-stream, #bb-panel .bb-mark')",
+                    timeout=6000)
+                paints = page.evaluate("() => boardPaints")
+                page.wait_for_timeout(1500)
+                self.assertEqual(page.evaluate("() => boardPaints"), paints)
 
     def test_a_change_in_a_closed_board_does_not_fade_on_opening(self):
         """A key that changed while its board was closed is old news by the

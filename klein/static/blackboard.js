@@ -247,6 +247,7 @@ function markRow(row, ref, shown, paint) {
     const classes = row.row.classList;
     classes.toggle("bb-stream", marks.streaming);
     classes.toggle("bb-mark", marks.marked);
+    if (marks.streaming) paint.streaming = true;
     if (marks.marked) paint.marked.push(linkRef(ref.board, ref.key));
     if (marks.fire) paint.fired.push(linkRef(ref.board, ref.key));
     if (marks.fade === "restart") restartClass(row.row, "bb-fresh");
@@ -271,14 +272,16 @@ function paintGroup(group, entries, paint) {
 // default frameTrack, the status frames' at their newest), shown in `mode`
 // ("live", "playing", "paused"); `empty`: what the panel says listing no
 // board. Each row's marks are KleinView.rowMarks': a mode or source switch
-// only primes the rows, and the writers pulse alike. See
-// docs/architecture.md, "Rendering".
+// only primes the rows, and the writers pulse alike. Returns whether a row
+// kept a mark that time ends (streaming, or the static mark): see
+// KleinView.marksAgeOut, and docs/architecture.md, "Rendering".
 function render(boards, { track = frameTrack, t = track.tLast, mode = "live",
                          empty = "This robot reports no blackboards." } = {}) {
     const painting = track === frameTrack ? "frames" : mode;
     const rule = { t, mode, primed: painting === bbLastMode, reducedMotion: reducedMotion() };
     bbLastMode = painting;
-    const paint = { track, rule, marked: [], fired: [] };      // marked, fired: for the writer pulse
+    // marked, fired: for the writer pulse; streaming: a row has the mark
+    const paint = { track, rule, marked: [], fired: [], streaming: false };
     const listed = listBoards(boards);
     syncKeyed(bbGroups, [...listed.keys()], bbGroupEls, (name) => createBBGroup(listed.get(name)),
               (group, name) => paintGroup(group, boards[name], paint));
@@ -288,6 +291,7 @@ function render(boards, { track = frameTrack, t = track.tLast, mode = "live",
     // Per-board dashes cover empty boards; this line is for having none at all.
     bbEmpty.hidden = listed.size > 0;
     bbEmpty.textContent = empty;
+    return paint.streaming || paint.marked.length > 0;
 }
 
 // A new tree means new boards: drop the old ones rather than leave values that

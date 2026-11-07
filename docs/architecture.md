@@ -561,8 +561,15 @@ board panel's input is `KleinView.panel`'s:
   on a local track of the `blackboard` snapshots (`addBoards`) and
   `blackboard_changes` frames (`add`), at their newest `t`, kept to the
   last 3 s: timed by the gateway, so a busy browser doesn't change the
-  answer. The board panel is re-rendered only when a
-  blackboard input changed or the cursor moved, not on every `head`.
+  answer. The board panel is re-rendered when a blackboard input changed
+  (an empty `blackboard_changes` frame changes none) or the cursor moved,
+  not on every `head`; besides, a render repaints it while its last paint
+  left a mark that time ends (`bb-stream`, `bb-mark`) and the time shown
+  has moved a sample (0.5 s) past that paint's (`KleinView.marksAgeOut`),
+  so a mark clears once its key goes quiet, live with or without a
+  recording (the `head` frames, or the empty `blackboard_changes` frames,
+  move the time). Paused (the time still), or with no mark, an idle panel
+  is never repainted.
 - **Keys and nodes.** `KleinBlackboard.show` indexes a new tree's
   `bindings` once: `(board, key)` to its writers (`out`, `inout`) and readers (`in`), a node
   that does both counting as a writer. Hovering a key row outlines the

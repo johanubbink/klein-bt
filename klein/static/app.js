@@ -208,6 +208,8 @@ let displaySource = "frames";
 let renderQueued = false;
 let boardsDirty = false;
 let boardsLive = true;          // the board panel last showed live values
+let boardsPainted = null;       // the board panel's last paint: {t, marked} (KleinView.marksAgeOut)
+let boardPaints = 0;            // the board panel's paints so far (for the tests)
 
 function requestRender({ boards = false } = {}) {
     boardsDirty = boardsDirty || boards;
@@ -228,6 +230,7 @@ function showTree(treeData) {
     KleinBlackboard.show(KleinTree.show(treeData));
     KleinTree.draw();
     boardsDirty = true;
+    boardsPainted = null;       // its rows are gone, and their marks with them
 }
 
 // Also run at once on a tab switch (drawer.js): a render already asked for
@@ -261,11 +264,18 @@ function render() {
     if (!KleinTree.hierarchy()) return;
 
     paintStatus(view.status);
+    if (boardsDirty || KleinView.marksAgeOut(boardsPainted, view.t)) paintBoards(view);
+}
 
-    if (!boardsDirty) return;
+// The board panel, for a new input, or for its marks to age out.
+function paintBoards(view) {
     boardsDirty = false;
     const panel = KleinView.panel(view, frames, boardsLive);
-    if (panel) KleinBlackboard.render(panel.boards, panel.opts);
+    if (panel) {
+        boardsPainted = { t: panel.opts.t,
+                          marked: KleinBlackboard.render(panel.boards, panel.opts) };
+        boardPaints++;
+    }
     boardsLive = !view.viewingPast;
 }
 
@@ -342,7 +352,9 @@ function takeBoardChanges({ t, changes, removed, boards }) {
     for (const [board, key] of removed) delete frames.boards[board]?.[key];
     frameTrack.add(t, changes, removed, boards);
     frameTrack.evictBefore(t - KleinRecording.BB_RECENT);
-    requestRender({ boards: true });
+    // An empty frame still moves the panel's time: a render repaints it only
+    // if its marks may have aged out.
+    requestRender({ boards: changes.length + removed.length + boards.length > 0 });
 }
 
 // One JSON frame from klein (docs/protocol.md lists them).
@@ -415,6 +427,7 @@ Object.defineProperties(window, {
     clock: { get: () => clock },
     rootNodeSnapshot: { get: () => KleinTree.hierarchy() },
     renderQueued: { get: () => renderQueued },
+    boardPaints: { get: () => boardPaints },
     recordingSupport: { get: () => recordingSupport, set: (v) => { recordingSupport = v; } },
     render: { get: () => render, set: (f) => { render = f; } },
     requestRender: { get: () => requestRender, set: (f) => { requestRender = f; } },

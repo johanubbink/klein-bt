@@ -2,11 +2,11 @@
 // the source (the recording at the cursor, or the latest frames), the clock
 // after the render's rewrites, the tree, the status and the blackboard
 // panel's input (frame, panel); each blackboard row's change marks
-// (rowMarks); what the Timeline's window shows (timelineWindow); and which
-// row the Log keeps at its top (anchorAfter). app.js, blackboard.js,
-// timeline.js and log.js compute them and then apply them: the painters, the
-// body classes, the banners, the rows' classes, the lanes, the scroll
-// position.
+// (rowMarks) and when they age out (marksAgeOut); what the Timeline's
+// window shows (timelineWindow); and which row the Log keeps at its top
+// (anchorAfter). app.js, blackboard.js, timeline.js and log.js compute them
+// and then apply them: the painters, the body classes, the banners, the
+// rows' classes, the lanes, the scroll position.
 // Pure: no DOM, no d3.
 // See docs/architecture.md, "Rendering" and "The drawer".
 
@@ -171,6 +171,16 @@ function rowMarks({ change, t, mode, primed, reducedMotion, shown, seen }) {
     return { streaming, marked: rule.still && news, fire, fade };
 }
 
+// Whether a render that has no new blackboard input repaints the panel
+// anyway, so its marks age out: `painted` is the last paint, {t, marked}
+// (the time shown, and whether a row kept a mark that time ends: streaming
+// or the static mark), or null before one; `t` is the time shown now. At
+// most once per sample of shown time, so a paused panel (t still) and an
+// idle one (no mark) are never repainted.
+function marksAgeOut(painted, t) {
+    return Boolean(painted && painted.marked) && t - painted.t >= BB_SAMPLE;
+}
+
 // ------------------------------------------------------------------ //
 // The Timeline's window: what its lanes show from t0 to t1
 // ------------------------------------------------------------------ //
@@ -250,4 +260,4 @@ function anchorAfter(rows, topRow) {
     return row && row.seg === topRow.seg && row.seq === topRow.seq ? index : null;
 }
 
-export { frame, panel, rowMarks, timelineWindow, anchorAfter };
+export { frame, panel, rowMarks, marksAgeOut, timelineWindow, anchorAfter };

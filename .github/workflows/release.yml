@@ -1,8 +1,9 @@
 name: Release
 
 # Publishes to PyPI when a version tag (v*) is pushed, via Trusted Publishing
-# (OIDC) — no API token stored. The PyPI publisher is registered for
-# owner johanubbink, repo klein-bt, workflow release.yml, environment pypi.
+# (OIDC) — no API token stored — then creates the GitHub Release. The PyPI
+# publisher is registered for owner johanubbink, repo klein-bt, workflow
+# release.yml, environment pypi.
 
 on:
   push:
@@ -16,11 +17,16 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - name: Check the tag matches klein.__version__
+      - name: Check the tag matches klein.__version__ and CHANGELOG.md
         run: |
           version=$(python -c "import re; print(re.search(r'__version__ = \"(.+?)\"', open('klein/__init__.py').read()).group(1))")
           if [ "v$version" != "$GITHUB_REF_NAME" ]; then
             echo "Tag $GITHUB_REF_NAME does not match __version__ $version" >&2
+            exit 1
+          fi
+          # The GitHub Release's notes come from this section: check it before PyPI.
+          if ! grep -qF "## [$version]" CHANGELOG.md; then
+            echo "No '## [$version]' section in CHANGELOG.md" >&2
             exit 1
           fi
       - name: Build and check distribution
@@ -47,3 +53,30 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    # After PyPI accepted it: the GitHub Release for the tag, titled by the
+    # tag, its notes the matching CHANGELOG section, the same files attached.
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      - name: Release notes from CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v head="## [$version]" 'index($0, head) == 1 {f=1; next} /^## \[/ {f=0} f' \
+            CHANGELOG.md | sed -e '/./,$!d' > notes.md
+          if [ ! -s notes.md ]; then
+            echo "No '## [$version]' section in CHANGELOG.md" >&2
+            exit 1
+          fi
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md

@@ -21,7 +21,8 @@ from tests.harness.oracles import state_in_frames, state_matches
 from tests.harness.model import BB_STREAMING, Model
 from tests.harness.probes import SHOTS as SHOTS_ON, GatewayProbe
 from tests.harness.targets import PYTHON, MockTarget, _ready_robot, launch
-from tests.ui import CARD_EVENT, LINKS, PULSES, DashboardCase, links
+from tests.ui import (CARD_EVENT, FOLD_MARKERS, FOLD_ORDER, LINKS, PULSES, DashboardCase,
+                      fold_summary, links)
 
 
 SHOTS = "render"                    # screenshot group (KLEIN_SHOTS=1)
@@ -324,12 +325,19 @@ class RenderTest(DashboardCase):
             painted = state_matches(snap["state"], snap["displayed"], allow_was_vs_idle=False)
             self.assertTrue(painted, painted.detail)
 
-    def test_unfolded_cards_show_the_displayed_state_at_once(self):
+    def test_a_fold_marks_what_it_hides_and_unfolding_shows_it_at_once(self):
+        """A folded card's marker counts every node it hides and sums up
+        their state (``fold_summary``), repainted as that state changes;
+        unfolded, the card has none and its revealed cards show the
+        displayed state at once. A fold inside a fold counts in the outer
+        one and keeps its own marker. In either layout no marker overlaps a
+        card, and each sits beyond its own card."""
         with self.shared() as gw:
             b = self._open(gw, "recording")
             root = b.page.evaluate("() => rootNodeSnapshot.data.uid")
             folded = b.snapshot(_CLICK.format(uid=root))     # fold: only the root stays
             hidden = {uid: s for uid, s in folded["displayed"].items() if uid != root}
+            self.assert_fold_markers({root: 12}, "root folded")
             # The folded cards leave (their exit transitions end), the root stays.
             b.page.wait_for_function("document.querySelectorAll('#canvas g.node').length <= 1",
                                      timeout=5000)
@@ -343,13 +351,80 @@ class RenderTest(DashboardCase):
                 b.page.wait_for_timeout(100)
             else:
                 self.fail("nothing changed inside the folded tree")
+            self.assert_fold_markers({root: 12}, "a hidden node changed")
             snap = b.snapshot(_CLICK.format(uid=root))       # unfold, read in the same task
-        self.assertEqual(len(snap["nodes"]), 13)
-        painted = state_matches(snap["state"], snap["displayed"], allow_was_vs_idle=False)
-        self.assertTrue(painted, painted.detail)
-        self.assertTrue(any(s != {"status": "IDLE", "from": None}
-                            for uid, s in snap["state"].items() if uid != root),
-                        "every revealed card is plain IDLE: nothing to tell apart")
+            self.assertEqual(len(snap["nodes"]), 13)
+            painted = state_matches(snap["state"], snap["displayed"], allow_was_vs_idle=False)
+            self.assertTrue(painted, painted.detail)
+            self.assertTrue(any(s != {"status": "IDLE", "from": None}
+                                for uid, s in snap["state"].items() if uid != root),
+                            "every revealed card is plain IDLE: nothing to tell apart")
+            b.wait_for_nodes(13)
+            self.assert_fold_markers({}, "unfolded")
+            # A fold inside a fold: the Fallback's 8, then the root's 12.
+            self.fold(4)
+            self.assert_fold_markers({4: 8}, "the Fallback folded")
+            self.fold(root)
+            self.assert_fold_markers({root: 12}, "the root folded over the Fallback")
+            self.fold(root)
+            self.assert_fold_markers({4: 8}, "the root unfolded, the Fallback not")
+            self.fold(4)
+            # Where they sit: two folds, a cousin's card (8) beyond the Inverter's.
+            for uid in (5, 10):
+                self.fold(uid)
+            for layout in ("horizontal", "vertical"):
+                b.page.click(f'input[name="layout"][value="{layout}"] + span')
+                b.wait_for_nodes(1)
+                self.assert_fold_markers({5: 1, 10: 1}, layout, placed=layout)
+                b.screenshot(SHOTS, f"folded_{layout}")
+            for uid in (10, 5):
+                self.fold(uid)
+
+    def assert_fold_markers(self, want, what, placed=None):
+        """Exactly the cards of ``want``'s uids show a fold marker, each
+        hiding as many nodes as it says and matching ``fold_summary`` for
+        the state painted (read in the same task): its count, its ring (the
+        most urgent hidden status, pulsing when RUNNING), its strip (a
+        segment per hidden status, in order, as wide as its share) and its
+        tooltip. ``placed``, the layout ("vertical" or "horizontal") to check
+        the markers' places in: no marker overlaps another card, and each
+        starts at its own card's out-edge (below it vertical, right of it
+        horizontal), centred on it."""
+        got = self.browser.page.evaluate(FOLD_MARKERS)
+        cards = {c["uid"]: c for c in got["cards"]}
+        shown = {uid for uid, c in cards.items() if c["marker"]}
+        self.assertEqual(shown, set(want), what)
+        for uid, count in want.items():
+            with self.subTest(what, card=uid):
+                m, card = cards[uid]["marker"], cards[uid]["card"]
+                oracle = fold_summary(got["layout"], got["displayed"], uid)
+                self.assertEqual(oracle["count"], count)
+                self.assertEqual(m["count"], f"+{count}")
+                self.assertEqual(m["ring"], oracle["worst"])
+                self.assertEqual(m["pulse"] == "klein-pulse", oracle["worst"] == "RUNNING", m["pulse"])
+                self.assertEqual(m["title"], oracle["title"])
+                self.assertEqual([s for s, _w in m["strip"]],
+                                 [s for s in FOLD_ORDER if oracle["counts"][s]])
+                total = sum(w for _s, w in m["strip"])
+                for s, w in m["strip"]:
+                    self.assertAlmostEqual(w / total, oracle["counts"][s] / count, delta=0.01, msg=s)
+                if placed:
+                    self.assert_marker_placed(m["box"], card, cards, uid, placed)
+
+    def assert_marker_placed(self, box, card, cards, uid, layout):
+        """A marker's ``box`` starts at its ``card``'s out-edge in ``layout``,
+        centred on it, and overlaps no other of ``cards``."""
+        vertical = layout == "vertical"
+        edge, start, across = (("bottom", "top", ("left", "right")) if vertical
+                               else ("right", "left", ("top", "bottom")))
+        self.assertAlmostEqual(box[start], card[edge], delta=2, msg="starts at the card's edge")
+        self.assertAlmostEqual(sum(box[k] for k in across) / 2, sum(card[k] for k in across) / 2,
+                               delta=1, msg="centred on the card")
+        for other, c in cards.items():
+            o = c["card"]
+            overlap = (box["left"] < o["right"] and o["left"] < box["right"]
+                       and box["top"] < o["bottom"] and o["top"] < box["bottom"])
+            self.assertFalse(overlap and other != uid, f"overlaps the card of {other}")
 
     # -- blackboard change marks ---------------------------------------- #
     def _watch_marks(self, b, gw, seconds):

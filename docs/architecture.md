@@ -570,6 +570,22 @@ board panel's input is `KleinView.panel`'s:
   recording (the `head` frames, or the empty `blackboard_changes` frames,
   move the time). Paused (the time still), or with no mark, an idle panel
   is never repainted.
+- **The fold marker.** A folded card (its click moves `children` to
+  `_children`) wears a marker so it doesn't read as a leaf: a dashed stub off
+  its out-edge (bottom centre vertical, right centre horizontal) to a pill
+  saying `+N`, N being every node the fold hides, nested folds included.
+  Along the pill's lower inside edge a strip splits into the hidden nodes'
+  displayed statuses (FAILURE, RUNNING, SUCCESS, IDLE, as wide as their
+  shares; a "was X", a node with no entry and SKIPPED count as IDLE), and
+  its ring is the most urgent of them, pulsing like a card while one runs.
+  Its tooltip names the running frontier and the failed nodes inside; a
+  click on it is the card's, so it unfolds. Stub and pill fit the gap
+  between depths (74 px vertical, 60 px horizontal, where a cousin's card
+  can sit straight beyond the folded one), so a marker never covers a card.
+  `foldSummary` walks the fold on every paint, but like the status a marker
+  is rewritten only when what it says changed (`_foldKey`: the counts and
+  the tooltip; null while hidden and on a card that (re)appears). Its place
+  is set on every relayout, since the layout selector moves the same cards.
 - **Keys and nodes.** `KleinBlackboard.show` indexes a new tree's
   `bindings` once: `(board, key)` to its writers (`out`, `inout`) and readers (`in`), a node
   that does both counting as a writer. Hovering a key row outlines the

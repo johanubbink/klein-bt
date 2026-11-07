@@ -78,7 +78,37 @@ _HOVER_SWEEP = """() => {
   return { rows, cards };
 }"""
 
-MAX_PORT_CHARS = 36            # tree.js: (220 px card - 2 * 12 px) / (9 px * 0.6) monospace
+# The fold markers as drawn, with the state and layout they were painted
+# from, in one task: per card its uid, its card's box and, when its marker
+# shows, the marker's box, count, ring status (by colour), whether the ring
+# pulses, the strip's [status, width] segments in order and the tooltip.
+FOLD_MARKERS = """() => {
+  const colour = (v) => { const e = document.createElement('div'); e.style.color = v;
+    document.body.append(e); const c = getComputedStyle(e).color; e.remove(); return c; };
+  const ring = {}, strip = {};
+  for (const s of ['FAILURE', 'RUNNING', 'SUCCESS', 'IDLE']) {
+    strip[colour(`var(--color-${s})`)] = s;
+    ring[colour(s === 'IDLE' ? 'var(--text-muted)' : `var(--color-${s})`)] = s;
+  }
+  const box = (e) => e.getBoundingClientRect().toJSON();
+  const cards = [...document.querySelectorAll('#canvas g.node')].map(g => {
+    const m = g.querySelector('.fold-marker');
+    const shown = m && getComputedStyle(m).display !== 'none';
+    const pill = shown && m.querySelector('.fold-pill');
+    return { uid: g.__data__.data.uid, card: box(g.querySelector('.node-rect')),
+      marker: shown ? { box: box(m), count: m.querySelector('.fold-count').textContent,
+        ring: ring[getComputedStyle(pill).stroke] || getComputedStyle(pill).stroke,
+        pulse: getComputedStyle(pill).animationName,
+        strip: [...m.querySelectorAll('.fold-strip rect')].map(r =>
+          [strip[getComputedStyle(r).fill] || getComputedStyle(r).fill, r.getBoundingClientRect().width]),
+        title: m.querySelector('title').textContent } : null };
+  });
+  return { cards, displayed: kleinDebug().displayed, layout: rootNodeSnapshot.data };
+}"""
+
+FOLD_ORDER = ("FAILURE", "RUNNING", "SUCCESS", "IDLE")    # strip order, most urgent first
+
+MAX_PORT_CHARS = 36           # tree.js: (220 px card - 2 * 12 px) / (9 px * 0.6) monospace
 
 
 def port_line(ports):
@@ -141,6 +171,48 @@ def links(layout, folded=()):
 
     walk(layout, None)
     return roles, keys, tokens, lines
+
+
+def fold_summary(layout, displayed, uid):
+    """What the fold marker on ``uid``'s card says when it is folded, from a
+    layout (``rootNodeSnapshot.data``) and a displayed state (``kleinDebug``'s
+    ``displayed``, keyed by str uid): ``count`` (every node it hides, nested
+    folds included), ``counts`` by status (a "was X" entry, a node with no
+    entry and any other status count as IDLE), ``worst`` (the most urgent
+    status with a count) and the tooltip ``title`` (the running frontier and
+    the failed nodes among the hidden ones, in tree order, four names then
+    "+k more")."""
+    def find(node):
+        if node["uid"] == uid:
+            return node
+        return next(filter(None, map(find, node["children"])), None)
+
+    counts = dict.fromkeys(FOLD_ORDER, 0)
+    running, failed = [], []
+
+    def walk(node):                         # whether node or one below it runs
+        entry = displayed.get(str(node["uid"])) or {}
+        status = entry.get("status") if entry.get("status") in FOLD_ORDER else "IDLE"
+        counts[status] += 1
+        label = node["name"]                # the card's label: its name, else its type (equal then)
+        if status == "FAILURE":
+            failed.append(label)
+        below = any([walk(child) for child in node["children"]])
+        if status == "RUNNING" and not below:
+            running.append(label)
+        return below or status == "RUNNING"
+
+    for child in find(layout)["children"]:
+        walk(child)
+
+    def names(xs):
+        return ", ".join(xs[:4]) + (f" +{len(xs) - 4} more" if len(xs) > 4 else "")
+
+    count = sum(counts.values())
+    parts = [f"{count} hidden node{'' if count == 1 else 's'}"]
+    parts += [f"{what}: {names(xs)}" for what, xs in (("running", running), ("failed", failed)) if xs]
+    return {"count": count, "counts": counts, "title": " · ".join(parts + ["click to unfold"]),
+            "worst": next((s for s in FOLD_ORDER if counts[s]), "IDLE")}
 
 
 class DashboardCase(unittest.TestCase):

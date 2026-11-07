@@ -7,6 +7,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed
+- **Python 3.10 or newer.** Python 3.9 is end-of-life and no longer on
+  GitHub's runners, so klein drops it; 3.14 and 3.15 are now tested.
 - **The Timeline ends at now from the first second.** A window longer than
   the recording (a session's first 30 s, or zoomed out past it) ends at
   now, live or paused, instead of starting at the oldest moment and filling

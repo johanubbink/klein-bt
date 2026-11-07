@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "klein-bt"
 description = "Lightweight CLI telemetry dashboard for BehaviorTree.CPP v4 over ZeroMQ."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Johan Ubbink", email = "25775970+johanubbink@users.noreply.github.com" }]
@@ -25,11 +25,12 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
     "Topic :: Scientific/Engineering :: Visualization",
     "Topic :: Software Development :: Debuggers",
     "Topic :: Software Development :: Embedded Systems",

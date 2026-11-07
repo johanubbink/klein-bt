@@ -14,9 +14,13 @@ Playwright is missing.
 """
 import contextlib
 import random
+import shutil
+import tempfile
 import time
 import unittest
+from pathlib import Path
 
+from klein.routes import STATIC_DIR
 from tests.harness.oracles import state_in_frames, state_matches
 from tests.harness.model import BB_STREAMING, Model
 from tests.harness.probes import SHOTS as SHOTS_ON, GatewayProbe
@@ -676,6 +680,68 @@ class RenderTest(DashboardCase):
                                  sum(e["status"] == "RUNNING" for e in head.values()),
                                  "the RUNNING cards lost their colour")
                 b.screenshot(SHOTS, "disconnected")
+
+    @contextlib.contextmanager
+    def _requests(self, b):
+        """The URLs of the page's WebSockets and of its ``/ping`` requests,
+        across reloads; a marker on ``window`` tells whether it reloaded."""
+        sockets, pings = [], []
+        on_socket = lambda ws: sockets.append(ws.url)
+        on_request = lambda req: req.url.endswith("/ping") and pings.append(req.url)
+        b.page.on("websocket", on_socket)
+        b.page.on("request", on_request)
+        b.page.evaluate("() => { window.__sameDocument = true; }")
+        try:
+            yield sockets, pings
+        finally:
+            b.page.remove_listener("websocket", on_socket)
+            b.page.remove_listener("request", on_request)
+
+    def _stop_until_pinged(self, b, gw, pings):
+        gw.stop()
+        b.page.wait_for_function(
+            "!document.getElementById('conn-dot').classList.contains('online')")
+        # Two pings, 2 s apart: past the old code's 2 s WebSocket retry.
+        deadline = time.monotonic() + 8
+        while len(pings) < 2 and time.monotonic() < deadline:
+            b.page.wait_for_timeout(50)
+        self.assertGreaterEqual(len(pings), 2, "the page stopped retrying")
+
+    def test_while_klein_is_down_the_page_asks_over_http_not_websocket(self):
+        # Firefox delays a WebSocket to an endpoint that failed, for up to a
+        # minute and for new tabs too; only a success clears it. So while
+        # klein is down the page probes /ping, and opens one WebSocket once
+        # klein answers, with the same dashboard: no reload.
+        with MockTarget() as robot, GatewayProbe(robot.port) as gw:
+            b = self._open(gw, "recording")
+            with self._requests(b) as (sockets, pings):
+                self._stop_until_pinged(b, gw, pings)
+                self.assertEqual(sockets, [], "a WebSocket while klein is down")
+                gw.restart()
+                b.wait_connected(timeout=5)
+                self.assertEqual(len(sockets), 1, sockets)
+                self.assertTrue(b.page.evaluate("window.__sameDocument === true"),
+                                "the page reloaded for the same dashboard")
+
+    def test_a_tab_reloads_when_klein_comes_back_with_a_changed_dashboard(self):
+        # Old JS must not talk to a new gateway: klein restarted with changed
+        # static files (an editable install) names another build at /ping,
+        # and the page reloads instead of reconnecting.
+        with MockTarget() as robot, GatewayProbe(robot.port) as gw, \
+                tempfile.TemporaryDirectory() as tmp:
+            changed = Path(tmp) / "static"
+            shutil.copytree(STATIC_DIR, changed)
+            with open(changed / "styles.css", "a") as css:
+                css.write("/* changed */\n")
+            b = self._open(gw, "recording")
+            with self._requests(b) as (sockets, pings):
+                self._stop_until_pinged(b, gw, pings)
+                gw.restart(static_dir=changed)
+                b.page.wait_for_function("window.__sameDocument === undefined", timeout=10000)
+                b.wait_connected(timeout=5)
+                self.assertEqual(len(sockets), 1, "the old page opened a WebSocket")
+                self.assertIn("/* changed */", b.page.evaluate(
+                    "fetch('/styles.css').then(r => r.text())"))
 
 
 if __name__ == "__main__":

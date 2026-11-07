@@ -298,6 +298,28 @@ function changesBoards(type) {
     return type !== "evict" || clock.mode !== "live";
 }
 
+// The build of the dashboard this page is (klein/routes.py fills it in).
+const BUILD = document.querySelector('meta[name="klein-build"]')?.content ?? "";
+
+// Firefox delays a WebSocket to an endpoint that has failed, for up to a
+// minute, and the delay applies to new tabs too; failed HTTP requests don't
+// count. So wait for klein over HTTP before opening a WebSocket again: only
+// an answer of "klein <this page's build>" (not another app on the port, nor
+// a 403). A klein serving another build has a changed dashboard: reload,
+// rather than run this page's old code against it.
+function reconnectWhenUp() {
+    setTimeout(() => fetch("/ping", { cache: "no-store", signal: AbortSignal.timeout(3000) })
+        .then(r => r.ok ? r.text() : "")
+        .then(onPing, reconnectWhenUp), 2000);
+}
+
+function onPing(body) {
+    if (body === `klein ${BUILD}`) connectGatewayPipeline();
+    // Only a page that knows its build: one without it would reload forever.
+    else if (BUILD && body.startsWith("klein ")) location.reload();
+    else reconnectWhenUp();
+}
+
 function connectGatewayPipeline() {
     // Same origin as this page — klein serves HTTP + WebSocket on one port.
     const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -320,7 +342,7 @@ function connectGatewayPipeline() {
         gatewayConnected = false;
         robotConnected = false;     // with klein gone we no longer know the robot
         updateConnectionUI();
-        setTimeout(connectGatewayPipeline, 2000);
+        reconnectWhenUp();
     };
 
     ws.onerror = () => ws.close();

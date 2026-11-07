@@ -10,6 +10,9 @@ which answers it over HTTP, or lets ``/ws`` upgrade:
 * while recording, the recorded tree runs as downloads: ``/log/runs``,
   ``/log.btlog?run=N``, ``/log.bb.jsonl?run=N``, and all of them in one
   ``/log.zip`` (the Save button);
+* ``/ping``, which answers ``klein <build>``: the dashboard asks it before it
+  reconnects its WebSocket, and reloads instead when the build isn't the one
+  its page was served with (see ``app.js``, ``reconnectWhenUp``);
 * with ``--debug``, ``/debug/state``: a read-only dump for the test harness.
 
 Everything else is a 404. The recording and the dump are read through the
@@ -17,6 +20,7 @@ providers the gateway passes in, so the tests serve a bare ``Recording``.
 """
 
 import asyncio
+import hashlib
 import io
 import ipaddress
 import json
@@ -45,6 +49,8 @@ CONTENT_TYPES = {
 }
 RENDER_CRITICAL = ("index.html", "d3.v7.min.js", "app.js")
 INDEX_FALLBACK = b"<!doctype html><h1>klein: index.html missing from package</h1>"
+# index.html's placeholder for the build id, which load() fills in.
+BUILD_META = b'<meta name="klein-build" content="">'
 _TEXT = "text/plain; charset=utf-8"
 
 # The recording's downloads (docs/architecture.md, "Browser side: one port"):
@@ -205,6 +211,17 @@ def _log_response(recording, path, query):
     return _download([(snapshot_run(run), entry)], suffix)
 
 
+def build_id(static):
+    """12 hex digits of a sha256 over the static files (``{path: (body,
+    type)}``), names and bytes in sorted order: the same files give the same
+    id wherever they are."""
+    digest = hashlib.sha256()
+    for path, (body, _) in sorted(static.items()):
+        digest.update(f"{path}\0{len(body)}\0".encode())
+        digest.update(body)
+    return digest.hexdigest()[:12]
+
+
 class Routes:
     """Answers the one port's HTTP requests.
 
@@ -220,13 +237,17 @@ class Routes:
         self._recording = recording
         self._debug_state = debug_state
         self._static = {}                   # request path -> (body, content type), by load()
+        self.build = ""                     # the dashboard's files' hash, by load()
 
     def load(self):
         """Read the static files into memory once, keyed by URL path.
 
         A missing ``index.html`` falls back to a stub page; any other missing
         file just means its route 404s (and, for D3 or app.js, that the
-        dashboard can't render).
+        dashboard can't render). ``build`` names the files: a hash of their
+        names and bytes, filled into index.html's ``klein-build`` meta and
+        answered by ``/ping``, so an open page knows when klein serves another
+        dashboard (the version can't tell: an editable install keeps it).
         """
         try:
             files = sorted(f for f in self.static_dir.iterdir() if f.suffix in CONTENT_TYPES)
@@ -237,6 +258,12 @@ class Routes:
                 self._static[f"/{f.name}"] = (f.read_bytes(), CONTENT_TYPES[f.suffix])
             except OSError:
                 pass                        # unreadable: its route 404s
+        self.build = build_id(self._static)
+        if "/index.html" in self._static:
+            body, kind = self._static["/index.html"]
+            self._static["/index.html"] = (body.replace(
+                BUILD_META, b'<meta name="klein-build" content="%s">' % self.build.encode()),
+                kind)
         for name in RENDER_CRITICAL:
             if f"/{name}" not in self._static:
                 print(f"[klein] warning: {name} not bundled; dashboard will not render.",
@@ -254,6 +281,8 @@ class Routes:
         path = url.path
         if headers is not None and not known_host(headers, self._names):
             return http_response(403, b"unknown Host refused", _TEXT)
+        if path == "/ping":
+            return http_response(200, f"klein {self.build}".encode(), _TEXT)
         if path == "/ws":
             if headers is not None and not same_origin(headers):
                 return http_response(403, b"cross-origin WebSocket refused", _TEXT)

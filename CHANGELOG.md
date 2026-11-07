@@ -13,6 +13,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   what failed in there; click it to unfold.
 - **klein shows its version**: in the startup banner, and with
   `klein-bt --version`.
+- **An open dashboard reloads itself when klein restarts with a changed
+  dashboard**, instead of running its old code against the new klein. klein
+  tells dashboards apart by their files, not the version, so this also works
+  while editing an editable install.
 
 ### Changed
 - **The Timeline's playhead can be grabbed anywhere along its line**, not
@@ -26,6 +30,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   poll changed or removed, instead of every value twice a second.
 
 ### Fixed
+- **In Firefox, a dashboard opened after restarting klein no longer sits at
+  "Connecting to klein gateway…" for up to a minute.** While klein is down
+  the page asks over plain HTTP whether it is back, and only then opens its
+  WebSocket, so Firefox's backoff for failed WebSockets never builds up.
 - **The blackboard size cap can't stall klein.** Two blackboard samples at
   the same microsecond could make eviction loop forever; it now always makes
   progress.

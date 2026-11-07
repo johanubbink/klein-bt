@@ -14,6 +14,7 @@ import contextlib
 import io
 import json
 import re
+import shutil
 import socket
 import sys
 import tempfile
@@ -67,6 +68,20 @@ class StaticAssetsTest(unittest.TestCase):
     def request(self, path):
         return answer(self.routes, path)
 
+    def build(self, routes=None):
+        """The build id ``/ping`` names, and the one in the served page's meta."""
+        ping = answer(routes or self.routes, "/ping").body.decode()
+        self.assertRegex(ping, r"^klein [0-9a-f]{12}$")
+        meta = re.findall(rb'<meta name="klein-build" content="([^"]*)">',
+                          answer(routes or self.routes, "/").body)
+        return ping.removeprefix("klein "), meta
+
+    def served_index(self):
+        """index.html as served: the file with the build filled in."""
+        return (gateway.STATIC_DIR / "index.html").read_bytes().replace(
+            routes.BUILD_META,
+            f'<meta name="klein-build" content="{self.build()[0]}">'.encode())
+
     def test_every_static_file_served(self):
         # Every file in static/ is served at "/<name>" with its type, so a new
         # script needs no list; the package ships the whole directory.
@@ -77,7 +92,8 @@ class StaticAssetsTest(unittest.TestCase):
             with self.subTest(f.name):
                 r = self.request(f"/{f.name}")
                 self.assertEqual(r.status_code, 200)
-                self.assertEqual(r.body, f.read_bytes())
+                self.assertEqual(r.body, self.served_index() if f.name == "index.html"
+                                 else f.read_bytes())
                 self.assertEqual(r.headers["Content-Type"], routes.CONTENT_TYPES[f.suffix])
         pyproject = (Path(__file__).resolve().parents[2] / "pyproject.toml").read_text()
         self.assertIn('klein = ["static/*"]', pyproject)
@@ -99,11 +115,13 @@ class StaticAssetsTest(unittest.TestCase):
 
     def test_routes(self):
         self.assertIsNone(self.request("/ws"))          # deferred to the upgrade
-        index = (gateway.STATIC_DIR / "index.html").read_bytes()
+        index = self.served_index()
+        self.assertNotEqual(index, (gateway.STATIC_DIR / "index.html").read_bytes())
         cases = [
             ("root serves index", "/", 200, index),
             ("query string stripped", "/index.html?v=2", 200, index),
             ("unknown path", "/nope", 404, b"not found"),
+            ("ping", "/ping", 200, f"klein {self.build()[0]}".encode()),
         ]
         for label, path, status, body in cases:
             with self.subTest(label):
@@ -111,6 +129,31 @@ class StaticAssetsTest(unittest.TestCase):
                 self.assertEqual(r.status_code, status)
                 self.assertEqual(r.body, body)
         self.assertEqual(self.request("/").headers["Content-Type"], "text/html; charset=utf-8")
+
+    def test_the_build_names_the_dashboards_files(self):
+        # An open tab reloads when klein comes back serving another build, so
+        # /ping and the page name the same one, and it follows the files'
+        # bytes, not where they are.
+        build, meta = self.build()
+        self.assertEqual(meta, [build.encode()])
+        with tempfile.TemporaryDirectory() as tmp:
+            copy = Path(tmp) / "static"
+            shutil.copytree(gateway.STATIC_DIR, copy)
+            same = Routes(copy)
+            same.load()
+            self.assertEqual(self.build(same)[0], build)
+            css = copy / "styles.css"
+            edits = [("a same-length edit", lambda b: b.swapcase()),
+                     ("an appended line", lambda b: b + b"/* changed */\n")]
+            for label, edit in edits:
+                with self.subTest(label):
+                    css.write_bytes(edit(css.read_bytes()))
+                    changed = Routes(copy)
+                    changed.load()
+                    changed_build, changed_meta = self.build(changed)
+                    self.assertNotEqual(changed_build, build)
+                    self.assertEqual(changed_meta, [changed_build.encode()])
+                    build = changed_build
 
     def test_only_the_dashboards_own_page_is_answered(self):
         # Any page in the browser may open a WebSocket to localhost; only the
@@ -120,7 +163,7 @@ class StaticAssetsTest(unittest.TestCase):
         self.routes = Routes(gateway.STATIC_DIR, names=("robot.local",))
         self.routes.load()
         rebound = {"Host": "rebind.evil:8080", "Origin": "http://rebind.evil:8080"}
-        for path in ("/ws", "/", "/log.zip"):
+        for path in ("/ws", "/", "/log.zip", "/ping"):
             with self.subTest("rebound", path=path):
                 self.assertEqual(self.routes.handle(path, Headers(rebound)).status_code, 403)
         cases = [

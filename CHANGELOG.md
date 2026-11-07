@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-07
+
+### Added
+- **klein is on PyPI.** Install it with `uv tool install klein-bt` or
+  `pipx install klein-bt`; no more installing from GitHub. Releases are
+  published from a `v*` tag by a GitHub Actions workflow.
+
 ### Changed
 - **Python 3.10 or newer.** Python 3.9 is end-of-life and no longer on
   GitHub's runners, so klein drops it; 3.14 and 3.15 are now tested.
@@ -224,7 +231,8 @@ Initial release.
   and the WebSocket.
 - `klein-bt-mock`: a fake Groot2 publisher for running without a robot.
 
-[Unreleased]: https://github.com/johanubbink/klein-bt/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/johanubbink/klein-bt/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/johanubbink/klein-bt/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/johanubbink/klein-bt/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/johanubbink/klein-bt/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/johanubbink/klein-bt/compare/v0.4.0...v0.5.0

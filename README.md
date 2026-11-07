@@ -4,22 +4,22 @@ klein lets you watch a running BehaviorTree.CPP v4 tree live in your browser.
 You see which nodes are running, succeeding or failing, plus the current
 blackboard values, as the robot ticks.
 
-![klein showing a live CrossDoor behavior tree: running nodes pulse, the blackboard updates, and the Timeline below draws each node's RUNNING spans as the robot ticks](assets/klein-demo.gif)
+![klein showing a live CrossDoor behavior tree: running nodes pulse, the blackboard updates, and the Timeline below draws each node's RUNNING spans as the robot ticks](https://raw.githubusercontent.com/johanubbink/klein-bt/main/assets/klein-demo.gif)
 
 ## Install
 
-klein isn't on PyPI yet, so install it from GitHub with
+Install it from [PyPI](https://pypi.org/project/klein-bt/) with
 [uv](https://docs.astral.sh/uv/):
 
 ```bash
-uv tool install git+https://github.com/johanubbink/klein-bt.git
+uv tool install klein-bt
 ```
 
 uv fetches a newer Python by itself if yours is older than the 3.10 klein
 needs. [pipx](https://pipx.pypa.io) works too:
 
 ```bash
-pipx install git+https://github.com/johanubbink/klein-bt.git
+pipx install klein-bt
 ```
 
 This gives you two commands: `klein-bt` (the dashboard) and `klein-bt-mock`
@@ -58,7 +58,7 @@ is up; it keeps retrying until the robot appears.
   changed gets a thin amber edge that fades; a key that changes all the time
   (a position, a counter) gets a steady dim edge and a `~` instead. Click a
   row to expand it, or hover a board to find its node in the tree. See
-  [docs/blackboards.md](docs/blackboards.md) for how values are shown.
+  [docs/blackboards.md](https://github.com/johanubbink/klein-bt/blob/main/docs/blackboards.md) for how values are shown.
 - Hover a key to see which nodes use it: writers outlined solid, readers
   dashed. Hover a node to ring its keys. Writers get a small amber dot when
   the key changes.
@@ -76,7 +76,7 @@ blackboard included, and keeps the last 10 minutes. Change that with
 from Groot2 against the same robot at the same time: each would get only
 some of the transitions.
 
-![klein rewinding a live robot: hover the minimap (its scrollbar shows), drag its box back, click a burst, scrub, step, hover a key, play, back to live](assets/klein-rewind.gif)
+![klein rewinding a live robot: hover the minimap (its scrollbar shows), drag its box back, click a burst, scrub, step, hover a key, play, back to live](https://raw.githubusercontent.com/johanubbink/klein-bt/main/assets/klein-rewind.gif)
 
 The drawer under the tree shows the recording. Its top row works in every
 tab, even with the drawer folded:
@@ -142,16 +142,16 @@ Add `--switch-every 200` to the mock to make it swap between two trees every
 
 ## Docs
 
-- [docs/blackboards.md](docs/blackboards.md): reading blackboard values, and
+- [docs/blackboards.md](https://github.com/johanubbink/klein-bt/blob/main/docs/blackboards.md): reading blackboard values, and
   adding a renderer for your own message types.
-- [docs/architecture.md](docs/architecture.md): how klein works inside.
-- [docs/protocol.md](docs/protocol.md): the Groot2 wire protocol klein speaks.
-- [docs/testing.md](docs/testing.md): the test tiers and harness, and
+- [docs/architecture.md](https://github.com/johanubbink/klein-bt/blob/main/docs/architecture.md): how klein works inside.
+- [docs/protocol.md](https://github.com/johanubbink/klein-bt/blob/main/docs/protocol.md): the Groot2 wire protocol klein speaks.
+- [docs/testing.md](https://github.com/johanubbink/klein-bt/blob/main/docs/testing.md): the test tiers and harness, and
   `scripts/make_gifs.py`, which remakes the GIFs above.
 
 ## License
 
-klein is released under the MIT License — see [LICENSE](LICENSE).
+klein is released under the MIT License — see [LICENSE](https://github.com/johanubbink/klein-bt/blob/main/LICENSE).
 
 The dashboard bundles [D3.js](https://d3js.org) v7 (ISC License, © Mike
 Bostock), served locally so it works on air-gapped networks.

@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-07
+
+### Added
+- **Each release gets a GitHub Release**, made by the release workflow from
+  this changelog, with the wheel and sdist PyPI got.
+
 ### Security
 - **The dashboard is for this machine only, by default.** klein used to
   listen on every interface, so anyone on the network could open the
@@ -243,7 +249,8 @@ Initial release.
   and the WebSocket.
 - `klein-bt-mock`: a fake Groot2 publisher for running without a robot.
 
-[Unreleased]: https://github.com/johanubbink/klein-bt/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/johanubbink/klein-bt/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/johanubbink/klein-bt/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/johanubbink/klein-bt/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/johanubbink/klein-bt/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/johanubbink/klein-bt/compare/v0.5.0...v0.6.0

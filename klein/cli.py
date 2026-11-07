@@ -9,6 +9,7 @@ import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+from . import __version__
 from .btlog import BtlogError
 from .gateway import KleinGateway
 from .recording import Recording
@@ -62,6 +63,7 @@ def main_cli():
         prog="klein-bt",
         description="Live BehaviorTree.CPP v4 telemetry dashboard over ZeroMQ.",
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--robot-host", default="127.0.0.1",
                         help="IP address of the C++ robot node (default: 127.0.0.1)")
     parser.add_argument("--robot-port", type=int, default=1667,
@@ -108,7 +110,7 @@ def main_cli():
         sys.exit(1)
 
     print()
-    print("  klein — BehaviorTree.CPP telemetry")
+    print(f"  klein {__version__} — BehaviorTree.CPP telemetry")
     if args.open is not None:
         print(f"  file      : {args.open} (no robot)")
     else:

@@ -112,7 +112,7 @@ def new_gateway(test, **kwargs):
 
 
 def opened(path):
-    """A gateway showing ``path`` (``--open-log``); its link is never used."""
+    """A gateway showing ``path`` (``open_file``); its link is never used."""
     gw = KleinGateway("127.0.0.1", 1, 0)
     gw.open_file(path)
     return gw

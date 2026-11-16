@@ -23,7 +23,7 @@ Everything the browser needs is served from a **single port** (``--port``):
   and then broadcasts live status and blackboard frames — and, while recording,
   streams the recording itself (``klein/streaming.py``).
 
-``--open-log FILE.btlog`` shows a saved recording instead, with no robot: the file
+``open_file`` shows a saved recording instead, with no robot: the file
 (and its ``FILE.bb.jsonl`` blackboard sidecar, if present) is loaded into the
 same ``Recording`` and streamed exactly as a live one.
 
@@ -138,7 +138,7 @@ class KleinGateway:
         # "Streaming the recording"): backfill on connect, then each change.
         self.streamer = (None if recording is None else
                          Streamer(recording, websockets.broadcast, name=self.robot_endpoint))
-        self._file = None                   # the opened .btlog's name (--open-log): no robot
+        self._file = None                   # the opened .btlog's name: no robot
 
         # The loaded tree (klein/layout.py), replaced only by a handshake that
         # brings a different XML. The segments recorded under it share it.
@@ -200,7 +200,7 @@ class KleinGateway:
     def robot_state(self):
         """The ``robot`` frame's fields: reachability, and what the drawer says
         about recording: the recorder's ``"on"``, ``"off"`` (--record-buffer
-        0) or ``"unsupported"``, or ``"file"`` (``--open-log``: no robot)."""
+        0) or ``"unsupported"``, or ``"file"`` (an opened file: no robot)."""
         return {"connected": self._robot_connected, "detail": self._robot_detail,
                 "recording": "file" if self._file is not None else self.recorder.state}
 
@@ -238,7 +238,7 @@ class KleinGateway:
                 "The robot loaded a new behaviour tree — reloaded.")
 
     def open_file(self, path):
-        """Show a saved ``.btlog`` instead of a robot (``--open-log``). Its
+        """Show a saved ``.btlog`` instead of a robot. Its
         ``<stem>.bb.jsonl`` sidecar beside it, if any, is the blackboard.
 
         Raises ``OSError``, ``BtlogError`` (not a FileLogger2 file),

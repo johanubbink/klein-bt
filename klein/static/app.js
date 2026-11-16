@@ -27,7 +27,7 @@ let gatewayConnected = false;
 let robotConnected = false;
 let robotDetail = "Connecting to klein gateway…";
 // Whether klein records this robot ("on", "off", "unsupported"), or shows an
-// opened file with no robot ("file", klein-bt --open-log), from the `robot`
+// opened file with no robot ("file"), from the `robot`
 // frame: the drawer's chip says so, and an ended segment gives way to the
 // status frames once klein says the robot is back but can't record. Null
 // until klein has said.

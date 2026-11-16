@@ -11,12 +11,14 @@ the mission.
 
 It can also publish a *second*, quite different tree, and swap between the two
 mid-run the way a robot loading a new mission does — a fresh publisher UUID and
-all — so klein's re-handshake can be watched with no C++ in the loop.
+all — so klein's re-handshake can be watched with no C++ in the loop. A third
+tree, ``nested``, holds a subtree inside a subtree, for the dashboard's folds.
 
 Usage:
     klein-bt-mock                       # bind tcp://*:1667 (BT.CPP's default)
     klein-bt-mock --port 1777           # use another port (e.g. real robot on 1667)
     klein-bt-mock --tree patrol         # publish the other tree instead
+    klein-bt-mock --tree nested         # a subtree inside a subtree (for folding)
     klein-bt-mock --switch-every 200    # swap trees every 200 status polls (~20s)
     klein-bt-mock --log-requests        # print which requests a client sends, per second
     klein-bt-mock --truth-log t.log     # write every transition it makes (test ground truth)
@@ -468,6 +470,137 @@ def _patrol_blackboard(tick):
 
 
 # --------------------------------------------------------------------------- #
+# A third tree, with a subtree inside a subtree
+# --------------------------------------------------------------------------- #
+# For folding: a fetch mission whose FetchItem subtree holds a GraspItem
+# subtree, so the dashboard has a fold inside a fold, and at each of the three
+# levels a branch the mission never takes (askForHelp, retrySuction,
+# regripTimeout: the fallbacks' second options, never needed) for the
+# dashboard's V to leave folded. UIDs follow BT.CPP's creation order, the
+# subtree's nodes right after its <SubTree>; a nested instance path is its
+# parent's, "/", then its own (xml_parsing.cpp :: recursivelyCreateSubtree).
+# GraspItem's {object} is FetchItem's {item}, which is the root's
+# {target_item}: a key remapped through two levels.
+NESTED_XML = """<root BTCPP_format="4" main_tree_to_execute="FetchMission">
+  <BehaviorTree ID="FetchMission" _fullpath="FetchMission">
+    <Sequence name="fetch" _uid="1">
+      <BatteryOk name="BatteryOk" min_percent="30" _uid="2"/>
+      <Fallback name="getItem" _uid="3">
+        <SubTree ID="FetchItem" item="{target_item}" _uid="4" _fullpath="FetchItem::4"/>
+        <Sequence name="askForHelp" _uid="17">
+          <CallOperator name="CallOperator" item="{target_item}" _uid="18"/>
+          <WaitForHandover name="WaitForHandover" _uid="19"/>
+        </Sequence>
+      </Fallback>
+      <DeliverItem name="DeliverItem" item="{target_item}" _uid="20"/>
+    </Sequence>
+  </BehaviorTree>
+  <BehaviorTree ID="FetchItem" _fullpath="FetchItem::4">
+    <Sequence name="fetchSteps" _uid="5">
+      <MoveTo name="MoveTo" goal="{shelf}" speed="0.4" _uid="6"/>
+      <Fallback name="pickUp" _uid="7">
+        <SubTree ID="GraspItem" object="{item}" _uid="8" _fullpath="FetchItem::4/GraspItem::8"/>
+        <RetryUntilSuccessful name="retrySuction" num_attempts="2" _uid="15">
+          <SuctionPick name="SuctionPick" object="{item}" _uid="16"/>
+        </RetryUntilSuccessful>
+      </Fallback>
+    </Sequence>
+  </BehaviorTree>
+  <BehaviorTree ID="GraspItem" _fullpath="FetchItem::4/GraspItem::8">
+    <Sequence name="grasp" _uid="9">
+      <OpenGripper name="OpenGripper" _uid="10"/>
+      <Fallback name="grip" _uid="11">
+        <CloseGripper name="CloseGripper" object="{object}" _onSuccess="held:=true" _uid="12"/>
+        <Timeout name="regripTimeout" msec="2000" _uid="13">
+          <Regrip name="Regrip" object="{object}" _uid="14"/>
+        </Timeout>
+      </Fallback>
+    </Sequence>
+  </BehaviorTree>
+  <TreeNodesModel>
+    <Condition ID="BatteryOk">
+      <input_port name="min_percent" type="int">Fail below this charge</input_port>
+    </Condition>
+    <Action ID="CallOperator">
+      <input_port name="item" type="std::string"/>
+    </Action>
+    <Action ID="CloseGripper">
+      <input_port name="object" type="std::string"/>
+    </Action>
+    <Action ID="DeliverItem">
+      <input_port name="item" type="std::string"/>
+    </Action>
+    <Control ID="Fallback"/>
+    <Action ID="MoveTo">
+      <input_port name="goal" type="Position2D"/>
+      <input_port name="speed" type="double"/>
+    </Action>
+    <Action ID="OpenGripper"/>
+    <Action ID="Regrip">
+      <input_port name="object" type="std::string"/>
+    </Action>
+    <Decorator ID="RetryUntilSuccessful">
+      <input_port name="num_attempts" type="int">Repeat a failed child up to N times</input_port>
+    </Decorator>
+    <Control ID="Sequence"/>
+    <Action ID="SuctionPick">
+      <input_port name="object" type="std::string"/>
+    </Action>
+    <Decorator ID="Timeout">
+      <input_port name="msec" type="unsigned int"/>
+    </Decorator>
+    <Action ID="WaitForHandover"/>
+    <SubTree ID="SubTree">
+      <input_port name="_autoremap" type="bool" default="false">If true, all the ports with the same name will be remapped</input_port>
+    </SubTree>
+  </TreeNodesModel>
+</root>"""
+
+NESTED_UIDS = list(range(1, 21))
+NESTED_BLACKBOARD_NAMES = ["FetchMission", "FetchItem::4", "FetchItem::4/GraspItem::8"]
+
+
+def _build_nested_timeline():
+    """One fetch: the battery, the drive to the shelf, the grasp in the
+    nested subtree, the delivery; then the finished tree, and a reset. Every
+    fallback's first option succeeds, so the second ones never run."""
+    frames = []
+    done = {}
+    bb = {"target_item": "mug", "battery_pct": 88, "held": 0}
+
+    def frame(dur, running):
+        frames.append((dur, {**done, **dict.fromkeys(running, RUNNING)}, dict(bb)))
+
+    frame(2, [1, 2])                            # BatteryOk
+    done[2] = SUCCESS
+    frame(5, [1, 3, 4, 5, 6])                   # MoveTo the shelf, in FetchItem
+    done[6] = SUCCESS
+    frame(3, [1, 3, 4, 5, 7, 8, 9, 10])         # OpenGripper, in GraspItem
+    done[10] = SUCCESS
+    frame(4, [1, 3, 4, 5, 7, 8, 9, 11, 12])     # CloseGripper
+    bb["held"] = 1                              # its _onSuccess
+    done.update(dict.fromkeys([12, 11, 9, 8, 7, 5, 4, 3], SUCCESS))
+    frame(5, [1, 20])                           # DeliverItem
+    done.update({20: SUCCESS, 1: SUCCESS})
+    frames.append((8, dict(done), dict(bb)))    # the finished fetch, to be read
+    frames.append((4, {}, {**bb, "held": 0}))   # reset
+    return frames
+
+
+NESTED_TIMELINE = _build_nested_timeline()
+
+
+def _nested_blackboard(tick):
+    """The fetch's three boards: one per subtree instance."""
+    _status, bb = _frame_at(tick, NESTED)
+    return {
+        "FetchMission": {"target_item": bb["target_item"], "battery_pct": bb["battery_pct"]},
+        "FetchItem::4": {"shelf": "shelf_b"},
+        "FetchItem::4/GraspItem::8": {"held": bb["held"]},
+    }
+
+
+# --------------------------------------------------------------------------- #
 # The trees the mock can publish
 # --------------------------------------------------------------------------- #
 MockTree = collections.namedtuple(
@@ -486,14 +619,21 @@ CROSSDOOR = _tree("crossdoor", CROSSDOOR_XML, CROSSDOOR_UIDS,
                   _crossdoor_blackboard)
 PATROL = _tree("patrol", PATROL_XML, PATROL_UIDS,
                PATROL_BLACKBOARD_NAMES, PATROL_TIMELINE, _patrol_blackboard)
+NESTED = _tree("nested", NESTED_XML, NESTED_UIDS,
+               NESTED_BLACKBOARD_NAMES, NESTED_TIMELINE, _nested_blackboard)
 
-TREES = {tree.name: tree for tree in (CROSSDOOR, PATROL)}
+TREES = {tree.name: tree for tree in (CROSSDOOR, PATROL, NESTED)}
+
+
+# What ``--switch-every`` cycles through. The nested tree is published on
+# request only (``--tree nested``); swapping from it goes into the cycle.
+SWAP_CYCLE = (CROSSDOOR, PATROL)
 
 
 def _next_tree(tree):
     """The tree ``--switch-every`` moves to next, cycling."""
-    order = list(TREES.values())
-    return order[(order.index(tree) + 1) % len(order)]
+    i = SWAP_CYCLE.index(tree) if tree in SWAP_CYCLE else -1
+    return SWAP_CYCLE[(i + 1) % len(SWAP_CYCLE)]
 
 
 _STATUS_TABLES = {}     # tree name -> STATUS buffer per tick, over two laps
@@ -874,9 +1014,13 @@ def _parse_args():
     ap.add_argument("--host", default="*", help="bind address (default: * = all interfaces)")
     ap.add_argument("--port", type=int, default=1667, help="ZeroMQ REP port (default: 1667)")
     ap.add_argument("--tree", choices=sorted(TREES), default="crossdoor",
-                    help="which tree to publish (default: crossdoor)")
+                    help="which tree to publish: crossdoor (t11's CrossDoor), "
+                         "patrol (a small second tree, what --switch-every "
+                         "swaps to), or nested (a fetch mission with a "
+                         "subtree inside a subtree, some branches never run). "
+                         "Default: crossdoor")
     ap.add_argument("--switch-every", type=int, default=0, metavar="TICKS",
-                    help="swap to the other tree every N status polls, publishing "
+                    help="swap between crossdoor and patrol every N status polls, publishing "
                          "a fresh tree UUID — what a robot loading a different "
                          "tree looks like on the wire. A tick is one STATUS "
                          "request, so at klein's 10 Hz poll N=200 is about 20s. "
@@ -921,8 +1065,10 @@ def _announce(args, endpoint, publisher):
         print(f"[mock_robot] replaying {args.replay} ({len(publisher.uids)} nodes, "
               f"looping)")
     else:
+        subtrees = len(ET.fromstring(publisher.xml).findall("BehaviorTree//SubTree"))
         print(f"[mock_robot] tree: {publisher.tree.name} "
-              f"({len(publisher.tree.uids)} nodes, 1 subtree)")
+              f"({len(publisher.tree.uids)} nodes, {subtrees} "
+              f"subtree{'' if subtrees == 1 else 's'})")
     if args.switch_every > 0:
         print(f"[mock_robot] swapping trees every {args.switch_every} status polls")
     print(f"[mock_robot] run:  klein-bt --robot-port {args.port}")

@@ -25,8 +25,9 @@ from tests.harness.oracles import state_in_frames, state_matches
 from tests.harness.model import BB_STREAMING, Model
 from tests.harness.probes import SHOTS as SHOTS_ON, GatewayProbe
 from tests.harness.targets import PYTHON, MockTarget, _ready_robot, launch
+from klein import mock_robot
 from tests.ui import (CARD_EVENT, FOLD_MARKERS, FOLD_ORDER, LINKS, PULSES, DashboardCase,
-                      fold_summary, links)
+                      fold_summary, links, opened_folds, visited_folds)
 
 
 SHOTS = "render"                    # screenshot group (KLEIN_SHOTS=1)
@@ -134,10 +135,10 @@ class RenderTest(DashboardCase):
     def shared(self):
         return contextlib.nullcontext(self.gw)
 
-    def _open(self, gw, source):
+    def _open(self, gw, source, unfold=True):
         b = self.browser
         b.base_url = gw.url
-        b.open(wait_nodes=1)
+        b.open(wait_nodes=1, unfold=unfold)
         b.wait_connected()
         b.wait_for_status_frames(3)
         b.page.wait_for_function(
@@ -176,6 +177,17 @@ class RenderTest(DashboardCase):
         self.assertIsNone(b.page.evaluate(
             "(f) => { frames.boards = null; (" + _CHANGES + ")(f); return frames.boards; }",
             {"changes": [["MainTree", "probe", 1]], "boards": ["MainTree"]}))
+
+    def _v_opens_what_the_cards_showed_running(self, b):
+        """Without a recording, V knows what the cards have shown running:
+        once PickLock, inside DoorClosed, has, V opens the way to it."""
+        b.page.wait_for_function("kleinDebug().displayed['11']?.status === 'RUNNING'",
+                                 timeout=15000)
+        self.fold(1)
+        b.page.evaluate("() => document.activeElement?.blur()")     # keys go to the canvas
+        b.page.keyboard.press("v")
+        b.wait_for_nodes(1)
+        self.assertLessEqual({1, 4, 7, 8, 10, 11}, self.card_uids())
 
     # -- live parity ---------------------------------------------------- #
     def test_live_parity_with_recording(self):
@@ -263,6 +275,7 @@ class RenderTest(DashboardCase):
                                                  for cls in late), late)
                     if robot_cls is MockTarget:
                         self._changes_frames_patch_the_panel(b)
+                        self._v_opens_what_the_cards_showed_running(b)
                 if robot_cls is NoRecordingMock:
                     self.assertIn("cannot record", gw.log())
 
@@ -280,6 +293,7 @@ class RenderTest(DashboardCase):
                 "[...document.querySelectorAll('#canvas g.node')].every("
                 f"g => !g.__data__.data.id.startsWith('{first}:'))", timeout=10000)
             b.wait_for_nodes(1)                     # the new cards' enter transitions
+            b.unfold_all()                          # it opens with its subtree folded
             nodes = b.nodes()
             generations = {n["id"].split(":")[0] for n in nodes}
             debug = b.klein_debug()
@@ -383,6 +397,61 @@ class RenderTest(DashboardCase):
                 b.screenshot(SHOTS, f"folded_{layout}")
             for uid in (10, 5):
                 self.fold(uid)
+
+    def test_subtrees_open_folded_and_v_folds_down_to_what_ran(self):
+        """A new tree opens with every SubTree card folded, nested ones too:
+        only the cards outside subtrees and the SubTree cards show, each
+        marking what it hides and standing for it in the hover links (a
+        key remapped through both subtrees included). Unfolding the outer
+        subtree shows the inner one still folded. With the root folded, V
+        gives cards to exactly the nodes that ran and their ancestors, folds
+        every branch nothing ran in (open ones too), and leaves the camera
+        where it is; a second V changes nothing. The recording alone is
+        enough: on a redrawn tree with nothing painted, V does the same."""
+        with MockTarget(tree="nested") as robot, \
+             GatewayProbe(robot.port, poll_interval=0.05) as gw:
+            b = self._open(gw, "recording", unfold=False)
+            b.wait_for_nodes(1)
+            layout = b.page.evaluate("() => rootNodeSnapshot.data")
+            cards, folds = opened_folds(layout)
+            self.assertEqual(folds, {4: 12})
+            self.assertEqual(self.card_uids(), cards)
+            self.assert_fold_markers(folds, "on load")
+            self.assert_hover_links(layout, opened_folded=tuple(folds))
+            self.fold(4)
+            self.assertEqual(self.card_uids(), cards | {5, 6, 7, 8, 15, 16})
+            self.assert_fold_markers({8: 6}, "the outer subtree unfolded")
+            # DeliverItem is the fetch's last step: once it ran, all of it has.
+            b.page.wait_for_function("(e => e.status !== 'IDLE' || e.from)"
+                                     "(kleinDebug().stateAtHead['20'])", timeout=10000)
+            ran = {uid for _d, status, _bb in mock_robot.NESTED.timeline for uid in status}
+            self.fold(layout["uid"])
+            b.page.wait_for_function("() => !svg.node().__transition", timeout=5000)
+            camera = self.camera()
+            cards, folds = visited_folds(layout, ran)
+            self.assertEqual(folds, {13: 1, 15: 1, 17: 2})
+            for press in ("V", "V again"):
+                b.page.keyboard.press("v")
+                b.wait_for_nodes(1)
+                self.assertEqual(self.card_uids(), cards, press)
+                self.assert_fold_markers(folds, press)
+                self.assertEqual(self.camera(), camera, press)
+            # The recording alone: the tree redrawn (what the cards showed
+            # is forgotten) and nothing painted since, V still knows it all.
+            b.page.evaluate("() => { window.__paint = paintStatus; paintStatus = () => {};"
+                            " showTree(rootNodeSnapshot.data); }")
+            b.wait_for_nodes(1)
+            b.page.keyboard.press("v")
+            b.wait_for_nodes(1)
+            self.assertEqual(self.card_uids(), cards, "V from the recording alone")
+            b.page.evaluate("() => { paintStatus = __paint; }")
+
+    def card_uids(self):
+        return {n["uid"] for n in self.browser.nodes()}
+
+    def camera(self):
+        return self.browser.page.evaluate(
+            "() => document.querySelector('#canvas g.draw-group').getAttribute('transform')")
 
     def assert_fold_markers(self, want, what, placed=None):
         """Exactly the cards of ``want``'s uids show a fold marker, each

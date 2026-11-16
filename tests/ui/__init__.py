@@ -215,6 +215,40 @@ def fold_summary(layout, displayed, uid):
             "worst": next((s for s in FOLD_ORDER if counts[s]), "IDLE")}
 
 
+def opened_folds(layout):
+    """What a new tree shows of ``layout``, every SubTree card folded:
+    ``(cards, folds)``, the uids with a card and ``{uid: nodes it hides}``
+    of the folded ones (the outermost SubTree cards)."""
+    return _cards(layout, lambda node: not node.get("is_subtree_root"))
+
+
+def visited_folds(layout, visited):
+    """What V leaves of ``layout`` for the ``visited`` uids, as
+    ``opened_folds``: a node with a visited node below it is open, every
+    other node with children folded."""
+    def ran_below(node):
+        return any(c["uid"] in visited or ran_below(c) for c in node["children"])
+    return _cards(layout, ran_below)
+
+
+def _cards(layout, is_open):
+    cards, folds = set(), {}
+
+    def size(node):
+        return sum(1 + size(c) for c in node["children"])
+
+    def walk(node):
+        cards.add(node["uid"])
+        if node["children"] and not is_open(node):
+            folds[node["uid"]] = size(node)
+            return
+        for child in node["children"]:
+            walk(child)
+
+    walk(layout)
+    return cards, folds
+
+
 class DashboardCase(unittest.TestCase):
     """A robot, a gateway and a browser for the class, set by class options:
 
@@ -224,8 +258,9 @@ class DashboardCase(unittest.TestCase):
       nothing answers on), or ``None`` for no gateway; ``make_gateway`` builds
       it, for a class that needs another one;
     * ``VIEWPORT``, and ``OPEN``: how many cards to wait for on opening the
-      dashboard fresh (``BrowserProbe.open(fresh=True)``), or ``None`` to
-      leave the page blank.
+      dashboard fresh with every fold opened (``BrowserProbe.open(fresh=True,
+      unfold=True)``: a tree opens with its SubTree cards folded), or
+      ``None`` to leave the page blank.
 
     Each one stops with the class, even when ``setUpClass`` fails half way.
     Every test fails on an uncaught page error.
@@ -253,7 +288,7 @@ class DashboardCase(unittest.TestCase):
         cls.browser.start()
         cls.page = cls.browser.page
         if cls.OPEN is not None:
-            cls.browser.open(wait_nodes=cls.OPEN, fresh=True)
+            cls.browser.open(wait_nodes=cls.OPEN, fresh=True, unfold=True)
 
     @classmethod
     def make_gateway(cls, robot_port):
@@ -352,16 +387,17 @@ class DashboardCase(unittest.TestCase):
         self.page.evaluate(CARD_EVENT, [uid, "click"])
         self.browser.wait_for_nodes(1)
 
-    def assert_hover_links(self, layout, folded=()):
+    def assert_hover_links(self, layout, folded=(), opened_folded=()):
         """Hovering every key row outlines exactly the cards ``links`` names
         (writers solid, readers dashed) and accents the key on the port
         lines that show it, every port line's text unchanged; leaving clears
         it all. Hovering every card marks exactly its keys' rows. ``folded``:
         those uids' cards are folded first, in order (and unfolded after,
-        in reverse). One row is hovered by the mouse, the rest by events."""
+        in reverse); ``opened_folded``: those were folded as the tree
+        opened. One row is hovered by the mouse, the rest by events."""
         for uid in folded:
             self.fold(uid)
-        roles, keys, tokens, lines = links(layout, folded)
+        roles, keys, tokens, lines = links(layout, (*opened_folded, *folded))
         self.page.evaluate("() => { for (const g of Object.values(bbGroupEls))"
                            " if (g.body.hidden && !g.toggle.disabled) g.toggle.click(); }")
 

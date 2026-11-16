@@ -1,7 +1,8 @@
 // tree.js — the tree canvas: a card per node of the tree shown (its
 // geometry, labels, glyph and port line) and the links between them, folding
-// and the marker on a folded card summing up what it hides, the displayed
-// state on the cards (paintStatus), and the camera (R, F, a board's locate,
+// and the marker on a folded card summing up what it hides (a new tree opens
+// with its SubTree cards folded; V folds it down to what has run), the
+// displayed state on the cards (paintStatus), and the camera (R, F, a board's locate,
 // the sidebar's nudge) aimed at the part of the window the canvas can be seen
 // in. app.js shows a tree (show, then draw once the
 // blackboard panel has its hierarchy), paints each render's state, and
@@ -15,11 +16,11 @@ import { restartClass, reducedMotion } from "./ui.js";
 
 // app.js: ask for a render (the Timeline lists the fold), bring the
 // Timeline's rows for these nodes into view (F), the sidebar's width (the
-// camera's left edge), and the blackboard panel's marks on the cards: put
+// camera's left edge), the blackboard panel's marks on the cards: put
 // them on whichever cards stand for their nodes after a relayout, and a card
-// hovered or left.
+// hovered or left; and the uids of this tree the recording has seen run (V).
 let hooks = { requestRender() {}, revealRows() {}, sidebarWidth: () => 0, cardsMoved() {},
-              cardHovered() {} };
+              cardHovered() {}, visited: () => [] };
 
 // The tree on the canvas: d3's hierarchy of its layout, folds and all (a
 // folded node keeps its children in _children). Null before the first tree.
@@ -552,6 +553,39 @@ function foldOthers(d) {
     hooks.requestRender();
 }
 
+// A new tree's SubTree cards, folded: every one, nested ones included. Each
+// keeps its own fold, so unfolding one shows the ones inside it still folded.
+function foldSubtrees(root) {
+    KleinRecording.eachNode(root, (node) => {
+        if (node.data.is_subtree_root && node.children) {
+            node._children = node.children;
+            node.children = null;
+        }
+    });
+}
+
+// V: fold the tree down to the part that has run. A node with a visited node
+// below it is unfolded, every other node with children folded: each visited
+// node and its ancestors have cards, and no branch where nothing ran is open.
+// It sets the fold exactly, so a second press changes nothing. Visited is
+// what the recording of this tree has seen run (hooks.visited), and what the
+// cards have shown running since the tree was drawn (without a recording).
+function showVisited() {
+    const visited = new Set([...hooks.visited(), ...shownRun]);
+    // Whether node, or a node below it, was visited.
+    (function walk(node) {
+        const kids = node.children || node._children;
+        if (!kids) return visited.has(node.data.uid);
+        let below = false;
+        for (const child of kids) below = walk(child) || below;
+        node.children = below ? kids : null;
+        node._children = below ? null : kids;
+        return below || visited.has(node.data.uid);
+    })(rootNodeSnapshot);
+    updateTreeLayout(rootNodeSnapshot);
+    hooks.requestRender();
+}
+
 // The hierarchy node with this layout id, folded away or not.
 function nodeById(id) {
     let found = null;
@@ -584,15 +618,18 @@ function diagonalCurve({ source, target }) {
 // ------------------------------------------------------------------ //
 // A new tree
 // ------------------------------------------------------------------ //
-// A new tree: its hierarchy, with no state shown on it yet. Returned for the
-// blackboard panel (KleinBlackboard.show); draw() then puts it on the canvas.
+// A new tree: its hierarchy, its SubTree cards folded, with no state shown
+// on it yet. Returned for the blackboard panel (KleinBlackboard.show); draw()
+// then puts it on the canvas.
 function show(treeData) {
     rootNodeSnapshot = d3.hierarchy(treeData);
     rootNodeSnapshot.x0 = 0;
     rootNodeSnapshot.y0 = 0;
     tagSubtreeDepth(rootNodeSnapshot);
+    foldSubtrees(rootNodeSnapshot);
     lastStatusMap = {};      // its uids indexed the tree we just dropped
     lastActiveStatusMap = {};
+    shownRun = new Set();
     return rootNodeSnapshot;
 }
 
@@ -641,11 +678,17 @@ let lastStatusMap = {};
 // The last displayed state in which anything was RUNNING. Once the tree
 // finishes, this is where the action last was, and so where F goes.
 let lastActiveStatusMap = {};
+// The uids shown in a status other than IDLE (or "was X") since the tree was
+// drawn: what V knows to have run without a recording (--record-buffer 0).
+let shownRun = new Set();
 
 // Show statusMap, {uid: {status, from}}, on the cards: render()'s displayed
 // state, kept for the cards a fold brings back and for F.
 function paintStatus(statusMap) {
     lastStatusMap = statusMap;
+    for (const [uid, { status, from }] of Object.entries(statusMap)) {
+        if (status !== "IDLE" || (from && from !== "IDLE")) shownRun.add(Number(uid));
+    }
     if (Object.values(lastStatusMap).some(entry => entry.status === "RUNNING")) {
         lastActiveStatusMap = lastStatusMap;
     }
@@ -967,7 +1010,8 @@ function pulseNodes(nodes) {
 }
 
 // Camera keys. Two, because there are only two questions the camera is ever
-// asked: where is the action, and where is everything.
+// asked: where is the action, and where is everything. And V, which leaves
+// the camera where it is and folds the tree down to the part that has run.
 //
 // Unmodified presses only — Ctrl/Cmd+R still reloads the page and Cmd+F still
 // opens the browser's find bar. The sidebar and the drawer are full of real
@@ -981,6 +1025,7 @@ window.addEventListener("keydown", (event) => {
     const key = event.key.toLowerCase();
     if (key === "f") focusAction();
     else if (key === "r") resetCamera();
+    else if (key === "v") showVisited();
     else return;
     event.preventDefault();
 });

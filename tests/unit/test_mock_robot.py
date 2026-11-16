@@ -499,6 +499,27 @@ class EveryTreeTest(unittest.TestCase):
         # Swapping *back* is a new publisher too, so it must be a real switch.
         self.assertIs(mock_robot._next_tree(crossdoor), patrol)
         self.assertIs(mock_robot._next_tree(patrol), crossdoor)
+        # The nested tree is published on request only, never swapped to.
+        self.assertIs(mock_robot._next_tree(mock_robot.NESTED), crossdoor)
+
+    def test_the_nested_tree_leaves_a_branch_unrun_at_every_subtree_level(self):
+        # Two levels of <SubTree>, and at each level (the main tree's, the
+        # outer subtree's, the inner one's) a branch with children that no
+        # frame of the mission ever runs: the part of the tree V leaves folded.
+        tree = mock_robot.NESTED
+        ran = {uid for _d, status, _bb in tree.timeline for uid in status}
+        unrun = set()
+
+        def walk(node, level):
+            level += bool(node.get("is_subtree_root"))
+            below = {node["uid"]} | {u for child in node["children"] for u in walk(child, level)}
+            if node["children"] and not below & ran:
+                unrun.add(level)
+            return below
+
+        walk(layout.parse_layout(tree.xml, 1).tree, 0)
+        self.assertEqual(unrun, {0, 1, 2})
+        self.assertEqual(set(tree.uids) - ran, {13, 14, 15, 16, 17, 18, 19})
 
     def test_status_is_the_recorded_transitions_under_the_publisher_rule(self):
         # What a robot would report: every transition the mock records, applied

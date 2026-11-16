@@ -102,7 +102,7 @@ class _SaveCase(DashboardCase):
     @classmethod
     def show(cls, gw, nodes=NODES):
         cls.browser.base_url = gw.url
-        cls.browser.open(wait_nodes=nodes)
+        cls.browser.open(wait_nodes=nodes, unfold=True)
         cls.frame()
 
     @classmethod

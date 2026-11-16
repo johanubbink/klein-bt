@@ -488,6 +488,17 @@ _SUMMARIES = """(boards) => Object.fromEntries(Object.entries(boards).map(([name
     [k, KleinRenderers.renderValue(v).summary]))]))"""
 
 
+# Open every folded node of the tree on the canvas, as its card's click
+# does; how many were folded.
+UNFOLD_ALL = """() => {
+  const folded = [];
+  const root = KleinTree.hierarchy();
+  if (root) KleinRecording.eachNode(root, d => { if (d._children) folded.push(d); });
+  for (const d of folded) KleinTree.toggleFold(d);
+  return folded.length;
+}"""
+
+
 def label_to_state(label):
     """A status pill's text as ``{"status", "from"}``: "was SUCCESS" is IDLE-from-SUCCESS."""
     if label and label.startswith("was "):
@@ -556,17 +567,24 @@ class BrowserProbe:
         self.stop()
 
     # -- navigation ------------------------------------------------------ #
-    def open(self, path="/", wait_nodes=1, timeout=10.0, fresh=False):
+    def open(self, path="/", wait_nodes=1, timeout=10.0, fresh=False, unfold=False):
         """Load the dashboard and wait for ``wait_nodes`` settled cards (0:
         don't wait). ``fresh`` clears its localStorage first (panel sizes,
-        folds, the drawer tab), so it opens as on a first visit."""
+        the drawer tab), so it opens as on a first visit. A tree opens with
+        its SubTree cards folded; ``unfold`` keeps opening every fold while
+        it waits (``wait_for_nodes``), so ``wait_nodes`` can count every node."""
         if fresh:
             self.page.goto(self.base_url + path)
             self.page.evaluate("() => localStorage.clear()")
         self.page.goto(self.base_url + path)
         if wait_nodes:
-            self.wait_for_nodes(wait_nodes, timeout)
+            self.wait_for_nodes(wait_nodes, timeout, unfold=unfold)
         return self
+
+    def unfold_all(self):
+        """Open every fold on the canvas (each folded card's click), and
+        wait for the cards to settle."""
+        self.wait_for_nodes(1, unfold=True)
 
     def next_frame(self):
         """Wait until the page has painted its next frame."""
@@ -591,12 +609,15 @@ class BrowserProbe:
         self.console.clear()
         return errors
 
-    def wait_for_nodes(self, count=1, timeout=10.0):
+    def wait_for_nodes(self, count=1, timeout=10.0, unfold=False):
         """Wait until at least ``count`` node cards exist and have settled: no
         card or link has a d3 transition left (d3 deletes ``__transition``
-        from an element when its last one ends; the enter ones run 250 ms)."""
+        from an element when its last one ends; the enter ones run 250 ms).
+        ``unfold``: and no fold left, opening each one it finds on the way
+        (a tree drawn while it waits, a swap say, opens folded)."""
         self.page.wait_for_function(
-            f"document.querySelectorAll('#canvas g.node').length >= {int(count)}"
+            (f"({UNFOLD_ALL})() === 0 && " if unfold else "")
+            + f"document.querySelectorAll('#canvas g.node').length >= {int(count)}"
             " && ![...document.querySelectorAll('#canvas g.node, #canvas path.link')]"
             ".some(el => el.__transition)",
             timeout=timeout * 1000)

@@ -93,7 +93,7 @@ class _PanelsCase(DashboardCase):
         b = self.browser
         b.base_url = self.gw.url
         b.page.set_viewport_size({"width": WIDTH, "height": HEIGHT})
-        b.open(wait_nodes=13, fresh=True)
+        b.open(wait_nodes=13, fresh=True, unfold=True)
         b.wait_connected()
         self.settle()
 
@@ -225,7 +225,7 @@ class PanelsTest(_PanelsCase):
             with self.subTest(panel):
                 self.fresh()
                 self.drag_to(panel, p["kept"])
-                b.open(wait_nodes=13)
+                b.open(wait_nodes=13, unfold=True)
                 self.assert_size(panel, p["kept"], "after a reload")
 
                 b.page.locator(p["handle"]).dblclick()
@@ -240,7 +240,7 @@ class PanelsTest(_PanelsCase):
                     self.assertFalse(b.page.is_visible("#bb-panel"))
                     self.assertEqual(b.page.get_attribute(p["button"], "aria-label"),
                                      "Expand panel")
-                b.open(wait_nodes=13)
+                b.open(wait_nodes=13, unfold=True)
                 self.assertTrue(self.geometry()["collapsed"][panel], "collapsed after a reload")
                 self.assert_size(panel, p["collapsed"])
                 b.page.locator(p["handle"]).dblclick()
@@ -260,7 +260,7 @@ class PanelsTest(_PanelsCase):
                 self.drag_to(panel, p["dragged"])           # opens it at the dragged size
                 self.assertFalse(self.geometry()["collapsed"][panel])
                 self.assert_size(panel, p["dragged"])
-                b.open(wait_nodes=13)
+                b.open(wait_nodes=13, unfold=True)
                 self.assert_size(panel, p["dragged"], "the dragged size after a reload")
 
     def test_storage_that_throws_leaves_the_default_panels(self):
@@ -271,7 +271,8 @@ class PanelsTest(_PanelsCase):
             page.add_init_script("Object.defineProperty(window, 'localStorage',"
                                  " { get() { throw new Error('storage blocked'); } });")
             page.goto(self.gw.url)
-            page.wait_for_function("document.querySelectorAll('#canvas g.node').length === 13")
+            # CrossDoor as it opens, DoorClosed folded.
+            page.wait_for_function("document.querySelectorAll('#canvas g.node').length === 8")
             for panel, p in PANELS.items():
                 with self.subTest(panel):
                     size = (f"() => document.getElementById('{panel}')"
@@ -319,11 +320,22 @@ class CameraTest(_PanelsCase):
 
     def test_r_and_f_frame_the_space_the_panels_leave(self):
         b = self.browser
-        with self.subTest("F focuses the frontier, R goes back"):
+        with self.subTest("a load fits the tree as R does"):
+            b.open(wait_nodes=8)                            # DoorClosed folded, as it opens
+            self.settle()
             loaded = b.page.evaluate(_TRANSFORM)
-            g = self.geometry()                             # as loaded: the same fit as R
+            b.key("r")
+            self.settle()
+            self.assertEqual(b.page.evaluate(_TRANSFORM), loaded)
+        # Every card, and R to fit them all.
+        b.unfold_all()
+        b.key("r")
+        self.settle()
+        with self.subTest("F focuses the frontier, R goes back"):
+            fitted = b.page.evaluate(_TRANSFORM)
+            g = self.geometry()
             self.assertEqual(len(g["cards"]), 13)
-            self.assert_visible(g, [c["uid"] for c in g["cards"]], "on load")
+            self.assert_visible(g, [c["uid"] for c in g["cards"]], "after R")
             frontier = self.press_f()
             self.assertTrue(frontier)
             focused = b.page.evaluate(
@@ -332,11 +344,11 @@ class CameraTest(_PanelsCase):
                 ".map(g => g.__data__.data.uid)")
             self.assertEqual(sorted(focused), sorted(frontier))
             self.settle()
-            self.assertNotEqual(b.page.evaluate(_TRANSFORM), loaded)
+            self.assertNotEqual(b.page.evaluate(_TRANSFORM), fitted)
             self.assert_visible(self.geometry(), frontier, "F")
             b.key("r")
             self.settle()
-            self.assertEqual(b.page.evaluate(_TRANSFORM), loaded)
+            self.assertEqual(b.page.evaluate(_TRANSFORM), fitted)
 
         with self.subTest("drawer"):
             self.fresh()
@@ -611,7 +623,7 @@ class ForcedCapTest(DashboardCase):
     def test_caps_show_notes_and_head_bytes_are_post_eviction(self):
         b, gw = self.browser, self.gw
         with gw.watch() as ws:
-            b.open(wait_nodes=13)
+            b.open(wait_nodes=13, unfold=True)
             b.page.wait_for_function(
                 "(() => { const r = recordingStore.recording;"
                 " return r && r.capped.includes('transitions') && r.capped.includes('blackboard'); })()",

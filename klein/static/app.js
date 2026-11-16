@@ -183,11 +183,13 @@ KleinTimeline.connect({
     glyphFor: KleinTree.glyphFor,
 });
 // The canvas asks for a render after a fold, scrolls the Timeline on F, keeps
-// the camera right of the sidebar, and tells the blackboard panel when its
-// cards move or are hovered (the panel's outlines and pulses are on them).
+// the camera right of the sidebar, tells the blackboard panel when its
+// cards move or are hovered (the panel's outlines and pulses are on them),
+// and asks what the drawn tree has run in the recording (V).
 KleinTree.connect({
     requestRender: () => requestRender(), revealRows: KleinTimeline.revealRows, sidebarWidth,
     cardsMoved: KleinBlackboard.cardsMoved, cardHovered: KleinBlackboard.linkCardRows,
+    visited: () => visitedInRecording(),
 });
 
 // The latest frames, for when there is no recording to show: the layout and
@@ -210,6 +212,15 @@ let boardsDirty = false;
 let boardsLive = true;          // the board panel last showed live values
 let boardsPainted = null;       // the board panel's last paint: {t, marked} (KleinView.marksAgeOut)
 let boardPaints = 0;            // the board panel's paints so far (for the tests)
+
+// The uids the drawn tree has run in the recording, at any moment kept: its
+// segments are those whose layout is the drawn tree (an equal root id is the
+// same tree, see drawnTreeId), all of one layout id.
+function visitedInRecording() {
+    const rec = shownRecording();
+    const seg = rec?.segments.find((s) => s.layout.id === drawnTreeId);
+    return seg ? KleinRecording.visitedUids(rec, seg.layoutId) : [];
+}
 
 function requestRender({ boards = false } = {}) {
     boardsDirty = boardsDirty || boards;

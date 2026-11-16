@@ -703,6 +703,54 @@ def _tree_run_cases(name, rec):
              "args": [{"$ref": f"{name}_rec"}], "expect": Model(dump(rec)).runs()}]
 
 
+def _visited_cases(name, rec):
+    """``visitedUids`` per tree in the recording (and one it never ran): the
+    uids its kept segments ever hold in a status other than IDLE, from the
+    state at each one's first kept seq and every kept record. A "was X" is
+    a node that ran; a plain IDLE, or an IDLE record, is not."""
+    def visited(generation):
+        out = set()
+        for s in rec.segments:
+            if s.layout.generation != generation:
+                continue
+            out.update(uid for uid, v in enumerate(s.state_at_seq(s.start_seq))
+                       if v not in (0, 10))
+            out.update(uid for _q, _t, uid, status in s.iter_records(s.start_seq, s.head_seq)
+                       if status != 0)
+        return sorted(out)
+
+    generations = sorted({s.layout.generation for s in rec.segments})
+    return [{"name": f"{name}: visitedUids of tree {g}", "call": "KleinRecording.visitedUids",
+             "args": [{"$ref": f"{name}_rec"}, g], "expect": visited(g)}
+            for g in [*generations, max(generations) + 1]]
+
+
+def _visited_scenario():
+    """``visitedUids`` where it tells nodes apart: a tree run twice around
+    a swap. In its first segment uid 2 starts "was SUCCESS" (it ran), uid 3
+    starts at the 10 + IDLE a publisher writes for an IDLE on an idle node
+    (it never ran), uid 1 runs and idles, uid 4 is SKIPPED, uid 5 only gets
+    an IDLE; the other tree runs uid 6; and the tree's second segment runs
+    uid 6, which its first never did."""
+    a, b = _layout(1, [1, 2, 3, 4, 5, 6]), _layout(2, [1, 2, 6])
+    rec = Recording(keep_us=10**9)
+    frames = []
+    Streamer(rec, lambda clients, f: frames.append(f)).subscribe("x")
+    t = T0
+    for tree, baseline, records in ((a, [0, 0, 12, 10, 0, 0, 0], [(1, 1), (1, 0), (4, 4), (5, 0)]),
+                                    (b, [0] * 7, [(6, 1)]),
+                                    (a, [0] * 7, [(6, 3)])):
+        rec.begin_segment(tree, t, bytearray(baseline))
+        rec.append([(t + i, uid, status) for i, (uid, status) in enumerate(records)])
+        t += 100
+        rec.advance_head(t)
+    cases = store_cases("visited", frames)
+    want = {1: [1, 2, 4, 6], 2: [6], 3: []}
+    return cases + [{"name": f"visited: visitedUids of tree {g}", "call": "KleinRecording.visitedUids",
+                     "args": [{"$ref": "visited_rec"}, g], "expect": uids}
+                    for g, uids in want.items()]
+
+
 def _count_cases(name, rec):
     """``countIn`` between neighbouring edges at every 7th record time, a µs
     either side, each segment's begin and past both ends, and over wider
@@ -995,6 +1043,8 @@ def vectors():
         cases = (_store_cases("live", live, rec) + _store_cases("late", late, rec)
                  + _cursor_cases("live", rec) + _cursor_cases("late", rec)
                  + _tree_run_cases("live", rec) + _tree_run_cases("late", rec)
+                 + _visited_cases("live", rec) + _visited_cases("late", rec)
+                 + _visited_scenario()
                  + _count_cases("live", rec) + _count_cases("late", rec)
                  + _window_cases("live", rec) + _growing_cases())
     return {"modules": {"KleinRecording": str(STATIC / "recording.js"),

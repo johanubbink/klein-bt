@@ -187,6 +187,22 @@ class PortsTest(unittest.TestCase):
                 # (Blackboard::getEntry).
                 6: [("msec", "in", "VisitWaypoints::3", "dwell_msec")],
             }),
+            "nested (mock)": (mock_robot.NESTED.xml, {
+                # Remapped twice: GraspItem's {object} is FetchItem's {item},
+                # which is the root's {target_item}, so the reads land there.
+                4: [("item", "in", "FetchMission", "target_item")],
+                # Not remapped: FetchItem's own board.
+                6: [("goal", "in", "FetchItem::4", "shelf")],
+                8: [("object", "in", "FetchMission", "target_item")],
+                # The hook writes a key GraspItem doesn't remap: its own board,
+                # named by the nested instance path (recursivelyCreateSubtree).
+                12: [("object", "in", "FetchMission", "target_item"),
+                     ("_onSuccess", "out", "FetchItem::4/GraspItem::8", "held")],
+                14: [("object", "in", "FetchMission", "target_item")],
+                16: [("object", "in", "FetchMission", "target_item")],
+                18: [("item", "in", "FetchMission", "target_item")],
+                20: [("item", "in", "FetchMission", "target_item")],
+            }),
             "t11 (real FULLTREE)": (btlog.read_btlog(t11).xml, {
                 2: [("code", "out", "MainTree", "door_open")],
                 3: [("pos", "out", "MainTree", "pos_2D"),

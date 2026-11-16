@@ -700,6 +700,23 @@ function treeRuns(rec) {
     return runs;
 }
 
+// The uids that ran (held any status but IDLE) in the kept recording of the
+// tree with this layout id, over every kept segment of it, whatever the
+// cursor shows: the canvas's V. Each segment's state at its head says so on
+// its own, so neither its keyframes nor its records need a scan: the
+// publisher's rule never takes a node that ran back to plain IDLE (it is
+// "IDLE after X", 10 + X), and 10 + IDLE is a node idled while idle.
+function visitedUids(rec, layoutId) {
+    const out = new Set();
+    for (const seg of rec ? rec.segments : []) {
+        if (seg.layoutId !== layoutId) continue;
+        seg.state.forEach((value, uid) => {
+            if (value !== IDLE && value !== IDLE_TRANSITION + IDLE) out.add(uid);
+        });
+    }
+    return out;
+}
+
 // The gaps that overlap [t0, t1].
 function gapsIn(rec, t0, t1) {
     return rec.gaps.filter((g) => g.tTo >= t0 && g.tFrom <= t1);
@@ -803,5 +820,5 @@ export {
     decodeState, stateAtSeq, seqAtTime, stateAt, timeAtSeq, recordsRange, intervals,
     bbAt, bbChange, BB_RECENT, describe, logRows, intervalsAll, timelineMarks,
     timelineSections, historyDropped, gapsIn, treeName, eachNode, sameTree, treeRuns,
-    countIn, busiestColumn, createStore, createTrack,
+    visitedUids, countIn, busiestColumn, createStore, createTrack,
 };

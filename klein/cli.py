@@ -83,25 +83,25 @@ def main_cli():
                              "open (default: 10m)")
     parser.add_argument("--debug", action="store_true",
                         help="serve a read-only JSON dump of the recording at /debug/state")
-    parser.add_argument("--open", metavar="FILE.btlog", type=Path,
+    parser.add_argument("--open-log", metavar="FILE.btlog", type=Path,
                         help="show a saved FileLogger2 recording (and its FILE.bb.jsonl "
                              "blackboard, if present) instead of a robot")
     args = parser.parse_args()
 
     recording = None
-    if args.open is None and args.record_buffer:
+    if args.open_log is None and args.record_buffer:
         # Size caps are Recording's defaults: 200 MiB in all, 64 MiB of it blackboard.
         recording = Recording(keep_us=args.record_buffer)
     gateway = KleinGateway(args.robot_host, args.robot_port, args.port,
                            recording=recording, debug=args.debug, host=args.host)
-    if args.open is not None:
+    if args.open_log is not None:
         try:
-            trailing = gateway.open_file(args.open)
+            trailing = gateway.open_file(args.open_log)
         except (OSError, BtlogError, ET.ParseError, ValueError) as exc:
-            print(f"[klein] cannot open {args.open}: {exc}", file=sys.stderr)
+            print(f"[klein] cannot open {args.open_log}: {exc}", file=sys.stderr)
             sys.exit(1)
         if trailing:
-            print(f"[klein] {args.open}: ignored a partial last record "
+            print(f"[klein] {args.open_log}: ignored a partial last record "
                   f"({trailing} byte{'s' if trailing > 1 else ''}).")
 
     if not _port_available(args.host, args.port):
@@ -111,8 +111,8 @@ def main_cli():
 
     print()
     print(f"  klein {__version__} — BehaviorTree.CPP telemetry")
-    if args.open is not None:
-        print(f"  file      : {args.open} (no robot)")
+    if args.open_log is not None:
+        print(f"  file      : {args.open_log} (no robot)")
     else:
         print(f"  robot     : tcp://{args.robot_host}:{args.robot_port}")
     print(f"  dashboard : {gateway.url}")

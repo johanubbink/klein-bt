@@ -6,7 +6,7 @@ routes read afterwards:
 
 * with one tree, it offers one tree run, one click gives exactly one download,
   ``klein_<date>_<time>.zip``, and the "Saved …zip" pill names it;
-  ``klein-bt --open`` on the unzipped ``.btlog`` gives the original's states
+  ``klein-bt --open-log`` on the unzipped ``.btlog`` gives the original's states
   and blackboard at 10 moments, and Save works there too;
 * after tree swaps (mock ``--switch-every``), the zip holds one ``.btlog`` per
   tree run (plus its ``.bb.jsonl``), each equal to its route and opening to its
@@ -160,8 +160,8 @@ class _SaveCase(DashboardCase):
         return names, entries, pills
 
     def open_file(self, path):
-        """``klein-bt --open path``, shown in the browser."""
-        gw = GatewayProbe(1, extra_args=["--open", str(path)]).start()
+        """``klein-bt --open-log path``, shown in the browser."""
+        gw = GatewayProbe(1, extra_args=["--open-log", str(path)]).start()
         self.addCleanup(gw.stop)
         self.show(gw, nodes=1)
         self.page.wait_for_function("KleinDrawer.debugRows().count > 0")

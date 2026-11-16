@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **`--open` is now `--open-log`**, to say what it opens. `--open` still
+  works.
+
 ## [0.8.2] - 2026-11-07
 
 ### Added

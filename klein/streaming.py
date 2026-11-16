@@ -155,7 +155,7 @@ def backfill_frames(source, name, recording):
 # --------------------------------------------------------------------------- #
 class Streamer:
     """Streams one recording to subscribed clients through ``send(clients, frame)``.
-    ``source`` is ``"robot"`` or ``"file"`` (``--open``), ``name`` what it shows."""
+    ``source`` is ``"robot"`` or ``"file"`` (``--open-log``), ``name`` what it shows."""
 
     def __init__(self, recording, send, source="robot", name=""):
         self.recording = recording

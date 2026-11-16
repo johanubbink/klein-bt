@@ -208,7 +208,7 @@ class Segment {
 
 class Recording {
     constructor(msg) {
-        this.source = msg.source;           // "robot", or "file" (klein-bt --open)
+        this.source = msg.source;           // "robot", or "file" (klein-bt --open-log)
         this.name = msg.name;
         this.keepUs = msg.keep_us;
         this.segments = [];

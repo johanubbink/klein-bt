@@ -204,7 +204,7 @@ Flags:
 | flag | default | effect |
 | --- | --- | --- |
 | `--record-buffer DURATION` | `10m` | how much recent history to keep (`90s`, `30m`, `1h`). `0` turns recording off: no `r`/`t` on the wire, and the pollers pause without a dashboard |
-| `--open FILE.btlog` | — | show a saved recording instead of a robot; see [Opening a file](#opening-a-file) |
+| `--open-log FILE.btlog` | — | show a saved recording instead of a robot; see [Opening a file](#opening-a-file) |
 | `--debug` | off | for the test harness: serve `GET /debug/state` (404 otherwise), a read-only JSON dump of the recording (segments, runs, gaps, every retained record, the head state, the blackboard history, bytes used) |
 
 The size caps are fixed: 200 MiB for the whole recording, of which the
@@ -212,7 +212,7 @@ blackboard may use at most 64 MiB (`Recording`'s defaults).
 
 ### Opening a file
 
-`klein-bt --open FILE.btlog` shows a FileLogger2 file (Groot2's, a robot's
+`klein-bt --open-log FILE.btlog` shows a FileLogger2 file (Groot2's, a robot's
 own, or one klein saved) with **no robot**: no ZeroMQ request is ever sent,
 and `--robot-*` and `--record-buffer` are ignored. `KleinGateway.open_file`
 reads the file (`read_btlog`), parses its XML with the same `parse_layout` a
@@ -450,7 +450,7 @@ current values and the robot's reachability, then the live stream.
 | `status` | 10 Hz | `{uid: {status, from}}` |
 | `blackboard` | on connect, the first 2 Hz poll of each tree, and after each `layout` broadcast (which clears the dashboard's values) | the full snapshot. `data`: `{board: {key: value}}`, tree order (a board first seen in a later poll goes last); `t`: klein's monotonic clock (µs, not robot time) when the reply arrived, to time changes without a recording |
 | `blackboard_changes` | every later 2 Hz poll (empty when it changed nothing) | `t` as above; `changes` (`[[board, key, value]]`, the value as the robot sent it), `removed` (`[[board, key]]`), `boards` (boards first seen at `t`): the `bb` frame's fields without `seg`. A key is compared with sorted object keys; a board missing from a poll keeps its keys. The browser ignores one that comes before its tree's snapshot (which holds it) |
-| `robot` | on change | `{connected, detail, recording}`; `recording` is `"on"`, `"off"` (`--record-buffer 0`), `"unsupported"` (the robot answered `r` with an error) or `"file"` (`--open`: no robot) |
+| `robot` | on change | `{connected, detail, recording}`; `recording` is `"on"`, `"off"` (`--record-buffer 0`), `"unsupported"` (the robot answered `r` with an error) or `"file"` (`--open-log`: no robot) |
 | `notice` | on a tree swap | `{text}` |
 | `rec`, `segment`, `segment_end`, `gap`, `bb`, `head`, `evict`, `backfill_done`, binary records | backfill on connect, then as the recording changes | the recording; see [protocol.md](protocol.md#streaming-the-recording-klein--dashboard) |
 
@@ -632,7 +632,7 @@ board panel's input is `KleinView.panel`'s:
   and a `--changed` dot at the writers' card corner holds (`mark`) or fades
   once (`fire`, 1.8 s). Streaming keys don't pulse. Only changed cards are
   written.
-- **An opened file** (`klein-bt --open`) is the same recording source, with
+- **An opened file** (`klein-bt --open-log`) is the same recording source, with
   three differences in wording only: "live" is the file's end, so the
   drawer says `● End` there and offers **Go to end** elsewhere (Esc and End
   return to the end too); without a sidecar the board panel says **No

@@ -14,7 +14,7 @@ A record is exactly a GET_TRANSITIONS record, so the packing is shared with
 
 ``export_run`` and ``export_blackboard`` save one tree run of a ``Recording``
 (docs/protocol.md, "Saving a recording"); ``load_btlog`` turns a file and its
-sidecar back into one (``klein-bt --open``, docs/protocol.md, "Opening a file").
+sidecar back into one (``klein-bt --open-log``, docs/protocol.md, "Opening a file").
 """
 
 import collections

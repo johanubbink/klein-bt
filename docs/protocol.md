@@ -262,7 +262,7 @@ a partial last record; readers ignore those bytes.
 
 klein reads and writes these in [`klein/btlog.py`](../klein/btlog.py)
 (`read_btlog`, `write_btlog`), which the mock's `--replay` and `klein-bt
---open` use too.
+--open-log` use too.
 
 ### Saving a recording
 
@@ -316,7 +316,7 @@ The gateway serves both files, and all runs in one `.zip`, as downloads; see
 
 ### Opening a file
 
-`klein-bt --open FILE.btlog` reads a file back (`load_btlog(log, layout,
+`klein-bt --open-log FILE.btlog` reads a file back (`load_btlog(log, layout,
 boards, sidecar)` in [`klein/btlog.py`](../klein/btlog.py)) into the same
 `Recording` the gateway records into
 ([architecture.md](architecture.md#opening-a-file)):
@@ -338,7 +338,7 @@ boards, sidecar)` in [`klein/btlog.py`](../klein/btlog.py)) into the same
   `xml_len` past the end, XML with no usable `<BehaviorTree>`, a record whose
   uid the tree doesn't have, or a sidecar that isn't JSON lines with a header
   and `t`/`board`/`key` fields.
-- `--open` doesn't read a `.zip`; unzip it first. Each `.btlog` and its
+- `--open-log` doesn't read a `.zip`; unzip it first. Each `.btlog` and its
   `.bb.jsonl` share a stem, so the sidecar is found.
 
 ## Streaming the recording (klein ↔ dashboard)
@@ -353,7 +353,7 @@ alongside `layout`/`status`/`blackboard`/`blackboard_changes`/`robot`/`notice`
 [architecture.md](architecture.md#browser-side-one-port)); with
 `--record-buffer 0` none are sent. Dashboards send nothing.
 
-A gateway streams one recording: the robot's, or with `--open` the file's.
+A gateway streams one recording: the robot's, or with `--open-log` the file's.
 
 **Order.** When a dashboard connects, klein sends it a **backfill**, the whole
 retained recording as the same messages the live stream uses: `rec`, every
@@ -376,7 +376,7 @@ records into, and one told `"unsupported"` has the end of the last one.
 
 | type | when | fields |
 | --- | --- | --- |
-| `rec` | first frame of a backfill | `source` (`"robot"`, or `"file"` with `--open`), `name` (the robot endpoint, or the file's name), `keep_us` |
+| `rec` | first frame of a backfill | `source` (`"robot"`, or `"file"` with `--open-log`), `name` (the robot endpoint, or the file's name), `keep_us` |
 | `segment` | a segment begins (arm, swap, resume, re-arm) | `seg`, `layout_id`, `t_begin`, `max_uid`, `uids`, `start_seq`, `state` (the state at `start_seq` as STATUS bytes, `max_uid + 1` of them: the baseline for a new segment), and `layout`, the same tree the `layout` frame carries, **left out when the previous segment has the same layout** (the browser then shares that one's) |
 | `segment_end` | the segment ends | `seg`, `t_end` |
 | `gap` | an outage or overflow | `t_from`, `t_to`, `kind` (`"outage"`/`"overflow"`) |

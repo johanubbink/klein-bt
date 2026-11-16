@@ -32,12 +32,12 @@ browser dashboard.
   can't record.
 - `klein/routes.py` — the plain-HTTP side of the port: every file in `static/`,
   the `/log*` downloads incl. `/log.zip`, `/debug/state`.
-- `klein/cli.py` — the `klein-bt` CLI (`--record-buffer`, `--open`, …).
+- `klein/cli.py` — the `klein-bt` CLI: its flags and startup banner.
 - `klein/recording.py` — the recording model: segments, 1024-record chunks with
   keyframes, `state_at`, blackboard track, tree runs, eviction (named
   policies) and size caps.
 - `klein/btlog.py` — FileLogger2 `.btlog` read/write, per-run export,
-  `.bb.jsonl` blackboard sidecar, `load_btlog` for `--open`.
+  `.bb.jsonl` blackboard sidecar, `load_btlog` for an opened file.
 - `klein/streaming.py` — streams the recording to browsers (backfill, then
   incremental binary record frames).
 - `klein/mock_robot.py` — fake publisher (`klein-bt-mock`) for robot-free runs:

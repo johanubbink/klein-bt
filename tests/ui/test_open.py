@@ -1,4 +1,4 @@
-"""Opening a file: ``klein-bt --open FILE.btlog``.
+"""Opening a file: ``klein-bt --open-log FILE.btlog``.
 
 The gateway runs with no robot on the t11 FileLogger2 fixture, copied next to
 a ``.bb.jsonl`` sidecar (``tests.helpers.t11_sidecar``), and the dashboard is
@@ -104,8 +104,8 @@ class OpenFileTest(DashboardCase):
 
     @classmethod
     def make_gateway(cls, robot_port):
-        # --robot-port names nothing: with --open klein never talks to a robot.
-        return GatewayProbe(robot_port, extra_args=["--open", str(cls.path)])
+        # --robot-port names nothing: with --open-log klein never talks to a robot.
+        return GatewayProbe(robot_port, extra_args=["--open-log", str(cls.path)])
 
     def view(self):
         self.frame()

@@ -103,7 +103,7 @@ function shownTab() {
 // says).
 // The window is the span actually kept, head back to the oldest record: a
 // slow tree keeps up to a chunk beyond --record-buffer, a size cap less.
-// An opened file (klein-bt --open) says so instead, with what it holds.
+// An opened file says so instead, with what it holds.
 // Returns {state: "on" | "off" | "file", text, note}.
 function summary(rec, support) {
     const transitions = rec ? rec.segments.reduce((n, s) => n + s.headSeq - s.startSeq, 0) : 0;

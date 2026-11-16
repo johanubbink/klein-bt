@@ -6,7 +6,7 @@ Pure parsing with no gateway state: ``parse_layout`` turns the XML into a
 ``<BehaviorTree>`` definition (``unroll_tree``), each node's uid, ports and
 blackboard bindings, and the blackboard names to ask the robot for. The
 gateway calls it once per handshake that brings a new XML (and once per
-``--open``) and keeps the result.
+opened file) and keeps the result.
 """
 
 import dataclasses

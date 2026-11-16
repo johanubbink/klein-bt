@@ -227,7 +227,7 @@ class Routes:
 
     ``recording()`` returns the ``Recording`` to serve downloads of, or None
     (``--record-buffer 0``: the ``/log`` routes 404); it is asked on every
-    request, since ``--open`` replaces the gateway's. ``debug_state()``
+    request, since opening a file replaces the gateway's. ``debug_state()``
     returns the ``/debug/state`` dump; None (no ``--debug``) makes it a 404.
     """
 

@@ -1,5 +1,5 @@
 """Unit tests for opening a file: ``klein.btlog.load_btlog``,
-``KleinGateway.open_file`` and ``klein-bt --open``'s errors.
+``KleinGateway.open_file`` and ``klein-bt --open-log``'s errors.
 
 The loaded recording is compared with a brute-force replay of the file by the
 harness's independent reader (``tests/harness/btlog_ref.py``, which shares no
@@ -204,7 +204,7 @@ class DamagedFileTest(ScratchDirTest):
                     path = self.copy(T11, name, content)
                 if sidecar is not None:
                     path.with_suffix(".bb.jsonl").write_bytes(sidecar)
-                code, out, err = self.cli("--open", str(path), "--no-browser")
+                code, out, err = self.cli("--open-log", str(path), "--no-browser")
                 self.assertEqual(code, 1)
                 if whole:
                     self.assertEqual(err, f"[klein] cannot open {path}: {message}\n")
@@ -221,14 +221,14 @@ class DamagedFileTest(ScratchDirTest):
             self.assertEqual(gw.recording.segments[0].head_seq, n - 1)
         with self.subTest("5 bytes"):
             with mock.patch.object(cli, "_port_available", return_value=True):
-                code, out, err = self.cli("--open", str(path), "--no-browser")
+                code, out, err = self.cli("--open-log", str(path), "--no-browser")
             self.assertEqual((code, err), (0, ""))
             self.assertIn("ignored a partial last record (5 bytes)", out)
             self.assertIn(f"file      : {path} (no robot)", out)
         with self.subTest("1 byte"):
             path = self.copy(T11, "cut1.btlog", T11.read_bytes() + b"\x01")
             with mock.patch.object(cli, "_port_available", return_value=True):
-                code, out, err = self.cli("--open", str(path), "--no-browser")
+                code, out, err = self.cli("--open-log", str(path), "--no-browser")
             self.assertIn("ignored a partial last record (1 byte).", out)
 
 

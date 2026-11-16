@@ -32,7 +32,7 @@ klein-bt                                          # robot on 127.0.0.1:1667
 klein-bt --robot-host 10.0.0.5 --robot-port 1667  # robot somewhere else
 klein-bt --port 8080 --no-browser                 # don't open a browser
 klein-bt --host 0.0.0.0                           # let other machines open it
-klein-bt --open run.btlog                         # a saved recording, no robot
+klein-bt --open-log run.btlog                         # a saved recording, no robot
 ```
 
 | Flag              | Default     | Meaning                              |
@@ -43,7 +43,7 @@ klein-bt --open run.btlog                         # a saved recording, no robot
 | `--port`          | `8080`      | port the dashboard is served on      |
 | `--no-browser`    | off         | don't open the browser automatically |
 | `--record-buffer` | `10m`       | how much recent history to record (`90s`, `30m`, `1h`); `0` turns recording off |
-| `--open FILE`     |             | show a saved `.btlog` (and `FILE.bb.jsonl` beside it) instead of a robot |
+| `--open-log FILE` |             | show a saved `.btlog` (and `FILE.bb.jsonl` beside it) instead of a robot |
 
 klein opens `http://localhost:8080` for you. You can start it before the robot
 is up; it keeps retrying until the robot appears.
@@ -121,7 +121,7 @@ Below it are two tabs, a filter and the recording pill:
   downloads one `.zip` with a `.btlog` per tree run (Groot2 opens these)
   and its blackboard in a `.bb.jsonl` beside it.
 
-`klein-bt --open FILE.btlog` shows a saved recording without a robot, in the
+`klein-bt --open-log FILE.btlog` shows a saved recording without a robot, in the
 same Log and Timeline; **Go to end** takes you to its end. Unzip a saved
 `.zip` first; the `.bb.jsonl` beside the file brings its blackboard along.
 

@@ -7,7 +7,7 @@ klein's tests are stdlib `unittest`, in one directory per tier:
 | `tests/unit/` | in-process: the protocol, gateway logic (a stubbed robot), the recording model, `.btlog` files, streaming, the mock (each request through `handle`), the harness's own oracles, and the dashboard's JS models under gjs | pyzmq; gjs for the JS models | CI, ~3 s |
 | `tests/smoke/` | one end-to-end run: the mock and `klein-bt` as processes, from the page and live frames to a downloaded `.btlog` | — | CI, ~2 s |
 | `tests/integration/` | real processes against ground truth: what the gateway records from the mock and from BT.CPP's real `t11`, the wire tap, the mock target | g++ and a BehaviorTree.CPP build for t11 | locally |
-| `tests/ui/` | the dashboard in a real browser: cards, drawer and sidebar, camera, Log, Timeline, eviction, Save and `--open` | Playwright + Chrome (or Playwright's Chromium) | locally |
+| `tests/ui/` | the dashboard in a real browser: cards, drawer and sidebar, camera, Log, Timeline, eviction, Save and opening a file | Playwright + Chrome (or Playwright's Chromium) | locally |
 
 ```bash
 pip install -e '.[dev]'                         # adds playwright (drives installed Chrome)
@@ -287,7 +287,7 @@ python scripts/measure_worst_case.py --parts live --live-rates 500,9000
 
 It repeats the CrossDoor transitions of `groot2_mock.btlog`, retimed to
 `--rate` per second (default 10k/s, the ceiling klein can observe: 1000 per
-drain × 10 drains/s). `file` opens `--minutes` of it with `klein-bt --open`
+drain × 10 drains/s). `file` has klein open `--minutes` of it
 (whose backfill is exactly a live recording's) in Chrome and reports the
 backfill time on load and reload, the JS heap plus ArrayBuffers after a GC
 (the recording's typed arrays live outside the V8 heap), scrub frames on the

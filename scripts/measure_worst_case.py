@@ -10,7 +10,7 @@ to ``--rate`` transitions per second (default 10k/s, the observable ceiling:
 1000 per drain x 10 drains/s).
 
 * ``file``: ``--minutes`` of it (default 10, the default --record-buffer) as a
-  .btlog opened with ``klein-bt --open``, which streams it exactly as a live
+  .btlog opened with ``klein-bt --open-log``, which streams it exactly as a live
   recording's backfill. In Chrome: the backfill time on (re)load, the JS heap
   after it, and scrub frame times with the Timeline at its default 30 s
   window and zoomed out to the whole recording, and the Log at the end of
@@ -140,14 +140,14 @@ def part_file(args, path, n):
     gw = KleinGateway("127.0.0.1", 1, 0)
     t = time.perf_counter()
     gw.open_file(path)
-    print(f"gateway: open_file {time.perf_counter() - t:.1f} s (once, at --open)")
+    print(f"gateway: open_file {time.perf_counter() - t:.1f} s (once, at --open-log)")
     t = time.perf_counter()
     frames = backfill_frames("file", path.name, gw.recording)
     print(f"gateway: backfill frames for one dashboard {time.perf_counter() - t:.2f} s "
           f"(blocks the event loop), {sum(len(f) for f in frames) / 1e6:.0f} MB")
     del gw, frames
 
-    probe = GatewayProbe(1, extra_args=["--open", str(path)]).start(timeout=300)
+    probe = GatewayProbe(1, extra_args=["--open-log", str(path)]).start(timeout=300)
     try:
         with BrowserProbe(probe.url, viewport=(1400, 900)) as b:
             page = b.page
@@ -234,7 +234,7 @@ def part_file(args, path, n):
 
 def part_zip(args, path):
     print("\n== zip")
-    probe = GatewayProbe(1, extra_args=["--open", str(path)]).start(timeout=300)
+    probe = GatewayProbe(1, extra_args=["--open-log", str(path)]).start(timeout=300)
     try:
         lag = []
         stop = threading.Event()

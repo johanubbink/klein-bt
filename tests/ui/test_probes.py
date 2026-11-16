@@ -20,7 +20,7 @@ class BrowserProbeTest(DashboardCase):
     def _open(self, gateway):
         b = self.browser
         b.base_url = gateway.url
-        b.open(wait_nodes=13)
+        b.open(wait_nodes=13, unfold=True)
         b.wait_connected()
         b.wait_for_status_frames(3)
         return b

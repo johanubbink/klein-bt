@@ -6,9 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **V shows what ran**: it folds the tree down to the nodes that have run
+  in the recording (or on screen, without one) and the way to them, folding
+  every branch where nothing ran. The camera stays put.
+- **`klein-bt-mock --tree nested`**: a third mock tree, with a subtree
+  inside a subtree and branches that never run.
+
 ### Changed
 - **`--open` is now `--open-log`**, to say what it opens. `--open` still
   works.
+- **A tree opens with its subtrees folded**, nested ones too: click a
+  SubTree card to open it, and the subtrees inside it are still folded.
 
 ## [0.8.2] - 2026-11-07
 

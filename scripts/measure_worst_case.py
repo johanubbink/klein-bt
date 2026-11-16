@@ -287,7 +287,7 @@ def part_live(args, workdir):
              GatewayProbe(robot.port, debug=True) as gw, \
              BrowserProbe(gw.url, viewport=(1400, 900)) as b:
             page = b.page
-            b.open(wait_nodes=13, fresh=True)
+            b.open(wait_nodes=13, fresh=True, unfold=True)
             # The Timeline's default 30 s window full of records first.
             page.click("#drawer-tab-timeline")
             time.sleep(args.warmup)

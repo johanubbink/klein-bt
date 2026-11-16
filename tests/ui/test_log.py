@@ -734,7 +734,8 @@ class BackToLiveTest(LogView, DashboardCase):
                 self.page.keyboard.press("Escape")
             # Cards = the gateway's state at the browser's head, read painted:
             # a records frame (a new tree's segment, say) lands between paint
-            # and read otherwise.
+            # and read otherwise. Every card: a swapped-in tree opens folded.
+            self.browser.unfold_all()
             v = self.view(painted=True)
             gw = self.gw.require_debug_state()
             last = v["segments"][-1]

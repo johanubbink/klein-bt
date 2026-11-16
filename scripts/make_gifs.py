@@ -40,7 +40,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from tests.harness.probes import _READ_NODES, BrowserProbe, GatewayProbe  # noqa: E402
+from tests.harness.probes import _READ_NODES, UNFOLD_ALL, BrowserProbe, GatewayProbe  # noqa: E402
 from tests.harness.targets import MockTarget              # noqa: E402
 
 ASSETS = REPO_ROOT / "assets"
@@ -120,7 +120,9 @@ class Recorder:
         self.page.goto(wrapper.as_uri())
         self.app = self.page.frame_locator("#app")
         self.frame = self.page.wait_for_selector("#app").content_frame()
-        self.frame.wait_for_function("document.querySelectorAll('#canvas g.node').length >= 13")
+        # Every card: the tree opens with DoorClosed folded.
+        self.frame.wait_for_function(f"({UNFOLD_ALL})() === 0"
+                                     " && document.querySelectorAll('#canvas g.node').length >= 13")
         self.offset = self.page.locator("#app").bounding_box()
         self.mouse = (VIEWPORT[0] * 0.75, VIEWPORT[1] * 0.85)
 

@@ -595,14 +595,32 @@ board panel's input is `KleinView.panel`'s:
   recording (the `head` frames, or the empty `blackboard_changes` frames,
   move the time). Paused (the time still), or with no mark, an idle panel
   is never repainted.
-- **The fold marker.** A folded card (its click moves `children` to
-  `_children`) wears a marker so it doesn't read as a leaf: a dashed stub off
-  its out-edge (bottom centre vertical, right centre horizontal) to a pill
-  saying `+N`, N being every node the fold hides, nested folds included.
-  Along the pill's lower inside edge a strip splits into the hidden nodes'
-  displayed statuses (FAILURE, RUNNING, SUCCESS, IDLE, as wide as their
-  shares; a "was X", a node with no entry and SKIPPED count as IDLE), and
-  its ring is the most urgent of them, pulsing like a card while one runs.
+- **Folds.** A card's click folds it (moves `children` to `_children`) or
+  unfolds it. A new tree opens with every SubTree card folded, nested ones
+  included (`KleinTree.show`), each keeping its own fold: unfolding one shows
+  the ones inside it still folded. A redraw (a reconnect to another tree, a
+  tree swap) folds them again; a same-tree restart doesn't redraw, so it
+  keeps the reader's folds. **V** folds the tree down to the part that has
+  run, in one walk over the hierarchy: a node with a visited node below it is
+  unfolded, every other node with children folded (the root too, when
+  nothing ran). So every visited node and its ancestors have a card, no
+  branch where nothing ran is open (one the reader opened included), a
+  second press changes nothing, and the camera stays. Visited is any status
+  but IDLE (a "was X" too) at any moment kept of this tree, whatever the
+  cursor shows: `KleinRecording.visitedUids(rec, layoutId)` over its kept
+  segments (app.js picks the segments whose layout is the drawn tree; each
+  one's state at its head is enough, since the publisher's rule never
+  returns a node that ran to plain IDLE), joined with every uid the cards
+  have shown running since the tree was drawn (`paintStatus`), so V works
+  without a recording (`--record-buffer 0`) too.
+- **The fold marker.** A folded card wears a marker so it doesn't read as a
+  leaf: a dashed stub off its out-edge (bottom centre vertical, right centre
+  horizontal) to a pill saying `+N`, N being every node the fold hides,
+  nested folds included. Along the pill's lower inside edge a strip splits
+  into the hidden nodes' displayed statuses (FAILURE, RUNNING, SUCCESS,
+  IDLE, as wide as their shares; a "was X", a node with no entry and
+  SKIPPED count as IDLE), and its ring is the most urgent of them, pulsing
+  like a card while one runs.
   Its tooltip names the running frontier and the failed nodes inside; a
   click on it is the card's, so it unfolds. Stub and pill fit the gap
   between depths (74 px vertical, 60 px horizontal, where a cousin's card
@@ -1021,10 +1039,11 @@ sidebar's width (see [The sidebar](#the-sidebar)).
     playing) that leaves the window re-centres the window on it.
   - **F** with the drawer open on the Timeline also scrolls the first row of
     the running frontier into view, under the axis and its section's header.
-- **Keys.** The camera keys ignore presses inside the drawer, as inside the
-  sidebar (F scrolls the Timeline only when pressed outside it). The
-  cursor's keys are a table in transport.js (`KEYS`) behind one guard
-  (`ignored`), each doing what its button does, in either tab and folded:
+- **Keys.** The canvas keys (R, F, and V) ignore presses inside the drawer,
+  as inside the sidebar (F scrolls the Timeline only when pressed outside
+  it). The cursor's keys are a table in transport.js (`KEYS`) behind one
+  guard (`ignored`), each doing what its button does, in either tab and
+  folded:
 
   | Key | Does | Button |
   |---|---|---|
@@ -1086,6 +1105,11 @@ zooms out, never in. With nothing running, `F` frames the frontier of the last
 displayed state that had one, so a finished tree shows where it ended. If
 nothing has run since the tree loaded, `F` does the same as `R`.
 
+`V`, a key beside them that leaves the camera where it is, folds the tree
+down to the part that has run (see Folds, under [Rendering](#rendering)).
+The three share one listener and one guard: unmodified presses, a tree
+shown, not inside the sidebar or the drawer.
+
 The camera flies to its target in 500 ms; with `prefers-reduced-motion:
 reduce` it moves at once.
 
@@ -1095,6 +1119,9 @@ reduce` it moves at once.
 publisher built on the same protocol module. It runs the whole pipeline with no
 C++ involved. It has two different trees and can swap between them
 (`--switch-every`), drawing a fresh UUID each time, so you can test tree swaps.
+A third, `--tree nested` (a fetch mission: FetchItem's subtree holds a
+GraspItem subtree), is never swapped to; it has a fold inside a fold and, at
+each of its three levels, a branch the mission never runs, for V.
 For tests it can also write every transition it makes to a file
 (`--truth-log`) and publish a recorded `.btlog` in real time (`--replay`).
 Its socket loop only receives and sends: `handle(publisher, frames)` answers

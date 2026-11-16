@@ -134,7 +134,9 @@ Groot2 request on its own socket, for driving a target without klein.
   missions and swaps run ~10x faster while request timeouts stay real time.
 - **`BrowserProbe(url)`**: Playwright against the dashboard. `open()`,
   `wait_for_nodes(count)` (that many cards, and no card or link left in a d3
-  transition), `wait_connected()`, `nodes()` (each card's uid from its d3
+  transition; `unfold=True` also opens every fold it meets, since a tree
+  opens with its SubTree cards folded, and `open(unfold=True)` and
+  `unfold_all()` use it), `wait_connected()`, `nodes()` (each card's uid from its d3
   datum, name, pill label, classes, stroke), `state()` (`{uid: {status, from}}`
   as painted), `snapshot()` (cards, the last `status` frame the page received,
   `statusCount`, the connection dot, and `kleinDebug`'s
@@ -154,10 +156,10 @@ Groot2 request on its own socket, for driving a target without klein.
 `tests/ui/__init__.py`'s **`DashboardCase`** is the UI tests' base: class
 options `ROBOT` (`MockTarget` options, or another `ROBOT_CLASS`; `None` for
 none), `GATEWAY` (`GatewayProbe` options, or `make_gateway()`; `None` for
-none), `VIEWPORT` and `OPEN` (cards to wait for on a fresh open; `None`
-leaves the page blank). `setUpClass` starts them with class cleanups, so a
+none), `VIEWPORT` and `OPEN` (cards to wait for on a fresh open, every fold
+opened; `None` leaves the page blank). `setUpClass` starts them with class cleanups, so a
 failing set-up leaks no process, and every test fails on an uncaught page
-error. Its `assert_hover_links(layout, folded=())` hovers every key row and
+error. Its `assert_hover_links(layout, folded=(), opened_folded=())` hovers every key row and
 card and checks the outlines, port-line accents and linked rows against
 `links(layout)`, which reads them from the layout's `bindings` on its own;
 `PULSES` reads the cards' writer pulses.

@@ -61,7 +61,9 @@ you trust, or use an SSH tunnel instead
 - Node colours show status: green is SUCCESS, pulsing amber is RUNNING, red is
   FAILURE, grey is IDLE.
 - Scroll to zoom and drag to pan. Click a node to fold or unfold its children.
+  A tree opens with its subtrees folded.
 - Press `R` to see the whole tree again, or `F` to jump to whatever is running.
+  `V` folds the tree down to the part that has run.
 - Hover a node to see its ports.
 - **Layout** switches between a vertical and a horizontal tree.
 - The **Blackboards** list shows every subtree's values. A value that just
@@ -148,7 +150,8 @@ klein-bt --robot-port 1777       # in another
 ```
 
 Add `--switch-every 200` to the mock to make it swap between two trees every
-20 seconds or so.
+20 seconds or so, or `--tree nested` for a tree with a subtree inside a
+subtree.
 
 ## Docs
 
